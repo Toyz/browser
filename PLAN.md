@@ -4,7 +4,7 @@ A web browser where pages render natively: HTML is turned into GPUI elements ins
 
 **Goal:** a fast, native, good-looking browser for the *document* web (blogs, docs, Wikipedia, HN, forums), with JS that works well enough for common sites, plus graceful degradation everywhere else.
 
-**Non-goals (for now):** canvas, WebGL, iframes, web components / shadow DOM, extensions, full spec compliance, the modern app web (Figma, Google Docs).
+**Non-goals (for now):** WebGL, iframes, extensions, full spec compliance, the modern app web (Figma, Google Docs).
 
 ---
 
@@ -139,10 +139,11 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] DOM read API: `document`, `getElementById`, `querySelector(All)`, `textContent`, `getAttribute`, `children`, `parentNode`
 - [x] DOM write API (the framework subset): `createElement`, `createTextNode`, `appendChild`, `insertBefore`, `removeChild`, `setAttribute`, `classList`, `style.*`, `innerHTML` (setter reuses the `html` crate)
 - [x] Events: `addEventListener`, capture/bubbling, `click` (with `preventDefault` on links and buttons), `preventDefault`
-- [ ] `keydown`/`keyup` from the page
+- [x] `keydown`/`keyup` from the page; mouse events beyond click (`mousedown`/`mousemove`/`wheel`/`dblclick`) with coordinates
 - [x] Changes mark the page dirty → restyle → `cx.notify()`
 - [x] `fetch` / `XMLHttpRequest` with CORS (preflight, credentials, exposed headers), `FormData`, `submit`/`change`/`input` from the page's widgets
-- [ ] `history.pushState` navigation (needed for SPAs)
+- [x] `history.pushState` navigation (needed for SPAs), `popstate`
+- [x] `<canvas>` 2D (recorded, replayed with tiny-skia; no text yet); declarative shadow DOM; the CSSOM (`insertRule`) for CSS-in-JS
 - [x] ES modules, custom elements, shadow DOM (`<slot>`, constructable stylesheets)
 - [x] Streams (`ReadableStream` bodies), `EventSource`, `WebSocket`, `crypto.subtle`, web storage, `document.cookie`
 - [ ] Stub everything else (no-ops / plausible defaults)
@@ -150,8 +151,9 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 **Done when:** a Preact or React todo app works, and a common SPA's first screen renders.
 
 ### Phase 5 — The gnarly bits
-- [ ] Layout queries (`getBoundingClientRect`, `offsetWidth`, `scrollTop`): force a layout pass on demand and read results back from GPUI
-- [ ] `MutationObserver`, `IntersectionObserver` (lazy-loading images use it)
+- [x] Layout queries: elements scripts measure report their painted boxes back after each frame (`getBoundingClientRect`, `offsetWidth`, `ResizeObserver`); no synchronous forced layout
+- [ ] `MutationObserver`, `IntersectionObserver` from real layout (it reports everything visible, so lazy images load)
+- [ ] Canvas `fillText`, `getImageData`
 - [ ] Cookies and login flows
 - [x] Performance pass 1 (measured with `--bench`): engine/render crates optimized in dev builds; inline layouts + shaped text cached across frames in element state; shaped lines behind `Rc`; restyles reuse unchanged rows (keeping caches); hover restyles re-measure only visible rows; absolute children no longer block row splitting; in-memory subresource cache; back/forward page cache with scroll restore; loading bar. Wikipedia scroll: 39ms → ~1.3ms/frame.
 - [x] Performance pass 2: grids and flex columns split into rows (blizztrack's home page: 1 → 148 rows); links prerender on hover; text shaping cached by content across pages and tabs; images shared between consecutive pages show up instantly; hover restyles wait for scrolling to stop and only re-measure rows that changed
@@ -173,6 +175,6 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - **GPUI stability and docs.** It's built for Zed first. Expect API churn; pin a version.
 - **Inline layout limits.** The `StyledText` trick breaks for inline boxes (inline images, `inline-block`, inline padding and borders). Decide later whether to accept this or write a small inline layout pass.
 - **Block flow ≠ flex column.** Margin collapsing and floats don't map onto it. Floats are probably ignored at first (moved to their own line instead).
-- **Layout reads from JS.** GPUI does layout during its frame, but JS wants answers synchronously. Needs investigation in Phase 5.
+- **Layout reads from JS.** GPUI does layout during its frame, but JS wants answers synchronously. Scripts get the boxes of the elements they measure from the previous frame (and `ResizeObserver` when they change): enough for canvas apps and measuring widgets, not for synchronous measure-then-adjust loops.
 - **Security.** Untrusted JS runs in our process. Boa has no file system or network access unless we give it some, but cap memory and CPU time per page and never expose host APIs carelessly.
 - **Build vs reuse.** Don't adopt `blitz-dom`: it owns layout and painting, which defeats the point. The only real choice is styling: our own small cascade (lighter, and we control which properties exist) vs. Stylo (complete, but heavy and built around Servo's DOM traits). Start with our own and revisit if CSS coverage becomes the bottleneck.
