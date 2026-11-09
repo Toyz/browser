@@ -837,6 +837,7 @@ impl Styler {
             }
             Decl::Rotate(v) => s.rotate = *v,
             Decl::ClipText(v) => s.clip_text = *v,
+            Decl::AspectRatio(v) => s.aspect_ratio = *v,
             Decl::TextFill(c) => s.text_fill = Some(*c),
             Decl::SvgPaint(name, value) => {
                 let mut list: Vec<SvgPaint> = s.svg_paint.as_deref().map(<[_]>::to_vec).unwrap_or_default();

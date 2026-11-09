@@ -678,26 +678,30 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsValue::undefined())
     }));
     add("getAttr", 2, Box::new(|d, a, cx| {
-        let name = arg_string(a, 1, cx)?.to_ascii_lowercase();
+        let raw = arg_string(a, 1, cx)?;
         let dom = d.borrow();
-        Ok(arg_node(&dom, a, 0).and_then(|n| dom.doc.element(n)).and_then(|e| e.attr(&name)).map_or(JsValue::null(), js_str))
+        let Some(e) = arg_node(&dom, a, 0).and_then(|n| dom.doc.element(n)) else { return Ok(JsValue::null()) };
+        let name = attr_name(e, raw);
+        Ok(e.attr(&name).map_or(JsValue::null(), js_str))
     }));
     add("setAttr", 3, Box::new(|d, a, cx| {
-        let name = arg_string(a, 1, cx)?.to_ascii_lowercase();
+        let raw = arg_string(a, 1, cx)?;
         let value = arg_string(a, 2, cx)?;
         let mut dom = d.borrow_mut();
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::undefined()) };
         if let Some(e) = dom.doc.element_mut(n) {
+            let name = attr_name(e, raw);
             set_attr(e, &name, value);
             dom.dirty = true;
         }
         Ok(JsValue::undefined())
     }));
     add("removeAttr", 2, Box::new(|d, a, cx| {
-        let name = arg_string(a, 1, cx)?.to_ascii_lowercase();
+        let raw = arg_string(a, 1, cx)?;
         let mut dom = d.borrow_mut();
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::undefined()) };
         if let Some(e) = dom.doc.element_mut(n) {
+            let name = attr_name(e, raw);
             let before = e.attrs.len();
             e.attrs.retain(|at| &*at.name.local != name.as_str());
             if e.attrs.len() != before {
@@ -1480,4 +1484,10 @@ fn latin1(bytes: &[u8]) -> String {
 /// A latin1-string argument as bytes.
 fn bytes_arg(a: &[JsValue], i: usize, cx: &mut Context) -> JsResult<Vec<u8>> {
     Ok(arg_string(a, i, cx)?.chars().map(|c| c as u32 as u8).collect())
+}
+
+/// Attribute names are case-insensitive on HTML elements only (`viewBox`
+/// on an SVG element stays `viewBox`).
+fn attr_name(e: &ElementData, raw: String) -> String {
+    if e.is_html() { raw.to_ascii_lowercase() } else { raw }
 }

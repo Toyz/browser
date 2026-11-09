@@ -92,6 +92,8 @@ pub struct ComputedStyle {
     pub translate: (Offset, Offset),
     /// `transform: rotate()` / `rotate`: degrees, clockwise, about the center.
     pub rotate: f32,
+    /// `aspect-ratio` (width / height).
+    pub aspect_ratio: Option<f32>,
     /// `background-clip: text` (gradient text).
     pub clip_text: bool,
     /// `-webkit-text-fill-color` (inherited).
@@ -191,6 +193,7 @@ impl ComputedStyle {
             rotate: 0.0,
             svg_paint: None,
             clip_text: false,
+            aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),
             shadows: None,

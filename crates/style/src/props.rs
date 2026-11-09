@@ -170,6 +170,7 @@ pub enum Decl {
     /// `transform` / `translate`: just the translation (x, y).
     Translate(LenSpec, LenSpec),
     ClipText(bool),
+    AspectRatio(Option<f32>),
     TextFill(Color),
     /// An SVG paint property and its value as written.
     SvgPaint(Arc<str>, Arc<str>),
@@ -417,6 +418,23 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
             out.push(D::ClipText(text));
         }
         "-webkit-text-fill-color" => out.push(D::TextFill(parse_color(p)?)),
+        // `1`, `16 / 9`, `auto 4/3` (`auto` alone: none).
+        "aspect-ratio" => {
+            let mut nums = Vec::new();
+            while !p.is_exhausted() {
+                match p.next()?.clone() {
+                    Token::Number { value, .. } => nums.push(value),
+                    Token::Ident(_) | Token::Delim('/') => {}
+                    _ => return err(p),
+                }
+            }
+            let ratio = match nums.as_slice() {
+                [w] => Some(*w),
+                [w, h] if *h > 0.0 => Some(w / h),
+                _ => None,
+            };
+            out.push(D::AspectRatio(ratio.filter(|r| *r > 0.0)));
+        }
         "background" => parse_background(p, out)?,
         "background-image" => {
             let layer = parse_image_layer(p)?;

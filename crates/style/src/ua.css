@@ -115,3 +115,13 @@ q::after { content: close-quote; }
 details > summary:first-of-type { display: block; }
 details:not([open]) > :not(summary:first-of-type) { display: none; }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }
+
+/* Popovers stay hidden until shown (showPopover() marks them open). */
+[popover] {
+  display: none;
+}
+[popover][data-feather-popover-open] {
+  display: block;
+  position: fixed;
+  z-index: 2147483647;
+}

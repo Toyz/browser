@@ -573,6 +573,7 @@ pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
         next_id: 0,
         canvas: None,
         positioned: 0,
+        opacity: 1.0,
         fixed: Vec::new(),
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
@@ -629,6 +630,9 @@ struct Builder<'a> {
     positioned: usize,
     /// `position: fixed` boxes, rendered over the viewport.
     fixed: Vec<LayoutBox>,
+    /// The product of the opacities of the elements we're inside: boxes
+    /// lifted out of them (absolute, fixed) take it along.
+    opacity: f32,
 }
 
 /// Accumulates the children of one block while walking its subtree.
@@ -679,9 +683,18 @@ impl Generated {
 
 impl Builder<'_> {
     fn generated(&mut self, id: NodeId, style: &ComputedStyle) -> Generated {
+        // Out-of-flow pseudo-elements nobody can see (hover tooltips at
+        // opacity 0) aren't drawn at all.
+        let ancestors = self.opacity * style.opacity;
+        let unseen = move |ps: &ComputedStyle| {
+            matches!(ps.position, style::Position::Absolute | style::Position::Fixed) && (ps.opacity * ancestors <= 0.0 || !ps.visible)
+        };
         // Empty content with a box of its own.
         let mut boxed = |which| -> Option<Block> {
             let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
+            if unseen(&ps) {
+                return None;
+            }
             let empty = ps.content.as_deref()?.iter().all(|i| matches!(i, ContentItem::Str(s) if s.is_empty()));
             let positioned = matches!(ps.position, style::Position::Absolute | style::Position::Fixed);
             let sized = !ps.width.is_auto() || !ps.height.is_auto();
@@ -702,6 +715,9 @@ impl Builder<'_> {
         let after_box = boxed(Pseudo::After);
         let one = |which| {
             let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
+            if unseen(&ps) {
+                return None;
+            }
             let element = self.doc.element(id)?;
             let mut text = String::new();
             for item in ps.content.as_deref()? {
@@ -1448,7 +1464,12 @@ impl Builder<'_> {
         if positioned {
             self.positioned += 1;
         }
+        let outer_opacity = self.opacity;
+        if is_element {
+            self.opacity *= parent_style.opacity;
+        }
         self.build_children_inner(id, parent_style, c, link, blockify, &mut counter);
+        self.opacity = outer_opacity;
         if positioned {
             self.positioned -= 1;
         }
@@ -1555,7 +1576,16 @@ impl Builder<'_> {
                 continue;
             }
 
-            // Out-of-flow boxes.
+            // Out-of-flow boxes, lifted out of their ancestors: they keep the
+            // ancestors' opacity (a closed modal at opacity 0 stays unseen).
+            let mut style = style;
+            if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && self.opacity < 1.0 {
+                Arc::make_mut(&mut style).opacity *= self.opacity;
+            }
+            if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && style.opacity <= 0.0 && style.transitions.is_none() {
+                // Invisible and out of the way: nothing to build.
+                continue;
+            }
             match style.position {
                 style::Position::Fixed => {
                     let kind = block_kind_for(style.display);

@@ -590,6 +590,16 @@
       return root;
     }
     get shadowRoot() { return this._shadow && this._shadow._mode === "open" ? this._shadow : null; }
+    // Popovers: shown by a marker attribute the UA stylesheet knows.
+    showPopover() { this.setAttribute("data-feather-popover-open", ""); this.dispatchEvent(new Event("toggle")); }
+    hidePopover() { this.removeAttribute("data-feather-popover-open"); this.dispatchEvent(new Event("toggle")); }
+    togglePopover(force) {
+      const open = force === undefined ? !this.hasAttribute("data-feather-popover-open") : !!force;
+      if (open) this.showPopover(); else this.hidePopover();
+      return open;
+    }
+    get popover() { return this.getAttribute("popover"); }
+    set popover(v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", v); }
     attachInternals() { return { setFormValue() {}, setValidity() {}, checkValidity() { return true; }, states: new Set(), form: null, labels: [], validity: { valid: true } }; }
     animate() { return { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} }; }
     get clientWidth() { return 0; }

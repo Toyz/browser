@@ -326,6 +326,11 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .when(!s.max_height.is_auto(), |d| d.max_h(len(s.outer_height(s.max_height))))
         .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
         .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
+        // `aspect-ratio`: the missing side follows the given one.
+        .when_some(s.aspect_ratio.filter(|_| s.width.is_auto() || s.height.is_auto()), |mut d, r| {
+            d.style().aspect_ratio = Some(r);
+            d
+        })
         .when_some(s.shadows.as_ref(), |d, shadows| d.shadow(visible_shadows(shadows, s, palette)))
         .flex_grow(s.flex_grow)
         .flex_shrink(s.flex_shrink)
