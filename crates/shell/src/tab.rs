@@ -110,6 +110,9 @@ pub struct Tab {
     script_clicked: bool,
     _refresh: Option<Task<()>>,
     _restyle: Option<Task<()>>,
+    /// A restyle is building; another was asked for meanwhile.
+    restyle_busy: bool,
+    restyle_queued: bool,
     /// Elements whose blocks report the pointer inside them.
     hover_blocks: HashSet<NodeId>,
     /// The inline element under the pointer, per paragraph.
@@ -208,6 +211,8 @@ impl Tab {
             script_clicked: false,
             _refresh: None,
             _restyle: None,
+            restyle_busy: false,
+            restyle_queued: false,
             hover_blocks: HashSet::new(),
             hover_inline: None,
             mouse_down: false,
@@ -488,6 +493,8 @@ impl Tab {
         self.page_gen += 1;
         // Work for the previous page must not land on this one.
         self._restyle = None;
+        self.restyle_busy = false;
+        self.restyle_queued = false;
         self._scroll_end = None;
         self.hover_styler = None;
         self.forms = Default::default();
@@ -984,11 +991,29 @@ impl Tab {
     /// Re-run style + layout in the background with the current viewport and
     /// interaction state, then swap it in, keeping the scroll position.
     fn restyle(&mut self, delay: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        // One building at a time: replacing it would starve a big page whose
+        // scripts send DOM updates faster than it restyles. The next one
+        // starts (with the newest DOM) when this lands.
+        if self.restyle_busy {
+            self.restyle_queued = true;
+            return;
+        }
         let Some(page) = &self.page else { return };
-        let (Some(doc), Some(styles)) = (page.doc.clone(), page.styles.clone()) else { return };
+        if page.doc.is_none() || page.styles.is_none() {
+            return;
+        }
         let page_gen = self.page_gen;
         self._restyle = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(delay).await;
+            // The newest DOM and styles, as of now.
+            let Ok(Some((doc, styles))) = this.update(cx, |this, _| {
+                this.restyle_busy = true;
+                let page = this.page.as_ref()?;
+                Some((page.doc.clone()?, page.styles.clone()?))
+            }) else {
+                this.update(cx, |this, _| this.restyle_busy = false).ok();
+                return;
+            };
             let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
             let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
             let signature = styles.signature(&env);
@@ -1003,9 +1028,11 @@ impl Tab {
             })
             .await;
             this.update_in(cx, |this, window, cx| {
+                this.restyle_busy = false;
                 if this.page_gen != page_gen {
                     return;
                 }
+                let again = std::mem::take(&mut this.restyle_queued);
                 let Some(page) = &mut this.page else { return };
                 let same_shape = page.layout.rows.len() == layout.rows.len();
                 page.layout = Arc::new(layout);
@@ -1032,6 +1059,10 @@ impl Tab {
                 cx.notify();
                 // The pointer moved on while this was building: catch up.
                 this.interaction_changed(window, cx);
+                // The DOM changed again meanwhile.
+                if again {
+                    this.restyle(Duration::ZERO, window, cx);
+                }
             })
             .ok();
         }));

@@ -673,6 +673,51 @@ fn content_width(style: &ComputedStyle, avail: f32) -> f32 {
     (width - edges).max(0.0)
 }
 
+fn no_radius(r: &Length) -> bool {
+    match r {
+        Length::Auto => true,
+        Length::Px(v) => *v == 0.0,
+        Length::Percent(p) => *p == 0.0,
+    }
+}
+
+/// Images filling a rounded box that clips take its corners (GPUI clips
+/// to rectangles): its own images, and those a few filling wrappers down
+/// (`.avatar > loom-image > img`). `width`: the box's, if fixed.
+fn round_images(children: &mut [LayoutBox], radius: [Length; 4], width: Option<f32>, depth: u8) {
+    // As wide as the rounded box: 100%, or its exact width.
+    let fills = |w: Length, auto_ok: bool| match w {
+        Length::Percent(p) => p >= 99.5,
+        Length::Px(v) => width.is_some_and(|bw| (v - bw).abs() < 0.5),
+        Length::Auto => auto_ok,
+    };
+    for child in children {
+        match child {
+            LayoutBox::Image(i) => {
+                let natural_fit = i.style.width.is_auto() && width.is_some_and(|bw| i.attr_width.is_some_and(|aw| (aw - bw).abs() < 0.5));
+                if i.style.border_radius.iter().all(no_radius) && (fills(i.style.width, false) || natural_fit) {
+                    Arc::make_mut(&mut i.style).border_radius = radius;
+                }
+            }
+            LayoutBox::Block(b) if depth > 0 && fills(b.style.width, b.style.display.is_block_level()) => {
+                round_images(&mut b.children, radius, width, depth - 1)
+            }
+            LayoutBox::Paragraph(p) if depth > 0 => {
+                if p.objects.iter().any(|o| matches!(o, InlineObject::BlockBox(b) if fills(b.style.width, false))) {
+                    for o in &mut Arc::make_mut(p).objects {
+                        if let InlineObject::BlockBox(b) = o
+                            && fills(b.style.width, false)
+                        {
+                            round_images(&mut Arc::make_mut(b).children, radius, width, depth - 1);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// How many `repeat(auto-fill, minmax(min, 1fr))` columns fit in `width`.
 fn auto_columns(width: f32, min: f32, gap: f32) -> u16 {
     (((width + gap) / (min + gap).max(1.0)).floor() as i64).clamp(1, 64) as u16
@@ -1452,15 +1497,12 @@ impl Builder<'_> {
         let mut children = children;
         // A rounded box that clips (avatars): GPUI clips to rectangles, so
         // the images filling it take its corners themselves.
-        let zero = |r: &Length| matches!(r, Length::Auto) || r.px_or_zero() == 0.0 && !matches!(r, Length::Percent(p) if *p > 0.0);
-        if style.overflow != Overflow::Visible && !style.border_radius.iter().all(zero) {
-            for child in &mut children {
-                if let LayoutBox::Image(i) = child
-                    && i.style.border_radius.iter().all(zero)
-                {
-                    Arc::make_mut(&mut i.style).border_radius = style.border_radius;
-                }
-            }
+        if style.overflow != Overflow::Visible && !style.border_radius.iter().all(no_radius) {
+            let width = match style.width {
+                Length::Px(v) => Some(v),
+                _ => None,
+            };
+            round_images(&mut children, style.border_radius, width, 3);
         }
         // `auto-fit`: empty tracks collapse, so the items share the row.
         if kind == BlockKind::Grid

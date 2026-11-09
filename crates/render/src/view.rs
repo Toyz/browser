@@ -675,7 +675,13 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     let content = match state {
         _ if !s.visible => div().into_any_element(),
         Some(ImageState::Ready { image, padded, width, height }) => {
-            let corners = s.border_radius.map(radius);
+            // `50%` makes a circle: a share of the image's own size.
+            let box_w = match s.width { CssLength::Px(v) => Some(v), _ => natural_width };
+            let box_h = match s.height { CssLength::Px(v) => Some(v), _ => natural_height.or(box_w) };
+            let corners = s.border_radius.map(|r| match (r, box_w, box_h) {
+                (CssLength::Percent(p), Some(w), Some(h)) => px(p / 100.0 * w.min(h)),
+                _ => radius(r),
+            });
             transform::image(i, cx).unwrap_or_else(|| crate::images::picture_rounded(&image, &padded, width, height, corners))
         }
         // Alt text stands in for a broken image (not one still loading:
