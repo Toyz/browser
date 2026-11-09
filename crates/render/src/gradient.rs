@@ -43,7 +43,7 @@ impl GradientFill {
         // Borders paint over the background: only a see-through one shows it.
         let bc = s.border_color;
         let has_border = bw.top + bw.right + bw.bottom + bw.left > 0.0
-            && [bc.top, bc.right, bc.bottom, bc.left].iter().all(|c| c.is_transparent());
+            && [bc.top, bc.right, bc.bottom, bc.left].iter().all(|c| matches!(c, style::Color::Rgba(v) if v & 0xff < 0xff));
         let border_box = match &s.bg_clip_border {
             Some(clips) if has_border => (0..layers.len()).map(|i| clips.get(i).or(clips.last()).copied().unwrap_or(false)).collect(),
             _ => Vec::new(),
