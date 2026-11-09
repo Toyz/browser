@@ -1829,13 +1829,27 @@
     previousSibling() { for (let c = this.currentNode.previousSibling; c; c = c.previousSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
   }
 
+  // Real browsers' entry class (polyfills replace observers without it).
+  class IntersectionObserverEntry {
+    constructor(init) { Object.assign(this, init); }
+  }
+  for (const k of ["target", "isIntersecting", "intersectionRatio", "boundingClientRect", "intersectionRect", "rootBounds", "time"]) {
+    Object.defineProperty(IntersectionObserverEntry.prototype, k, { configurable: true, writable: true, value: undefined });
+  }
   const observer = (name) => class {
     constructor(cb) { this._cb = cb; }
     observe(target) {
       // Everything is visible right away (lazy loaders show their content).
       if (name === "IntersectionObserver") {
         const cb = this._cb, self = this;
-        setTimeout(() => cb([{ target, isIntersecting: true, intersectionRatio: 1, boundingClientRect: target.getBoundingClientRect(), intersectionRect: {}, rootBounds: null, time: N.now() }], self), 0);
+        setTimeout(() => {
+          const r = target.getBoundingClientRect();
+          // Visible means a non-empty intersection (loaders check its size),
+          // even before layout has measured the target.
+          const seen = new DOMRect(r.x, r.y, Math.max(r.width, 1), Math.max(r.height, 1));
+          const rootBounds = new DOMRect(0, 0, window.innerWidth, window.innerHeight);
+          cb([new IntersectionObserverEntry({ target, isIntersecting: true, intersectionRatio: 1, boundingClientRect: r, intersectionRect: seen, rootBounds, time: N.now() })], self);
+        }, 0);
       }
     }
     unobserve() {} disconnect() {} takeRecords() { return []; }
@@ -1936,7 +1950,7 @@
     matchMedia,
     getComputedStyle: (el) => el.style,
     MutationObserver: observer("MutationObserver"),
-    IntersectionObserver: observer("IntersectionObserver"),
+    IntersectionObserver: observer("IntersectionObserver"), IntersectionObserverEntry,
     ResizeObserver, NodeFilter, TreeWalker,
     PerformanceObserver: observer("PerformanceObserver"),
     outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,

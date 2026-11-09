@@ -733,6 +733,17 @@ fn document_all_is_falsy_but_not_undefined() {
 }
 
 #[test]
+fn intersection_observer_reports_a_visible_rect() {
+    let doc = run(r##"<body><img id="i"><p id="o"></p><script>
+        new IntersectionObserver((entries) => {
+            const e = entries[0];
+            document.getElementById("o").textContent = [e.isIntersecting, e.intersectionRect.height > 0, e.rootBounds.width > 0, "intersectionRatio" in IntersectionObserverEntry.prototype, e instanceof IntersectionObserverEntry].join(" ");
+        }).observe(document.getElementById("i"));
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true true true true");
+}
+
+#[test]
 fn template_content_persists_and_attributes_are_seen() {
     let doc = run(r##"<body><p id="o"></p><script>
         const t = document.createElement("template");
