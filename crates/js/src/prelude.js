@@ -478,15 +478,23 @@
       const path = [];
       for (let n = this; n; n = parentForEvents(n)) path.push(n);
       ev._path = path;
-      // Capture, target, bubble.
-      for (let i = path.length - 1; i > 0 && !ev._stop; i--) invoke(path[i], ev, 1, true);
-      if (!ev._stop) invoke(path[0], ev, 2, null);
-      if (ev.bubbles) for (let i = 1; i < path.length && !ev._stop; i++) invoke(path[i], ev, 3, false);
+      // `window.event` while it's being handled (legacy, still used).
+      const outer = currentEvent;
+      currentEvent = ev;
+      try {
+        // Capture, target, bubble.
+        for (let i = path.length - 1; i > 0 && !ev._stop; i--) invoke(path[i], ev, 1, true);
+        if (!ev._stop) invoke(path[0], ev, 2, null);
+        if (ev.bubbles) for (let i = 1; i < path.length && !ev._stop; i++) invoke(path[i], ev, 3, false);
+      } finally {
+        currentEvent = outer;
+      }
       ev.currentTarget = null;
       ev.eventPhase = 0;
       return !ev.defaultPrevented;
     }
   }
+  let currentEvent;
   function parentForEvents(n) {
     if (n === window) return null;
     if (n === document) return window;
@@ -1762,6 +1770,7 @@
   // ---- window ----------------------------------------------------------
 
   const window = global;
+  Object.defineProperty(window, "event", { configurable: true, get: () => currentEvent, set() {} });
   class Window extends EventTarget {}
   Object.setPrototypeOf(window, Window.prototype);
 

@@ -225,10 +225,7 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
-        .children(row.absolutes.iter().map(|b| {
-            let el = render_box(b, cx, b.margin(), false);
-            if behind(b) { el } else { clipped_deferred(el) }
-        }))
+        .children(row.absolutes.iter().map(|b| positioned(b, cx, b.margin())))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
@@ -499,8 +496,7 @@ fn render_flow_children_in_order(children: &[LayoutBox], cx: &RenderCx) -> Vec<A
             if is_out_of_flow(child) {
                 // Positioned boxes paint above in-flow content (and their
                 // parent's border, which GPUI paints after children).
-                let el = render_box(child, cx, child.margin(), false);
-                return if behind(child) { el } else { clipped_deferred(el) };
+                return positioned(child, cx, child.margin());
             }
             let m = child.margin();
             let top = m.top.px_or_zero();
@@ -524,8 +520,10 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
             {
                 return div().flex_none().child(crate::inline::InlineFlow::new(p.clone(), cx)).into_any_element();
             }
-            let el = render_box(child, cx, child.margin(), false);
-            if is_out_of_flow(child) && !behind(child) { clipped_deferred(el) } else { el }
+            if is_out_of_flow(child) {
+                return positioned(child, cx, child.margin());
+            }
+            render_box(child, cx, child.margin(), false)
         })
         .collect::<Vec<_>>()
         .pipe(|els| behind_first(els, children))
@@ -1084,6 +1082,25 @@ impl Element for ControlHost {
 /// tree order, not deferred above everything.
 fn behind(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some_and(|z| z < 0))
+}
+
+thread_local! {
+    /// How many deferred (positioned) boxes the one being built is inside.
+    static DEFERRED_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A positioned box: drawn after the in-flow content, through GPUI's
+/// deferred layer. Only the outermost one is deferred; ones inside it are
+/// drawn in place, in the z-order of their siblings (a deferral inside a
+/// deferral would land above every other positioned box on the page).
+fn positioned(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElement {
+    if behind(b) {
+        return render_box(b, cx, margin, false);
+    }
+    let outer = DEFERRED_DEPTH.with(|d| d.replace(d.get() + 1));
+    let el = render_box(b, cx, margin, false);
+    DEFERRED_DEPTH.with(|d| d.set(outer));
+    if outer > 0 { el } else { clipped_deferred(el) }
 }
 
 fn clipped_deferred(child: AnyElement) -> AnyElement {

@@ -1338,19 +1338,15 @@ impl Builder<'_> {
 
     /// `<img>`: a block-level image box if it's displayed as a block (or
     /// floats), otherwise an inline object flowing with the text.
-    fn build_image(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+    /// An `<img>`'s box (`None` without a source).
+    fn image_box(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, link: Option<&Arc<Url>>) -> Option<ImageBox> {
         let alt = element.attr("alt").map(str::trim).filter(|a| !a.is_empty());
-        let Some((src, density)) = pick_image_source(element, &self.base_url) else {
-            if let Some(alt) = alt {
-                c.inline.push_text(alt, &style, link);
-            }
-            return;
-        };
+        let (src, density) = pick_image_source(element, &self.base_url)?;
         let attr = |name| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
-        let image = ImageBox {
+        Some(ImageBox {
             id: self.next_id(),
             node: Some(node),
-            style: style.clone(),
+            style,
             src: Arc::new(src),
             density,
             attr_width: attr("width"),
@@ -1359,6 +1355,15 @@ impl Builder<'_> {
             link: link.cloned(),
             anchors: Vec::new(),
             mono: None,
+        })
+    }
+
+    fn build_image(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+        let Some(image) = self.image_box(node, element, style.clone(), link) else {
+            if let Some(alt) = element.attr("alt").map(str::trim).filter(|a| !a.is_empty()) {
+                c.inline.push_text(alt, &style, link);
+            }
+            return;
         };
         if style.display.is_block_level() || style.float != Float::None {
             self.flush(c);
@@ -1559,6 +1564,11 @@ impl Builder<'_> {
                 Arc::make_mut(&mut style).grid_columns = Some(used.max(1));
             }
         }
+        // Positioned boxes paint in z-index order (tree order among equals).
+        c.absolutes.sort_by_key(|b| match b {
+            LayoutBox::Block(b) => b.style.z_index.unwrap_or(0),
+            _ => 0,
+        });
         children.append(&mut c.absolutes);
         // Block flow is drawn as a flex column, but `flex` means nothing
         // there: boxes neither grow nor shrink, and a `flex: 1` card's
@@ -1812,7 +1822,26 @@ impl Builder<'_> {
                     }
                     let kind = block_kind_for(style.display);
                     let generated = self.generated(child, &style);
-                    let block = self.build_block(child, style, kind, link, generated);
+                    let mut block = self.build_block(child, style.clone(), kind, link, generated);
+                    // An absolute `<img>` (a card's background photo): the
+                    // positioned box, with the picture filling it.
+                    if tag == "img" {
+                        let mut st = (*style).clone();
+                        st.position = style::Position::Static;
+                        st.inset = style::Edges::all(Length::Auto);
+                        st.margin = style::Edges::all(Length::Px(0.0));
+                        st.z_index = None;
+                        if !style.width.is_auto() {
+                            st.width = Length::Percent(100.0);
+                        }
+                        if !style.height.is_auto() {
+                            st.height = Length::Percent(100.0);
+                        }
+                        st.display = Display::Block;
+                        if let Some(image) = self.image_box(child, element, Arc::new(st), link) {
+                            block.children.push(LayoutBox::Image(image));
+                        }
+                    }
                     c.absolutes.push(LayoutBox::Block(block));
                     continue;
                 }
