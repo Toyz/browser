@@ -66,7 +66,33 @@ impl InlineFlow {
 
 /// Sizes inline-block subtrees got last frame (they can't be laid out from
 /// inside text measurement, so lines are broken with these and corrected).
-type BlockSizes = Rc<RefCell<HashMap<u32, (Pixels, Pixels)>>>;
+/// Also where the first line of text sits in each (for baseline alignment).
+type BlockSizes = Rc<RefCell<HashMap<u32, BlockSize>>>;
+
+#[derive(Clone, Copy, PartialEq)]
+struct BlockSize {
+    width: Pixels,
+    height: Pixels,
+    /// From the top of the box to its first baseline, if it has text.
+    baseline: Option<Pixels>,
+}
+
+thread_local! {
+    /// Where each paragraph's first baseline was placed last (window y), so
+    /// an inline-block can find its own baseline after its subtree is laid out.
+    static FIRST_BASELINES: RefCell<HashMap<usize, Pixels>> = RefCell::default();
+}
+
+/// The paragraph whose first line is a block's baseline: its first in-flow
+/// text, looking inside nested blocks.
+fn first_paragraph(block: &crate::boxes::Block) -> Option<usize> {
+    use crate::boxes::LayoutBox;
+    block.children.iter().find_map(|child| match child {
+        LayoutBox::Paragraph(p) if !p.text.trim().is_empty() => Some(p.id),
+        LayoutBox::Block(b) if !crate::view::is_out_of_flow(child) => first_paragraph(b),
+        _ => None,
+    })
+}
 
 /// Vertical extent of something on a line, relative to the baseline.
 #[derive(Clone, Copy, Default)]
@@ -92,6 +118,8 @@ struct Measured {
     /// Text: the font's ascent/descent. Objects: the box height / 0.
     ascent: Pixels,
     descent: Pixels,
+    /// Objects: the top margin, above the box but inside the line.
+    margin_top: Pixels,
 }
 
 struct Line {
@@ -362,18 +390,38 @@ impl FlowState {
                         let (t, r, b, l) = edges(&image.style);
                         let (w, h) = (px(w) + l + r, px(h) + t + b);
                         let extent = object_extent(image.style.vertical_align, h, self.strut, block.font_size, shift);
-                        Measured { width: w, extent, ascent: h, descent: px(0.) }
+                        Measured { width: w, extent, ascent: h, descent: px(0.), margin_top: px(0.) }
                     }
                     InlineObject::Block(atomic) => self.measure_atomic(i, atomic, shift, None, cx, window),
                     InlineObject::BlockBox(block) => {
                         let s = &block.style;
                         let (ml, mr) = atomic_margins(s);
-                        let (w, h) = self.block_sizes.borrow().get(&i).copied().unwrap_or_else(|| {
+                        let known = self.block_sizes.borrow().get(&i).copied();
+                        let (w, h) = known.map_or_else(
                             // First frame: a guess, corrected next frame.
-                            (px(block.max_content), px(block.style.font_size * 1.4 + s.vertical_edges()))
-                        });
-                        let extent = object_extent(s.vertical_align, h, self.strut, s.font_size, shift);
-                        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.) }
+                            || (px(block.max_content), px(block.style.font_size * 1.4 + s.vertical_edges())),
+                            |k| (k.width, k.height),
+                        );
+                        // The line holds the margin box; baseline-aligned
+                        // boxes sit on their first line of text.
+                        let (mt, mb) = vertical_margins(s);
+                        let baseline = known
+                            .and_then(|k| k.baseline)
+                            .filter(|_| s.overflow == style::Overflow::Visible)
+                            .filter(|_| {
+                                matches!(
+                                    s.vertical_align,
+                                    VerticalAlign::Baseline | VerticalAlign::Sub | VerticalAlign::Super | VerticalAlign::Shift(_)
+                                )
+                            });
+                        let extent = match baseline {
+                            Some(b) => {
+                                let above = mt + b + shift;
+                                Extent { above, below: h + mt + mb - above }
+                            }
+                            None => object_extent(s.vertical_align, h + mt + mb, self.strut, s.font_size, shift),
+                        };
+                        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.), margin_top: mt }
                     }
                 },
                 kind => {
@@ -389,6 +437,7 @@ impl FlowState {
                         extent: extent_for(style, layout.ascent, layout.descent),
                         ascent: layout.ascent,
                         descent: layout.descent,
+                        margin_top: px(0.),
                     }
                 }
             };
@@ -457,20 +506,22 @@ impl FlowState {
             height = height.min(max);
         }
         let (ml, mr) = atomic_margins(s);
+        let (mt, mb) = vertical_margins(s);
         let above = match s.vertical_align {
             VerticalAlign::Baseline | VerticalAlign::Sub | VerticalAlign::Super | VerticalAlign::Shift(_)
                 if atomic.content.as_ref().is_some_and(|c| !c.text.is_empty()) =>
             {
                 // Baseline-aligned on its own first line.
-                top + first_above + shift
+                mt + top + first_above + shift
             }
-            valign => object_extent(valign, height, self.strut, s.font_size, shift).above,
+            valign => object_extent(valign, height + mt + mb, self.strut, s.font_size, shift).above,
         };
         Measured {
             width: inner_w + left + right + ml + mr,
-            extent: Extent { above, below: height - above },
+            extent: Extent { above, below: height + mt + mb - above },
             ascent: height,
             descent: px(0.),
+            margin_top: mt,
         }
     }
 
@@ -609,6 +660,11 @@ fn atomic_margins(s: &style::ComputedStyle) -> (Pixels, Pixels) {
     (px(s.margin.left.px_or_zero()), px(s.margin.right.px_or_zero()))
 }
 
+/// An inline-block's top and bottom margins (inside its line box).
+fn vertical_margins(s: &style::ComputedStyle) -> (Pixels, Pixels) {
+    (px(s.margin.top.px_or_zero()), px(s.margin.bottom.px_or_zero()))
+}
+
 /// CSS shrinks oversized corner radii to fit; GPUI draws nothing for them.
 fn clamp_radius(r: Pixels, bounds: Bounds<Pixels>) -> Pixels {
     r.min(bounds.size.width.min(bounds.size.height) / 2.0).max(px(0.))
@@ -680,7 +736,7 @@ fn place(
                 out.cursors.push((window.insert_hitbox(area, HitboxBehavior::Normal), c));
             }
             if let PieceKind::Object(oi) = piece.kind {
-                let top = baseline - m.extent.above;
+                let top = baseline - m.extent.above + m.margin_top;
                 match &para.objects[oi as usize] {
                     InlineObject::Image(image) => {
                         let (w, h) = (m.width, m.ascent);
@@ -798,7 +854,7 @@ fn paint_flow(
             let PieceKind::Object(oi) = para.pieces[ix].kind else { continue };
             let InlineObject::Block(atomic) = &para.objects[oi as usize] else { continue };
             let m = measured[ix];
-            let top = baseline - m.extent.above;
+            let top = baseline - m.extent.above + m.margin_top;
             let s = &atomic.style;
             let (ml, mr) = atomic_margins(s);
             let x = x + ml;
@@ -1097,20 +1153,37 @@ impl Element for InlineFlow {
 
         // Move each block subtree into its slot in the line. If its real size
         // differs from what the lines were broken with, try again next frame.
+        // Where this paragraph's first line sits, for an inline-block
+        // around it.
+        if let Some((_, lines, _)) = &self.state.borrow().lines
+            && let Some(first) = lines.first()
+        {
+            FIRST_BASELINES.with_borrow_mut(|b| b.insert(self.para.id, text.origin.y + first.extent.above));
+        }
         let sizes = self.state.borrow().block_sizes.clone();
         let mut changed = false;
         let mut placed = Vec::new();
         for (oi, el, layout_id) in &mut self.blocks {
             let actual = window.layout_bounds(*layout_id);
-            let size = (actual.size.width, actual.size.height);
-            if sizes.borrow().get(oi) != Some(&size) {
-                sizes.borrow_mut().insert(*oi, size);
-                changed = true;
-            }
+            let mut baseline = None;
             if let Some(target) = placement.blocks.get(&(self.para.id, *oi)) {
                 let delta = *target - actual.origin;
                 window.with_element_offset(delta, |window| el.prepaint(window, cx));
                 placed.push(*oi);
+                // Its text was just placed: measure its baseline from its top.
+                let InlineObject::BlockBox(block) = &self.para.objects[*oi as usize] else { continue };
+                baseline = first_paragraph(block)
+                    .and_then(|p| FIRST_BASELINES.with_borrow(|b| b.get(&p).copied()))
+                    .map(|y| y - target.y)
+                    .filter(|&b| b >= px(0.) && b <= actual.size.height);
+            }
+            let size = BlockSize { width: actual.size.width, height: actual.size.height, baseline };
+            let old = sizes.borrow().get(oi).copied();
+            // Not placed this frame: keep what we knew of its baseline.
+            let size = BlockSize { baseline: baseline.or(old.and_then(|o| o.baseline)), ..size };
+            if old.is_none_or(|o| o.width != size.width || o.height != size.height || (o.baseline.unwrap_or_default() - size.baseline.unwrap_or_default()).abs() > px(0.5)) {
+                sizes.borrow_mut().insert(*oi, size);
+                changed = true;
             }
         }
         if changed {

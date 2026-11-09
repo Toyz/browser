@@ -1356,10 +1356,14 @@ impl Tab {
                 cx.background_executor().timer(settle).await;
                 let path = job.path_for(page);
                 // Draw explicitly (a background window may not be getting display
-                // refreshes), twice: GPUI decodes images on first use, so the first
-                // frame kicks off decoding and a later one shows the result.
+                // refreshes), several times: GPUI decodes images on first use, and
+                // nested inline-blocks settle their sizes a level per frame.
                 cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
                 cx.background_executor().timer(Duration::from_millis(400)).await;
+                for _ in 0..6 {
+                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    cx.background_executor().timer(Duration::from_millis(16)).await;
+                }
                 cx.update(|window, cx| {
                     window.draw(cx).clear(cx);
                     match capture::save_frame(window, &path) {

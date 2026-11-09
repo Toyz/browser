@@ -1240,6 +1240,11 @@ fn finalize(s: &mut ComputedStyle) {
                 .collect(),
         );
     }
+    // `display: -webkit-box` with `-webkit-line-clamp` (titles cut to N
+    // lines) lays its text out as a block, as browsers do.
+    if s.line_clamp.is_some() && s.display == Display::Flex {
+        s.display = Display::Block;
+    }
     // Out-of-flow boxes are always block-level ("blockified").
     if matches!(s.position, Position::Absolute | Position::Fixed) {
         s.display = s.display.blockified();
