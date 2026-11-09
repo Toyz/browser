@@ -590,6 +590,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         positioned: 0,
         opacity: 1.0,
         fixed: Vec::new(),
+        hoisted: Vec::new(),
         avail: styler.env().width,
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
@@ -646,6 +647,10 @@ struct Builder<'a> {
     positioned: usize,
     /// `position: fixed` boxes, rendered over the viewport.
     fixed: Vec<LayoutBox>,
+    /// Absolute boxes on their way up to their containing block (the nearest
+    /// positioned ancestor): GPUI places absolute children against their
+    /// parent, so they have to be that box's children.
+    hoisted: Vec<LayoutBox>,
     /// The product of the opacities of the elements we're inside: boxes
     /// lifted out of them (absolute, fixed) take it along.
     opacity: f32,
@@ -1484,6 +1489,7 @@ impl Builder<'_> {
             pending_anchors: Vec::new(),
             absolutes: Vec::new(),
         };
+        let hoist_mark = self.hoisted.len();
         // Flex and grid containers "blockify" their children: each is an item.
         let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid);
         let mut generated = generated;
@@ -1563,6 +1569,19 @@ impl Builder<'_> {
             {
                 Arc::make_mut(&mut style).grid_columns = Some(used.max(1));
             }
+        }
+        // A positioned box is the containing block of the absolute boxes
+        // inside it; a static one sends those placed by their insets on up
+        // (ones with no insets sit where they'd be in the flow: they stay).
+        if style.position != style::Position::Static {
+            c.absolutes.extend(self.hoisted.drain(hoist_mark..));
+        } else if self.positioned > 0 {
+            let (up, stay): (Vec<_>, Vec<_>) = std::mem::take(&mut c.absolutes).into_iter().partition(|b| {
+                matches!(b, LayoutBox::Block(b) if b.style.position == style::Position::Absolute
+                    && [b.style.inset.top, b.style.inset.right, b.style.inset.bottom, b.style.inset.left].iter().any(|l| !l.is_auto()))
+            });
+            c.absolutes = stay;
+            self.hoisted.extend(up);
         }
         // Positioned boxes paint in z-index order (tree order among equals).
         c.absolutes.sort_by_key(|b| match b {
