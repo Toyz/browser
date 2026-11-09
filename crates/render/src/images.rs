@@ -72,7 +72,29 @@ pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32
 /// The same with rounded corners (top-left, top-right, bottom-right,
 /// bottom-left).
 pub fn picture_rounded(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32, corners: [Pixels; 4]) -> AnyElement {
+    picture_fitted(image, padded, width, height, corners, style::ObjectFit::Fill)
+}
+
+/// The same, fitted per CSS `object-fit` (cropped by `cover`).
+pub fn picture_fitted(
+    image: &Arc<Image>,
+    padded: &Option<Arc<RenderImage>>,
+    width: f32,
+    height: f32,
+    corners: [Pixels; 4],
+    fit: style::ObjectFit,
+) -> AnyElement {
     let round = |i: Img| i.rounded_tl(corners[0]).rounded_tr(corners[1]).rounded_br(corners[2]).rounded_bl(corners[3]);
+    let fit = match fit {
+        style::ObjectFit::Fill => None,
+        style::ObjectFit::Contain => Some(ObjectFit::Contain),
+        style::ObjectFit::Cover => Some(ObjectFit::Cover),
+        style::ObjectFit::None => Some(ObjectFit::None),
+        style::ObjectFit::ScaleDown => Some(ObjectFit::ScaleDown),
+    };
+    if let Some(fit) = fit {
+        return round(img(image.clone())).size_full().object_fit(fit).into_any_element();
+    }
     match padded {
         Some(p) if width > 0.0 && height > 0.0 => div()
             .size_full()

@@ -1596,7 +1596,10 @@ impl Builder<'_> {
         let inline = std::mem::take(&mut c.inline);
         let id = self.next_id();
         if let Some(p) = inline.finish(id, c.style.clone()) {
-            c.push(LayoutBox::Paragraph(Arc::new(p)));
+            match lone_relative_image(p) {
+                Ok(image) => c.push(LayoutBox::Image(image)),
+                Err(p) => c.push(LayoutBox::Paragraph(Arc::new(p))),
+            }
         }
     }
 
@@ -1925,6 +1928,27 @@ fn char_em(ch: char, st: &InlineStyle) -> f32 {
         0.6
     };
     if st.font_weight >= 600 { base * 1.07 } else { base }
+}
+
+/// A paragraph that's nothing but one image sized in percentages (`width:
+/// 100%; height: 100%` filling a thumbnail frame): the image as a block, so
+/// the percentages resolve against the containing block, as in browsers.
+fn lone_relative_image(mut p: Paragraph) -> Result<ImageBox, Paragraph> {
+    let alone = p.objects.len() == 1
+        && p.text.chars().all(|c| c == '\u{FFFC}' || c.is_whitespace())
+        && p.boxes.iter().all(|b| b.background.is_none() && b.border_width.top == 0.0 && b.border_width.left == 0.0);
+    let relative = |l: Length| matches!(l, Length::Percent(_));
+    let fits = |i: &ImageBox| {
+        relative(i.style.height) && (relative(i.style.width) || i.style.width.is_auto())
+            && (p.style.text_align == style::TextAlign::Left || relative(i.style.width))
+    };
+    match p.objects.first() {
+        Some(InlineObject::Image(i)) if alone && fits(i) => match p.objects.pop() {
+            Some(InlineObject::Image(i)) => Ok(i),
+            _ => unreachable!(),
+        },
+        _ => Err(p),
+    }
 }
 
 /// (min-content, max-content): the longest unbreakable run (word, or whole
@@ -3358,6 +3382,21 @@ mod tests {
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["after"]);
         // The fixed bar is an overlay; the page-anchored skip link stays hidden.
         assert_eq!(tree.fixed.len(), 1);
+    }
+
+    #[test]
+    fn lone_percentage_image_is_a_block() {
+        let tree = layout_css(
+            r#"<a class="frame" href="/v"><span><img class="fill" src="https://example.com/t.jpg"></span></a><p>Hi <img class="fill" src="https://example.com/u.jpg"></p>"#,
+            ".frame { display: block; height: 280px } .fill { width: 100%; height: 100%; object-fit: cover }",
+        );
+        // Alone in its frame: a block, so 100% is of the frame.
+        let LayoutBox::Block(frame) = &tree.rows[0].content else { panic!("{:?}", tree.rows[0].content) };
+        let LayoutBox::Image(image) = &frame.children[0] else { panic!("{:?}", frame.children) };
+        assert_eq!(image.style.object_fit, style::ObjectFit::Cover);
+        assert!(image.link.is_some());
+        // Next to text it stays in the line.
+        assert_eq!(&*paragraph(&tree.rows[1]).text, "Hi \u{FFFC}");
     }
 
     #[test]

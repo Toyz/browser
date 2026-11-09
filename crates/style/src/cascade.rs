@@ -958,6 +958,9 @@ impl Styler {
             Decl::Cursor(v) => s.cursor = *v,
             Decl::PointerEventsNone(v) => s.pointer_events_none = *v,
             Decl::ZIndex(v) => s.z_index = *v,
+            Decl::ObjectFit(v) => s.object_fit = *v,
+            Decl::TextEllipsis(v) => s.text_ellipsis = *v,
+            Decl::LineClamp(v) => s.line_clamp = *v,
             Decl::ColorScheme(v) => s.dark = *v && self.env.dark,
             Decl::VerticalAlign(crate::props::VAlignSpec::Keyword(k)) => s.vertical_align = *k,
             Decl::VerticalAlign(crate::props::VAlignSpec::Len(l)) => {
@@ -1310,6 +1313,9 @@ fn apply_wide(s: &mut ComputedStyle, parent: &ComputedStyle, name: &str, wide: W
         }
         "cursor" => s.cursor = src.cursor,
         "pointer-events" => s.pointer_events_none = src.pointer_events_none,
+        "object-fit" => s.object_fit = src.object_fit,
+        "text-overflow" => s.text_ellipsis = src.text_ellipsis,
+        "-webkit-line-clamp" | "line-clamp" => s.line_clamp = src.line_clamp,
         "text-decoration" | "text-decoration-line" => {
             s.underline = parent.underline || src.underline;
             s.strikethrough = parent.strikethrough || src.strikethrough;

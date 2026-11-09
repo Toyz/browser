@@ -553,7 +553,9 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         .when_some(shape.map(|(_, layers)| layers), |d, layers| d.child(layers))
         .text_color(cx.palette.color(s.color))
         .when(fill, |d| d.w_full())
-        .when(s.min_width.is_auto(), |d| d.min_w(px(block.min_content)));
+        // Clipping boxes can shrink below their content (CSS's automatic
+        // minimum size is 0 for them: how `text-overflow` gets to show).
+        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible, |d| d.min_w(px(block.min_content)));
     let scrolls = s.overflow == Overflow::Scroll && (!s.height.is_auto() || !s.max_height.is_auto());
     // Gradients, then a background image / mask icon, painted first
     // (behind the content).
@@ -732,7 +734,7 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
                 (CssLength::Percent(p), Some(w), Some(h)) => px(p / 100.0 * w.min(h)),
                 _ => radius(r),
             });
-            transform::image(i, cx).unwrap_or_else(|| crate::images::picture_rounded(&image, &padded, width, height, corners))
+            transform::image(i, cx).unwrap_or_else(|| crate::images::picture_fitted(&image, &padded, width, height, corners, s.object_fit))
         }
         // Alt text stands in for a broken image (not one still loading:
         // that's blank, so it doesn't flash).
@@ -920,7 +922,8 @@ pub(crate) fn text_run(span_len: usize, st: &InlineStyle, palette: &Palette) -> 
 
 fn render_paragraph(p: &Arc<Paragraph>, cx: &RenderCx) -> AnyElement {
     let flow = crate::inline::InlineFlow::new(p.clone(), cx);
-    if p.style.white_space.wraps() {
+    // A clipping box cuts unwrapped text off (or ends it in "…") instead.
+    if p.style.white_space.wraps() || p.style.overflow != Overflow::Visible {
         flow.into_any_element()
     } else {
         // Unwrapped text (pre, nowrap) scrolls sideways instead of

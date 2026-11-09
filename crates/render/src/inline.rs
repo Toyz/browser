@@ -100,6 +100,8 @@ struct Line {
     /// Width without trailing spaces.
     width: Pixels,
     extent: Extent,
+    /// The last line `line-clamp` shows, with more text cut after it.
+    clamped: bool,
 }
 
 /// (wrap width, lines, wrap-adjusted piece measurements)
@@ -518,7 +520,7 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     let collapse = para.style.white_space.collapses_spaces();
     let pieces = &para.pieces;
     let mut lines = Vec::new();
-    let mut line = Line { items: Vec::new(), width: px(0.), extent: strut };
+    let mut line = Line { items: Vec::new(), width: px(0.), extent: strut, clamped: false };
     let mut x = px(0.);
     let finish = |line: &mut Line, lines: &mut Vec<Line>, x: Pixels| {
         // Width excludes trailing spaces (they hang past the edge in CSS).
@@ -531,7 +533,7 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
             }
         }
         line.width = width.max(px(0.));
-        lines.push(std::mem::replace(line, Line { items: Vec::new(), width: px(0.), extent: strut }));
+        lines.push(std::mem::replace(line, Line { items: Vec::new(), width: px(0.), extent: strut, clamped: false }));
     };
 
     let mut i = 0;
@@ -578,6 +580,14 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     }
     if !line.items.is_empty() || lines.is_empty() {
         finish(&mut line, &mut lines, x);
+    }
+    if let Some(n) = para.style.line_clamp.map(|n| n as usize)
+        && lines.len() > n
+    {
+        lines.truncate(n);
+        if let Some(last) = lines.last_mut() {
+            last.clamped = true;
+        }
     }
     lines
 }
@@ -681,7 +691,9 @@ fn place(
                                 .h(h - t - b)
                                 .child(
                                     crate::view::transform::image(image, cx)
-                                        .unwrap_or_else(|| crate::images::picture(picture, padded, *width, *height)),
+                                        .unwrap_or_else(|| {
+                                            crate::images::picture_fitted(picture, padded, *width, *height, [px(0.); 4], image.style.object_fit)
+                                        }),
                                 )
                                 .into_any_element(),
                             _ => div().into_any_element(),
@@ -836,10 +848,17 @@ fn paint_flow(
             }
         }
 
-        // 3. Text, in runs of consecutive same-span pieces.
+        // 3. Text, in runs of consecutive same-span pieces. A line cut short
+        // (`text-overflow: ellipsis`, `line-clamp`) stops at `limit` and
+        // ends in "…".
+        let overflows = para.style.text_ellipsis && line.width > width + px(0.5);
+        let ellipsize = line.clamped || overflows;
+        let mut limit = None;
+        let mut ended = false;
+        let mut last_style = None;
         let items = &line.items;
         let mut k = 0;
-        while k < items.len() {
+        while k < items.len() && !ended {
             let (ix, x) = items[k];
             let piece = &para.pieces[ix];
             if matches!(piece.kind, PieceKind::Object(_) | PieceKind::Newline) {
@@ -896,8 +915,40 @@ fn paint_flow(
             };
             let m = measured[ix];
             let origin = point(dx + x, baseline - px(style.baseline_shift) - m.ascent);
-            shaped.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
+            last_style = Some((style, m, x + shaped.width));
+            let room = ellipsize.then(|| {
+                *limit.get_or_insert_with(|| {
+                    let run = text_run('…'.len_utf8(), style, palette);
+                    width - shapes::paint(&ts, "…".into(), px(style.font_size), &run).width
+                })
+            });
+            match room {
+                Some(room) if x + shaped.width > room => {
+                    // Cut where the room runs out; the rest of the line goes.
+                    let full = &para.text[start..stop];
+                    let cut = shaped.index_for_x(room - x).unwrap_or(full.len());
+                    let cut = (0..=cut.min(full.len())).rev().find(|&i| full.is_char_boundary(i)).unwrap_or(0);
+                    let kept = format!("{}…", full[..cut].trim_end());
+                    let run = text_run(kept.len(), style, palette);
+                    let cut_line = shapes::paint(&ts, kept.into(), px(style.font_size), &run);
+                    cut_line.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
+                    ended = true;
+                }
+                _ => {
+                    shaped.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
+                }
+            }
             k = end;
+        }
+        // A clamped line that fit still says there's more.
+        if line.clamped
+            && !ended
+            && let Some((style, m, x_end)) = last_style
+        {
+            let run = text_run('…'.len_utf8(), style, palette);
+            let dots = shapes::paint(&ts, "…".into(), px(style.font_size), &run);
+            let origin = point(dx + x_end, baseline - px(style.baseline_shift) - m.ascent);
+            dots.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
         }
         y += line.extent.height();
     }
@@ -995,7 +1046,13 @@ impl Element for InlineFlow {
         let rcx = self.cx.clone();
         let state = self.state.clone();
         let wraps = para.style.white_space.wraps();
-        let leaf = window.request_measured_layout(Style::default(), move |known, available, window, _cx| {
+        // In a clipping box the text may be narrower than its unwrapped
+        // line (cut off, or ending in "…").
+        let mut leaf_style = Style::default();
+        if para.style.overflow != style::Overflow::Visible {
+            leaf_style.min_size.width = px(0.).into();
+        }
+        let leaf = window.request_measured_layout(leaf_style, move |known, available, window, _cx| {
             let wrap = if !wraps {
                 None
             } else {

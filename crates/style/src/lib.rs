@@ -110,6 +110,12 @@ pub struct ComputedStyle {
     /// `z-index` (`None`: auto). Only its sign matters so far: negative
     /// positioned boxes paint under their in-flow siblings.
     pub z_index: Option<i32>,
+    /// How a replaced element's picture fits its box.
+    pub object_fit: ObjectFit,
+    /// `text-overflow: ellipsis`: an overflowing unwrapped line ends in "…".
+    pub text_ellipsis: bool,
+    /// `-webkit-line-clamp`: at most this many lines, the last ending in "…".
+    pub line_clamp: Option<u32>,
     /// `-webkit-text-fill-color` (inherited).
     pub text_fill: Option<Color>,
     /// SVG paint properties from CSS (`fill`, `stroke`...): inherited, and
@@ -212,6 +218,9 @@ impl ComputedStyle {
             text_gradient: None,
             pointer_events_none: false,
             z_index: None,
+            object_fit: ObjectFit::Fill,
+            text_ellipsis: false,
+            line_clamp: None,
             aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),

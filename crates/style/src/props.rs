@@ -195,6 +195,9 @@ pub enum Decl {
     PointerEventsNone(bool),
     /// `z-index` (`None`: auto).
     ZIndex(Option<i32>),
+    ObjectFit(crate::ObjectFit),
+    TextEllipsis(bool),
+    LineClamp(Option<u32>),
     /// `color-scheme` allows dark.
     ColorScheme(bool),
     TextDecoration { underline: bool, strikethrough: bool },
@@ -542,6 +545,24 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         "z-index" => {
             let z = p.try_parse(|p| p.expect_integer()).ok();
             out.push(D::ZIndex(z));
+        }
+        "text-overflow" => {
+            let v = ident(p)?;
+            out.push(D::TextEllipsis(v.eq_ignore_ascii_case("ellipsis")));
+        }
+        "-webkit-line-clamp" | "line-clamp" => {
+            let n = p.try_parse(|p| p.expect_integer()).ok().filter(|&n| n > 0).map(|n| n as u32);
+            out.push(D::LineClamp(n));
+        }
+        "object-fit" => {
+            let fit = match ident(p)?.to_ascii_lowercase().as_str() {
+                "contain" => crate::ObjectFit::Contain,
+                "cover" => crate::ObjectFit::Cover,
+                "none" => crate::ObjectFit::None,
+                "scale-down" => crate::ObjectFit::ScaleDown,
+                _ => crate::ObjectFit::Fill,
+            };
+            out.push(D::ObjectFit(fit));
         }
         "pointer-events" => {
             let v = ident(p)?;
