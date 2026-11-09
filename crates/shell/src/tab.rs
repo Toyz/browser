@@ -31,9 +31,11 @@ use crate::loader::{self, LoadedPage, same_document};
 const IMAGE_CONCURRENCY: usize = 8;
 /// Don't fetch more than this many images for one page (lazy loading comes later).
 const MAX_IMAGES: usize = 300;
-/// How far a swipe must go (px of scroll) to navigate, and how far it can.
-const SWIPE_GO: f32 = 140.0;
-const SWIPE_MAX: f32 = 200.0;
+/// How far a swipe must go (fraction of the width) to navigate, unless
+/// it's flicked; and how long the page takes to slide the rest of the way.
+const SWIPE_GO: f32 = 0.3;
+const SWIPE_FLICK: f32 = 18.0;
+const SWIPE_SETTLE: Duration = Duration::from_millis(220);
 /// How long the pointer rests on a link before we start loading it.
 const PRERENDER_DWELL: Duration = Duration::from_millis(60);
 
@@ -99,8 +101,17 @@ pub struct Tab {
     /// The inline element under the pointer, per paragraph.
     hover_inline: Option<(usize, NodeId)>,
     mouse_down: bool,
-    /// A two-finger horizontal swipe in progress (px; positive: back).
+    /// A two-finger horizontal swipe in progress (px the page has moved;
+    /// positive: back).
     swipe: f32,
+    /// Fingers on the trackpad. macOS keeps sending (momentum) scroll events
+    /// after they lift, with no end; only a live gesture moves the page.
+    swipe_active: bool,
+    /// The last event's horizontal movement, for flicks.
+    swipe_velocity: f32,
+    /// Let go: the page slides from, to, starting when.
+    swipe_release: Option<(f32, f32, std::time::Instant)>,
+    _swipe_task: Option<Task<()>>,
     /// Hover restyles wait until scrolling stops (like Chrome): otherwise
     /// every element passing under the pointer restyles the page.
     scrolling_until: Option<std::time::Instant>,
@@ -176,6 +187,10 @@ impl Tab {
             mouse_down: false,
             scrolling_until: None,
             swipe: 0.0,
+            swipe_active: false,
+            swipe_velocity: 0.0,
+            swipe_release: None,
+            _swipe_task: None,
             _scroll_end: None,
             page_gen: 0,
             hover_styler: None,
@@ -1304,63 +1319,92 @@ impl Tab {
             .into_any_element()
     }
 
-    /// Two-finger swipes go back and forward (Safari-style): a sideways
-    /// gesture slides an arrow in from the edge; let go past the line to go.
+    /// Two-finger swipes go back and forward (Safari-style): the page
+    /// follows the fingers sideways, uncovering the page it would go to; let
+    /// go past the line (or flick) and it slides the rest of the way.
     fn track_swipe(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(px(20.));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        let width = f32::from(window.viewport_size().width);
         match event.touch_phase {
-            TouchPhase::Started => self.swipe = 0.0,
+            TouchPhase::Started => {
+                self.swipe_active = self.swipe_release.is_none();
+                self.swipe = 0.0;
+                self.swipe_velocity = 0.0;
+            }
             TouchPhase::Moved => {
                 // Mostly sideways, and somewhere to go that way.
-                if dx.abs() > dy.abs() * 1.5 || self.swipe != 0.0 {
+                if self.swipe_active && (dx.abs() > dy.abs() * 1.5 || self.swipe != 0.0) {
                     let next = self.swipe + dx;
-                    if (next > 0.0 && self.can_go_back()) || (next < 0.0 && self.can_go_forward()) {
-                        self.swipe = next.clamp(-SWIPE_MAX, SWIPE_MAX);
-                        cx.notify();
-                    }
+                    let open = (next > 0.0 && self.can_go_back()) || (next < 0.0 && self.can_go_forward());
+                    // Nowhere to go: the page gives a little, reluctantly.
+                    self.swipe = if open { next.clamp(-width, width) } else { (self.swipe + dx * 0.2).clamp(-48.0, 48.0) };
+                    self.swipe_velocity = if open { dx } else { 0.0 };
+                    cx.notify();
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                let swipe = std::mem::take(&mut self.swipe);
-                if event.touch_phase == TouchPhase::Ended {
-                    if swipe >= SWIPE_GO {
-                        self.go_back(window, cx);
-                    } else if swipe <= -SWIPE_GO {
-                        self.go_forward(window, cx);
-                    }
+                self.swipe_active = false;
+                let from = std::mem::take(&mut self.swipe);
+                if from == 0.0 {
+                    return;
                 }
+                let flicked = self.swipe_velocity * from.signum() > SWIPE_FLICK;
+                let open = if from > 0.0 { self.can_go_back() } else { self.can_go_forward() };
+                let go = open && event.touch_phase == TouchPhase::Ended && (from.abs() >= width * SWIPE_GO || flicked);
+                let to = if go { width * from.signum() } else { 0.0 };
+                self.swipe_release = Some((from, to, std::time::Instant::now()));
+                self._swipe_task = Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(SWIPE_SETTLE).await;
+                    this.update_in(cx, |this, window, cx| {
+                        this.swipe_release = None;
+                        if go && from > 0.0 {
+                            this.go_back(window, cx);
+                        } else if go {
+                            this.go_forward(window, cx);
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }));
                 cx.notify();
             }
         }
     }
 
-    /// The arrow that follows a swipe in from the edge.
-    fn render_swipe(&self, cx: &App) -> Option<AnyElement> {
-        if self.swipe == 0.0 {
-            return None;
+    /// Where the page is mid-swipe (px; 0 when not swiping).
+    fn swipe_offset(&self, window: &mut Window) -> f32 {
+        let Some((from, to, start)) = self.swipe_release else { return self.swipe };
+        let t = (start.elapsed().as_secs_f32() / SWIPE_SETTLE.as_secs_f32()).min(1.0);
+        if t < 1.0 {
+            window.request_animation_frame();
         }
-        let theme = cx.theme();
-        let back = self.swipe > 0.0;
-        let progress = (self.swipe.abs() / SWIPE_GO).min(1.0);
-        let armed = progress >= 1.0;
-        let size = 44.0;
-        let offset = px(-size + progress * (size + 24.0));
-        let arrow = div()
-            .absolute()
-            .top(relative(0.5))
-            .mt(px(-size / 2.0))
-            .size(px(size))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .shadow_md()
-            .bg(if armed { theme.primary } else { theme.secondary })
-            .text_color(if armed { theme.primary_foreground } else { theme.foreground })
-            .opacity(0.4 + 0.6 * progress)
-            .child(Icon::new(if back { Lucide::ArrowLeft } else { Lucide::ArrowRight }).size(px(20.)));
-        Some(if back { arrow.left(offset) } else { arrow.right(offset) }.into_any_element())
+        let eased = 1.0 - (1.0 - t).powi(3);
+        from + (to - from) * eased
+    }
+
+    /// The page a swipe uncovers: the top of the back/forward page as it
+    /// was left, drawn without interaction (or a blank canvas if it has to
+    /// load).
+    fn render_peek(&self, back: bool, cx: &mut Context<Self>) -> AnyElement {
+        let ix = if back { self.history_ix.checked_sub(1) } else { Some(self.history_ix + 1) };
+        let Some((page, scroll)) = ix.and_then(|ix| self.page_cache.get(&ix)) else {
+            return div().size_full().bg(self.palette.canvas).into_any_element();
+        };
+        let mut rcx = self.render_cx(cx);
+        rcx.track_hover = false;
+        rcx.controls = Rc::new(|_: &render::Control, _: &style::ComputedStyle, _: &mut Window, _: &mut App| {
+            div().into_any_element()
+        });
+        // Enough rows to cover the window; the rest is clipped.
+        let rows = page.layout.rows.iter().skip(scroll.item_ix).take(40).map(|row| render::render_row(row, &rcx));
+        let canvas = page.layout.canvas.map(|c| self.palette.color(c)).unwrap_or(self.palette.canvas);
+        div()
+            .size_full()
+            .overflow_hidden()
+            .bg(canvas)
+            .child(div().flex().flex_col().mt(-scroll.offset_in_item).children(rows))
+            .into_any_element()
     }
 
     fn new_auth_prompt(&mut self, realm: String, window: &mut Window, cx: &mut Context<Self>) -> AuthPrompt {
@@ -1646,7 +1690,59 @@ impl Render for Tab {
                 this.scrolling_until = Some(std::time::Instant::now() + Duration::from_millis(150));
                 this.track_swipe(event, window, cx);
             }))
-            .child(self.render_content(cx))
+            .map(|d| {
+                let offset = self.swipe_offset(window);
+                let width = f32::from(window.viewport_size().width);
+                // The page itself, moved by the swipe: over the page it
+                // uncovers going back, under the one sliding in going forward.
+                let page = div()
+                    .absolute()
+                    .top_0()
+                    .left(px(if offset < 0.0 { offset * 0.3 } else { offset }))
+                    .size_full()
+                    .bg(canvas)
+                    .child(self.render_content(cx));
+                if offset == 0.0 {
+                    return d.child(page);
+                }
+                let back = offset > 0.0;
+                let open = if back { self.can_go_back() } else { self.can_go_forward() };
+                // How uncovered the lower page is (0..1).
+                let progress = (offset.abs() / width).min(1.0);
+                // A soft shadow cast by the top page's leading edge onto the
+                // lower one, and the lower page dimmed until it's uncovered.
+                let edge_shadow = |left: f32| {
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(left - 28.0))
+                        .w(px(28.0))
+                        .bg(linear_gradient(
+                            90.,
+                            linear_color_stop(gpui_kit::black().opacity(0.0), 0.0),
+                            linear_color_stop(gpui_kit::black().opacity(0.16 * (1.0 - progress * 0.6)), 1.0),
+                        ))
+                };
+                let shade = if back { 1.0 - progress } else { progress };
+                let dim = div().absolute().top_0().left_0().size_full().bg(gpui_kit::black().opacity(0.12 * shade));
+                let lower_left = if back { (offset - width) * 0.3 } else { offset * 0.3 };
+                let upper_left = if back { offset } else { width + offset };
+                let peek = div()
+                    .absolute()
+                    .top_0()
+                    .left(px(if back { lower_left } else { upper_left }))
+                    .size_full()
+                    .map(|p| if open { p.child(self.render_peek(back, cx)) } else { p.bg(cx.theme().secondary) });
+                // Nothing under the fingers reacts mid-gesture.
+                let shield = div().id("swipe-shield").absolute().top_0().left_0().size_full().occlude();
+                if back {
+                    d.child(peek.child(dim)).child(edge_shadow(upper_left)).child(page)
+                } else {
+                    d.child(page.child(dim)).child(edge_shadow(upper_left)).child(peek)
+                }
+                .child(shield)
+            })
             .when(self.loading.is_some(), |d| {
                 // Indeterminate progress: a bar sweeping across the top.
                 d.child(
@@ -1664,7 +1760,6 @@ impl Render for Tab {
                 )
             })
             .children(status)
-            .children(self.render_swipe(cx))
             .children(self.render_auth_prompt(cx))
     }
 }
