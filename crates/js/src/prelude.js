@@ -330,7 +330,9 @@
     try { return new Function("event", code); } catch (e) { reportError(e); return null; }
   }
   function reportError(e) {
-    N.log("error", (e && e.stack) ? e.stack : String(e));
+    let text = String(e);
+    try { if (e && e.stack && !String(e.stack).startsWith(text)) text += "\n" + e.stack; } catch (_) {}
+    N.log("error", text);
   }
   const clickListeners = new Set();
 
@@ -702,13 +704,66 @@
     get hash() { return new URL(this.href).hash; }
   }
   reflect(HTMLAnchorElement, [["href", "href", "url"], ["target", "target"], ["rel", "rel"], ["download", "download"]]);
-  class HTMLImageElement extends HTMLElement {
-    get complete() { return true; }
-    get naturalWidth() { return Number(this.getAttribute("width")) || 0; }
-    get naturalHeight() { return Number(this.getAttribute("height")) || 0; }
-    decode() { return Promise.resolve(); }
+  // Image loads: fetched natively (warming the page's image cache), then
+  // `load` or `error` with the real size.
+  const imageLoads = new Map();
+  let imageLoadSeq = 0;
+  function startImageLoad(img) {
+    const src = img.getAttribute("src");
+    if (!src) { img._img = null; return; }
+    if (img._img && img._img.src === src) return;
+    const id = ++imageLoadSeq;
+    img._img = { src, state: "loading", w: 0, h: 0, id };
+    imageLoads.set(id, img);
+    N.imageLoad(id, src);
   }
-  reflect(HTMLImageElement, [["src", "src", "url"], ["alt", "alt"], ["srcset", "srcset"], ["width", "width", "num"], ["height", "height", "num"], ["loading", "loading"]]);
+  function imageEvent(id, ok, w, h) {
+    const img = imageLoads.get(id);
+    imageLoads.delete(id);
+    if (!img || !img._img || img._img.id !== id) return;
+    Object.assign(img._img, { state: ok ? "done" : "broken", w, h });
+    const waiters = img._decode || [];
+    img._decode = null;
+    for (const [resolve, reject] of waiters) ok ? resolve() : reject(new DOMException("The source image cannot be decoded.", "EncodingError"));
+    img.dispatchEvent(new Event(ok ? "load" : "error"));
+  }
+  class HTMLImageElement extends HTMLElement {
+    get complete() { return !this._img || this._img.state !== "loading"; }
+    get naturalWidth() { return this._img && this._img.state === "done" ? this._img.w : 0; }
+    get naturalHeight() { return this._img && this._img.state === "done" ? this._img.h : 0; }
+    get currentSrc() { return this._img ? N.resolve(this._img.src) || "" : ""; }
+    decode() {
+      if (this.complete) return this._img && this._img.state === "broken" ? Promise.reject(new DOMException("The source image cannot be decoded.", "EncodingError")) : Promise.resolve();
+      return new Promise((resolve, reject) => (this._decode || (this._decode = [])).push([resolve, reject]));
+    }
+    setAttribute(name, value) {
+      super.setAttribute(name, value);
+      if (String(name).toLowerCase() === "src") startImageLoad(this);
+    }
+    addEventListener(type, fn, opts) {
+      super.addEventListener(type, fn, opts);
+      if ((type === "load" || type === "error") && this._img === undefined) startImageLoad(this);
+    }
+    set onload(fn) { this._onload = fn; if (this._img === undefined) startImageLoad(this); }
+    get onload() { return this._onload || null; }
+    set onerror(fn) { this._onerror = fn; if (this._img === undefined) startImageLoad(this); }
+    get onerror() { return this._onerror || null; }
+  }
+  reflect(HTMLImageElement, [["src", "src", "url"], ["alt", "alt"], ["srcset", "srcset"], ["sizes", "sizes"], ["loading", "loading"], ["decoding", "decoding"], ["crossOrigin", "crossorigin"]]);
+  for (const dim of ["width", "height"]) {
+    Object.defineProperty(HTMLImageElement.prototype, dim, {
+      configurable: true,
+      get() { const a = this.getAttribute(dim); return a !== null ? Number(a) || 0 : (dim === "width" ? this.naturalWidth : this.naturalHeight); },
+      set(v) { this.setAttribute(dim, String(Math.floor(Number(v)) || 0)); },
+    });
+  }
+  function Image(width, height) {
+    const img = document.createElement("img");
+    if (width !== undefined) img.width = width;
+    if (height !== undefined) img.height = height;
+    return img;
+  }
+  Image.prototype = HTMLImageElement.prototype;
   class HTMLScriptElement extends HTMLElement {
     get text() { return this.textContent; }
     set text(v) { this.textContent = v; }
@@ -1250,7 +1305,13 @@
     if (isNode(a)) return "<" + (a.localName || a.nodeName) + ">";
     try { return JSON.stringify(a); } catch (_) { return String(a); }
   }).join(" ");
-  for (const level of ["log", "info", "warn", "error", "debug", "trace"]) consoleImpl[level] = (...a) => N.log(level, fmt(a));
+  for (const level of ["log", "info", "warn", "debug"]) consoleImpl[level] = (...a) => N.log(level, fmt(a));
+  // Where an error was reported from, too: pages often log bare stacks.
+  for (const level of ["error", "trace"]) consoleImpl[level] = (...a) => {
+    let where = "";
+    try { where = "\n  (logged " + String(new Error().stack).split("\n").slice(1, 4).join(" <- ").replace(/\s+/g, " ") + ")"; } catch (_) {}
+    N.log(level, "[" + a.map((x) => typeof x).join(",") + "] " + fmt(a) + where);
+  };
   for (const name of ["group", "groupCollapsed", "groupEnd", "time", "timeEnd", "count", "assert", "table", "dir"]) consoleImpl[name] = () => {};
 
   const navigatorImpl = {
@@ -1267,7 +1328,7 @@
     document, location, history, navigator: navigatorImpl, console: consoleImpl,
     Window, HTMLDocument: Document,
     Node, Element, HTMLElement, Text, Comment, Document, DocumentFragment, CharacterData, EventTarget,
-    HTMLAnchorElement, HTMLImageElement, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
+    HTMLAnchorElement, HTMLImageElement, Image, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
     HTMLTextAreaElement, HTMLSelectElement, HTMLOptionElement, HTMLButtonElement, HTMLFormElement,
     HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement: HTMLMediaElement, HTMLAudioElement: HTMLMediaElement,
     HTMLIFrameElement, HTMLDivElement: HTMLElement, HTMLSpanElement: HTMLElement, SVGElement: Element,
@@ -1994,6 +2055,7 @@
     __fireWindow(type) { window.dispatchEvent(new Event(type)); },
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
     __fireTimer: fireTimer,
+    __imageEvent: imageEvent,
     __dispatchClick(id) {
       const n = wrap(id);
       if (!n) return false;

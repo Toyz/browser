@@ -14,6 +14,7 @@
 
 pub mod cors;
 mod dom;
+mod images;
 mod modules;
 pub mod storage;
 mod sse;
@@ -67,6 +68,8 @@ pub enum ToJs {
     /// An `EventSource` event: `open`, `error`, or a message (type, data,
     /// last event id).
     Sse { id: u32, kind: &'static str, event: String, data: String, last_id: String },
+    /// An image a script loaded finished: its size, or `None` if it failed.
+    Image { id: u32, size: Option<(u32, u32)> },
     Shutdown,
 }
 

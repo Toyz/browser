@@ -16,6 +16,8 @@ slotmap.workspace = true
 anyhow.workspace = true
 net.workspace = true
 async-channel = "2"
+# Image sizes for `new Image()` loads.
+imagesize = "0.13"
 # crypto.subtle and getRandomValues (already in the tree through rustls).
 ring = "0.17"
 # WebSocket (rustls, like the rest of the network).

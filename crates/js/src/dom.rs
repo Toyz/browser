@@ -237,9 +237,10 @@ impl Runtime {
     }
 
     /// Run a module (it may import others, and await).
-    fn exec_module(&mut self, code: &str, url: &Url) {
+    fn exec_module(&mut self, code: &str, url: &Url, external: bool) {
         self.call_global("__setCurrentScript", &[JsValue::null()]);
-        let module = match self.modules.parse(code, url, &mut self.cx) {
+        let parsed = if external { self.modules.entry(code, url, &mut self.cx) } else { self.modules.parse(code, url, &mut self.cx) };
+        let module = match parsed {
             Ok(m) => m,
             Err(e) => return self.log_error(url.as_str(), e),
         };
@@ -281,8 +282,10 @@ impl Runtime {
         if let Some((code, what)) = self.script_source(node) {
             let t = Instant::now();
             if module {
-                let url = Url::parse(&what).unwrap_or_else(|_| self.dom.borrow().doc.url.clone());
-                self.exec_module(&code, &url);
+                let parsed = Url::parse(&what);
+                let external = parsed.is_ok();
+                let url = parsed.unwrap_or_else(|_| self.dom.borrow().doc.url.clone());
+                self.exec_module(&code, &url, external);
             } else {
                 self.exec(Some(node), &code, &what);
             }
@@ -476,6 +479,14 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Image { id, size } => {
+                {
+                    let mut dom = self.dom.borrow_mut();
+                    dom.fetches = dom.fetches.saturating_sub(1);
+                }
+                let (w, h) = size.unwrap_or((0, 0));
+                self.call_global("__imageEvent", &[JsValue::from(id), JsValue::from(size.is_some()), JsValue::from(w), JsValue::from(h)]);
+            }
             ToJs::Checked { node, checked } => {
                 self.call_global("__dispatchChecked", &[JsValue::from(node_to_number(node)), JsValue::from(checked)]);
             }
@@ -1070,6 +1081,21 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         dom.event_sources.insert(id, closed.clone());
         crate::sse::open(id, dom.doc.url.clone(), url.clone(), credentials, closed, dom.fetch_tx.clone());
         Ok(js_str(url.as_str()))
+    }));
+    // imageLoad(id, url): fetch an image in the background.
+    add("imageLoad", 2, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let href = arg_string(a, 1, cx)?;
+        let mut dom = d.borrow_mut();
+        // Counted like a fetch: the first paint waits a little for them.
+        dom.fetches += 1;
+        match dom.doc.resolve_url(&href) {
+            Some(url) => crate::images::load(id, url, dom.fetch_tx.clone()),
+            None => {
+                dom.fetch_tx.send(ToJs::Image { id, size: None }).ok();
+            }
+        }
+        Ok(JsValue::undefined())
     }));
     add("sseClose", 1, Box::new(|d, a, _| {
         let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;

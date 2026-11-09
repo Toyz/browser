@@ -4308,6 +4308,7 @@ dependencies = [
  "boa_engine",
  "chrono",
  "html",
+ "imagesize 0.13.0",
  "net",
  "page",
  "ring",

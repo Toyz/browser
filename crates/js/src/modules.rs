@@ -48,6 +48,18 @@ impl WebModules {
         Module::parse(source, None, cx)
     }
 
+    /// A `<script type="module" src>`: one instance per URL, shared with
+    /// `import`s of the same URL (a page's entry module is often imported
+    /// again by its lazy chunks, and two copies would split its state).
+    pub fn entry(&self, code: &str, url: &Url, cx: &mut Context) -> JsResult<Module> {
+        if let Some(m) = self.cache.borrow().get(url.as_str()) {
+            return Ok(m.clone());
+        }
+        let module = self.parse(code, url, cx)?;
+        self.cache.borrow_mut().insert(url.to_string(), module.clone());
+        Ok(module)
+    }
+
     fn load(&self, url: Url, cx: &mut Context) -> JsResult<Module> {
         if let Some(m) = self.cache.borrow().get(url.as_str()) {
             return Ok(m.clone());

@@ -451,3 +451,25 @@ fn streaming_ndjson_and_event_source() {
     }
     assert_eq!(text, "ndjson 5 | text 3 | open | sse string | closed");
 }
+
+#[test]
+fn images_load_with_their_size() {
+    // data: URLs load without the network.
+    let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAYAAACddGYaAAAAEUlEQVR4nGNgYGD4z8DAwMAAAA0AAQ5/vWQAAAAASUVORK5CYII=";
+    let doc = run(&format!(
+        r##"<body><p id="o"></p><script>
+        const out = [];
+        const img = new Image();
+        img.onload = () => {{ out.push("load " + img.naturalWidth + "x" + img.naturalHeight + " " + img.complete); document.getElementById("o").textContent = out.join(" | "); }};
+        out.push("pending " + img.complete);
+        img.src = "{png}";
+        const bad = document.createElement("img");
+        bad.addEventListener("error", () => {{ out.push("error"); document.getElementById("o").textContent = out.join(" | "); }});
+        bad.src = "data:text/plain,nope";
+        </script></body>"##
+    ));
+    let text = text_of(&doc, "o");
+    assert!(text.contains("pending true"), "{text}");
+    assert!(text.contains("load 3x2 true"), "{text}");
+    assert!(text.contains("error"), "{text}");
+}
