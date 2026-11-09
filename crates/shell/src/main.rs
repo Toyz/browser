@@ -82,6 +82,33 @@ fn apply_theme(window: &mut Window, cx: &mut App) {
     Theme::change(mode, Some(window), cx);
 }
 
+/// A tab being dragged to a new place in the strip.
+#[derive(Clone)]
+struct DraggedTab {
+    ix: usize,
+    title: SharedString,
+}
+
+/// What follows the pointer while a tab is dragged.
+struct DraggedTabView(DraggedTab);
+
+impl Render for DraggedTabView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = ChromeColors::get(cx);
+        div()
+            .px_3()
+            .py_1p5()
+            .max_w(px(TAB_MAX_WIDTH))
+            .rounded_t(px(TAB_RADIUS))
+            .bg(colors.surface)
+            .text_xs()
+            .text_color(cx.theme().foreground)
+            .shadow_md()
+            .truncate()
+            .child(self.0.title.clone())
+    }
+}
+
 struct OpenTab {
     tab: Entity<Tab>,
     _subscriptions: [Subscription; 2],
@@ -211,6 +238,19 @@ impl Feather {
         window.set_window_title(&title);
     }
 
+    /// Drag and drop in the tab strip: move tab `from` to where `to` is.
+    fn move_tab(&mut self, from: usize, to: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let active = self.active_tab();
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = self.tabs.iter().position(|t| t.tab == active).unwrap_or(0);
+        self.sync_chrome(window, cx);
+        cx.notify();
+    }
+
     fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         let n = self.tabs.len() as isize;
         let ix = (self.active as isize + delta).rem_euclid(n) as usize;
@@ -282,6 +322,10 @@ impl Feather {
                         this.close_tab(ix, window, cx);
                     })),
             )
+            // Drag to reorder.
+            .on_drag(DraggedTab { ix, title: tab.title() }, |dragged, _, _, cx| cx.new(|_| DraggedTabView(dragged.clone())))
+            .drag_over::<DraggedTab>(move |style, _, _, cx| style.bg(cx.theme().secondary))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, window, cx| this.move_tab(dragged.ix, ix, window, cx)))
             // Tabs are buttons, not part of the draggable title bar.
             .on_mouse_down(
                 MouseButton::Left,
@@ -330,7 +374,9 @@ impl Feather {
                     .flex()
                     .items_end()
                     .pl_2()
-                    .pr(px(80.))
+                    // Somewhere to grab the window by. (Windows and Linux
+                    // get their window buttons after this, from TitleBar.)
+                    .pr(px(if cfg!(target_os = "macos") { 80. } else { 40. }))
                     .children(tabs)
                     .child(new_tab),
             )
@@ -500,6 +546,8 @@ fn main() {
 
         let args = Args::parse();
         FORCED_APPEARANCE.set(args.dark).ok();
+        // SVG sprite sheets (`<use href="icons.svg#x">`) load through the cache.
+        render::set_text_fetcher(net::fetch_text_cached);
         let capturing = args.capture.is_some();
         History::init(!capturing, cx);
         let bounds = Bounds::centered(None, size(px(args.width), px(args.height)), cx);

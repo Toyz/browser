@@ -9,15 +9,80 @@ use std::borrow::Cow;
 use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context as _, Result, bail};
-use gpui_kit::{AssetSource, Image, ImageFormat, SharedString};
+use gpui_kit::{
+    AnyElement, AssetSource, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
+    Styled, StyledImage, div, img, relative,
+};
 use url::Url;
 
 #[derive(Clone)]
 pub enum ImageState {
     Loading,
-    /// Intrinsic size in image pixels.
-    Ready { image: Arc<Image>, width: f32, height: f32 },
+    /// Intrinsic size in image pixels; `padded`: see [`Prepared::padded`].
+    Ready { image: Arc<Image>, padded: Option<Arc<RenderImage>>, width: f32, height: f32 },
     Failed,
+}
+
+/// A downloaded image, ready to draw.
+pub struct Prepared {
+    pub image: Arc<Image>,
+    /// Raster images decoded here, with a 1px border repeating their edge
+    /// pixels. GPUI samples images from a texture atlas with linear
+    /// filtering; scaled up (every image on a 2x display), the outermost
+    /// pixels blend with the atlas's transparent padding into a faint grey
+    /// frame. Drawn a source pixel larger and clipped, the blur falls in
+    /// the repeated border instead.
+    pub padded: Option<Arc<RenderImage>>,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Prepared {
+    pub fn into_state(self) -> ImageState {
+        ImageState::Ready { image: self.image, padded: self.padded, width: self.width, height: self.height }
+    }
+}
+
+/// Decode and pad a raster image (not GIFs: they may animate).
+fn padded(bytes: &[u8], format: ImageFormat) -> Option<Arc<RenderImage>> {
+    if !matches!(format, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Bmp | ImageFormat::Ico) {
+        return None;
+    }
+    let src = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = src.dimensions();
+    if w == 0 || h == 0 || w > 4096 || h > 4096 {
+        return None;
+    }
+    let mut out = image::RgbaImage::new(w + 2, h + 2);
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        let sx = x.saturating_sub(1).min(w - 1);
+        let sy = y.saturating_sub(1).min(h - 1);
+        let p = src.get_pixel(sx, sy).0;
+        // GPUI wants BGRA.
+        *px = image::Rgba([p[2], p[1], p[0], p[3]]);
+    }
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(out)])))
+}
+
+/// Draw a loaded image filling its parent (padded when possible).
+pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32) -> AnyElement {
+    match padded {
+        Some(p) if width > 0.0 && height > 0.0 => div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .child(
+                img(p.clone())
+                    .absolute()
+                    .left(relative(-1.0 / width))
+                    .top(relative(-1.0 / height))
+                    .w(relative((width + 2.0) / width))
+                    .h(relative((height + 2.0) / height))
+                    .object_fit(ObjectFit::Fill),
+            )
+            .into_any_element(),
+        _ => img(image.clone()).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+    }
 }
 
 /// Images for the current page, filled in as they arrive.
@@ -59,7 +124,7 @@ impl<A: AssetSource> AssetSource for PageAssets<A> {
 
 /// Identify the format and intrinsic size of downloaded image bytes. Cheap
 /// (header parsing only); GPUI does the actual decoding when it first draws.
-pub fn prepare(bytes: Vec<u8>) -> Result<(Arc<Image>, f32, f32)> {
+pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
     let (format, (width, height)) = if looks_like_svg(&bytes) {
         (ImageFormat::Svg, svg_size(&bytes).unwrap_or((300.0, 150.0)))
     } else {
@@ -79,7 +144,8 @@ pub fn prepare(bytes: Vec<u8>) -> Result<(Arc<Image>, f32, f32)> {
     if width <= 0.0 || height <= 0.0 {
         bail!("empty image");
     }
-    Ok((Arc::new(Image::from_bytes(format, bytes)), width, height))
+    let padded = padded(&bytes, format);
+    Ok(Prepared { image: Arc::new(Image::from_bytes(format, bytes)), padded, width, height })
 }
 
 fn looks_like_svg(bytes: &[u8]) -> bool {
@@ -125,6 +191,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raster_images_get_an_edge_border() {
+        let mut src = image::RgbaImage::new(3, 2);
+        src.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        src.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let p = prepare(png.into_inner()).unwrap();
+        let padded = p.padded.expect("padded");
+        let frame = padded.as_bytes(0).unwrap();
+        // 5x4 BGRA; the corner repeats the red top-left pixel (as BGRA).
+        assert_eq!(frame.len(), 5 * 4 * 4);
+        assert_eq!(&frame[0..4], &[0, 0, 255, 255]);
+    }
+
+    #[test]
     fn svg_sizes() {
         assert_eq!(svg_size(br#"<svg xmlns="x" width="18" height="18px">"#), Some((18.0, 18.0)));
         assert_eq!(svg_size(br#"<?xml?><svg viewBox="0 0 24 12">"#), Some((24.0, 12.0)));
@@ -138,8 +218,8 @@ mod tests {
             "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAYAAACZgbYnAAAAD0lEQVR42mNkYGBgZGAAAAAQAAEh4qYfAAAAAElFTkSuQmCC",
         )
         .unwrap();
-        let (_, w, h) = prepare(png).unwrap();
-        assert_eq!((w, h), (1.0, 2.0));
+        let p = prepare(png).unwrap();
+        assert_eq!((p.width, p.height), (1.0, 2.0));
         assert!(prepare(b"not an image".to_vec()).is_err());
     }
 }

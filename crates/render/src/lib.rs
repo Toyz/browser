@@ -10,7 +10,7 @@ pub mod images;
 pub mod inline;
 pub mod view;
 
-pub use boxes::{LayoutTree, build, build_plain_text};
+pub use boxes::{LayoutTree, build, build_plain_text, set_text_fetcher};
 pub use images::{ImageState, ImageStore, PageAssets};
 pub use boxes::{Control, ControlKind, activation_target, activation_url};
 pub use view::{BlockHover, ControlRenderer, FontBook, InlineHover, LinkClick, LinkHover, Palette, RenderCx, render_fixed, render_row};

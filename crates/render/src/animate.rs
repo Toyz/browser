@@ -100,7 +100,8 @@ pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
         *r = mix_len(*a, *b, t);
     }
     s.opacity = mix_f(from.opacity, to.opacity, t);
-    s.translate = (mix_len(from.translate.0, to.translate.0, t), mix_len(from.translate.1, to.translate.1, t));
+    let mix_offset = |a: style::Offset, b: style::Offset| style::Offset { px: mix_f(a.px, b.px, t), pct: mix_f(a.pct, b.pct, t) };
+    s.translate = (mix_offset(from.translate.0, to.translate.0), mix_offset(from.translate.1, to.translate.1));
     s.shadows = mix_shadows(from, to, t);
     if t < 0.5 {
         s.underline = from.underline;

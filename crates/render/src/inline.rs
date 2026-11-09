@@ -28,6 +28,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use style::{LineHeight, TextAlign as CssTextAlign, VerticalAlign};
 use url::Url;
 
@@ -669,9 +670,11 @@ fn place(
                         let (w, h) = (m.width, m.ascent);
                         let (t, r, b, l) = edges(&image.style);
                         let picture = match cx.images.borrow().get(&*image.src) {
-                            Some(ImageState::Ready { image, .. }) => {
-                                img(image.clone()).w(w - l - r).h(h - t - b).object_fit(ObjectFit::Fill).into_any_element()
-                            }
+                            Some(ImageState::Ready { image, padded, width, height }) => div()
+                                .w(w - l - r)
+                                .h(h - t - b)
+                                .child(crate::images::picture(image, padded, *width, *height))
+                                .into_any_element(),
                             _ => div().into_any_element(),
                         };
                         let mut el = div().w(w).h(h).pt(t).pr(r).pb(b).pl(l).child(picture).into_any_element();
@@ -936,7 +939,16 @@ impl Element for InlineFlow {
         for (oi, object) in self.para.objects.iter().enumerate() {
             if let InlineObject::BlockBox(block) = object {
                 let content = crate::view::render_block_box(block, &self.cx);
-                let mut el = div().absolute().top_0().left_0().child(content).into_any_element();
+                // A percentage width is of the line's containing block: give
+                // the box the flow's full width to take it from.
+                let percent = matches!(block.style.width, style::Length::Percent(_));
+                let mut el = div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .when(percent, |d| d.w_full())
+                    .child(content)
+                    .into_any_element();
                 let layout_id = el.request_layout(window, cx);
                 self.blocks.push((oi as u32, el, layout_id));
             }

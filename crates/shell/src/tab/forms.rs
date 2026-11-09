@@ -131,15 +131,20 @@ impl Tab {
                     let field = self.new_field(control, *password, *multiline, window, cx);
                     self.forms.fields.insert(node, field);
                 }
+                let placeholder = self.palette.color(control.placeholder_color);
                 let field = match &self.forms.fields[&node] {
-                    Field::Line(state) => Input::new(state)
-                        .appearance(false)
-                        .px_0()
-                        .disabled(control.disabled)
-                        .text_color(fg)
-                        .text_size(font)
-                        .size_full()
-                        .into_any_element(),
+                    Field::Line(state) => PlaceholderColor {
+                        color: placeholder,
+                        child: Input::new(state)
+                            .appearance(false)
+                            .px_0()
+                            .disabled(control.disabled)
+                            .text_color(fg)
+                            .text_size(font)
+                            .size_full()
+                            .into_any_element(),
+                    }
+                    .into_any_element(),
                     Field::Area(state) => Textarea::new(state)
                         .appearance(false)
                         .disabled(control.disabled)
@@ -480,4 +485,72 @@ impl Tab {
 fn node_key(n: NodeId) -> usize {
     use slotmap::Key as _;
     n.data().as_ffi() as usize
+}
+
+/// gpui-kit's text field takes its placeholder color from the app theme each
+/// time it renders. A page's `::placeholder` color goes in by lending the
+/// theme that color while the field renders, and taking it back after.
+struct PlaceholderColor {
+    color: Hsla,
+    child: AnyElement,
+}
+
+impl IntoElement for PlaceholderColor {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for PlaceholderColor {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let theme = gpui_kit::component::Theme::global_mut(cx);
+        let saved = std::mem::replace(&mut theme.muted_foreground, self.color);
+        let id = self.child.request_layout(window, cx);
+        gpui_kit::component::Theme::global_mut(cx).muted_foreground = saved;
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
 }

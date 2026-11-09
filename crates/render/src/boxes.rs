@@ -102,6 +102,8 @@ pub struct Control {
     /// The initial value (the `value` attribute, or a textarea's text).
     pub value: String,
     pub placeholder: Option<String>,
+    /// `::placeholder`'s color (the UA's grey unless the page says).
+    pub placeholder_color: Color,
     pub disabled: bool,
 }
 
@@ -194,7 +196,10 @@ impl Block {
         if self.children.len() <= columns {
             return Err(self);
         }
-        let spans = self.children.iter().any(|c| matches!(c, LayoutBox::Block(b) if b.style.grid_column.is_some()));
+        // Spanning or explicitly placed items (which may share a cell) need the real grid.
+        let spans = self.children.iter().any(|c| {
+            matches!(c, LayoutBox::Block(b) if b.style.grid_column.is_some() || b.style.grid_row_start.is_some() || b.style.grid_column_start.is_some())
+        });
         if spans {
             return Err(self);
         }
@@ -670,7 +675,10 @@ impl Builder<'_> {
             let positioned = matches!(ps.position, style::Position::Absolute | style::Position::Fixed);
             let sized = !ps.width.is_auto() || !ps.height.is_auto();
             let visible = ps.painted_background().is_some() || ps.has_border();
-            if !empty || !(positioned || (sized && visible)) || ps.display == Display::None {
+            // A block-level one takes space even when empty (`padding-top: 40%`
+            // aspect-ratio boxes).
+            let block = ps.display.is_block_level() && ps.display != Display::None;
+            if !empty || !(positioned || (sized && visible) || block) || ps.display == Display::None {
                 return None;
             }
             let mut ps = ps;
@@ -1133,10 +1141,16 @@ impl Builder<'_> {
         if st.height.is_auto() {
             st.height = Length::Px(h + edges_h);
         }
+        let placeholder_color = self
+            .styler
+            .compute_pseudo(self.doc, id, &style, style::Pseudo::Placeholder)
+            .map(|ps| ps.color)
+            .unwrap_or(Color::Rgba(0x757575ff));
         let control = Control {
             node: id,
             kind,
             value,
+            placeholder_color,
             placeholder: element.attr("placeholder").map(str::to_owned),
             disabled: element.attr("disabled").is_some(),
         };
@@ -1209,6 +1223,20 @@ impl Builder<'_> {
     fn build_svg(&mut self, id: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
         let mut markup = String::new();
         serialize_svg(self.doc, id, &color_hex(style.color), true, &mut markup);
+        // Sized only by CSS: give the standalone document that size (else its
+        // viewport defaults to 300x150 and the drawing lands wrong).
+        let px = |l: Length| match l {
+            Length::Px(v) if v > 0.0 => Some(v),
+            _ => None,
+        };
+        if let (Some(w), Some(h)) = (px(style.width), px(style.height))
+            && element.attr("width").is_none()
+            && element.attr("height").is_none()
+            && let Some(rest) = markup.strip_prefix("<svg")
+        {
+            let viewbox = if element.attr("viewBox").is_none() { format!(r#" viewBox="0 0 {w} {h}""#) } else { String::new() };
+            markup = format!(r#"<svg width="{w}" height="{h}"{viewbox}{rest}"#);
+        }
         let encoded = percent_encoding::utf8_percent_encode(&markup, percent_encoding::NON_ALPHANUMERIC);
         let Ok(src) = Url::parse(&format!("data:image/svg+xml,{encoded}")) else { return };
         let number = |name: &str| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
@@ -1903,11 +1931,98 @@ fn escape_xml(s: &str, out: &mut String) {
 }
 
 /// Write an SVG subtree back out as standalone markup.
+/// How the box builder fetches text resources it needs while building (SVG
+/// sprite sheets for `<use href="icons.svg#menu">`). Set by the browser.
+static TEXT_FETCHER: std::sync::OnceLock<fn(&Url) -> Option<String>> = std::sync::OnceLock::new();
+
+pub fn set_text_fetcher(f: fn(&Url) -> Option<String>) {
+    TEXT_FETCHER.set(f).ok();
+}
+
+/// The markup of the element with `id="frag"` in an SVG document, with a
+/// `<symbol>` turned into a nested `<svg>` (keeping its viewBox).
+fn svg_fragment(svg: &str, frag: &str) -> Option<String> {
+    let needle = format!("id=\"{frag}\"");
+    let at = svg.find(&needle).or_else(|| svg.find(&format!("id='{frag}'")))?;
+    let start = svg[..at].rfind('<')?;
+    let name: String = svg[start + 1..].chars().take_while(|c| c.is_alphanumeric() || *c == ':').collect();
+    // The matching close tag (same-name nesting counted).
+    let (open, close) = (format!("<{name}"), format!("</{name}>"));
+    let mut depth = 0usize;
+    let mut i = start;
+    let end = loop {
+        let next_open = svg[i + 1..].find(&open).map(|p| p + i + 1);
+        let next_close = svg[i + 1..].find(&close).map(|p| p + i + 1)?;
+        match next_open {
+            Some(o) if o < next_close => {
+                depth += 1;
+                i = o;
+            }
+            _ if depth == 0 => break next_close + close.len(),
+            _ => {
+                depth -= 1;
+                i = next_close;
+            }
+        }
+    };
+    let snippet = &svg[start..end];
+    if name == "symbol" {
+        Some(format!("<svg{}</svg>", &snippet["<symbol".len()..snippet.len() - "</symbol>".len()]))
+    } else {
+        Some(snippet.to_owned())
+    }
+}
+
+/// Inline what a `<use>` points at (sprite icons), since the renderer
+/// draws a standalone document and can't follow references out of it.
+fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: &mut String) -> bool {
+    let Some(href) = e.attrs.iter().find(|a| &*a.name.local == "href").map(|a| a.value.to_string()) else { return false };
+    let size = |name: &str| e.attr(name).map(|v| format!(" {name}=\"{v}\"")).unwrap_or_default();
+    let place = format!("{}{}{}{}", size("x"), size("y"), size("width"), size("height"));
+    let fragment = if let Some(id) = href.strip_prefix('#') {
+        let Some(target) = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|el| el.attr("id")) == Some(id)) else {
+            return false;
+        };
+        let mut inner = String::new();
+        serialize_svg(doc, target, current_color, false, &mut inner);
+        if inner.starts_with("<symbol") {
+            format!("<svg{}</svg>", &inner["<symbol".len()..inner.len() - "</symbol>".len()])
+        } else {
+            inner
+        }
+    } else {
+        let Some(url) = doc.base_url().join(&href).ok() else { return false };
+        let Some(frag) = url.fragment().map(str::to_owned) else { return false };
+        let mut sheet = url.clone();
+        sheet.set_fragment(None);
+        // Web pages don't get to read local files.
+        if sheet.scheme() == "file" && doc.base_url().scheme() != "file" {
+            return false;
+        }
+        let Some(fetch) = TEXT_FETCHER.get() else { return false };
+        let Some(text) = fetch(&sheet) else { return false };
+        let Some(snippet) = svg_fragment(&text, &frag) else { return false };
+        snippet.replace("currentColor", current_color)
+    };
+    // Position it where the <use> was (x/y/width/height go on the nested svg).
+    if let Some(rest) = fragment.strip_prefix("<svg") {
+        out.push_str("<svg");
+        out.push_str(&place);
+        out.push_str(rest);
+    } else {
+        out.push_str(&fragment);
+    }
+    true
+}
+
 fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, out: &mut String) {
     match &doc.node(id).data {
         NodeData::Text(t) => escape_xml(t, out),
         NodeData::Element(e) => {
             let name = &*e.name.local;
+            if name == "use" && resolve_use(doc, e, current_color, out) {
+                return;
+            }
             out.push('<');
             out.push_str(name);
             if root && e.attr("xmlns").is_none() {
@@ -2922,6 +3037,18 @@ mod tests {
         assert_eq!(alpha(1), "a");
         assert_eq!(alpha(27), "aa");
         assert_eq!(roman(1994), "mcmxciv");
+    }
+}
+
+#[cfg(test)]
+mod svg_tests {
+    use super::svg_fragment;
+
+    #[test]
+    fn sprite_symbols_become_svgs() {
+        let sheet = r#"<svg><symbol id="a" viewBox="0 0 1 1"><path d="M0"/></symbol><symbol id="menu" viewBox="0 0 24 24"><g><path d="M1"/></g></symbol></svg>"#;
+        assert_eq!(svg_fragment(sheet, "menu").unwrap(), r#"<svg id="menu" viewBox="0 0 24 24"><g><path d="M1"/></g></svg>"#);
+        assert!(svg_fragment(sheet, "nope").is_none());
     }
 }
 

@@ -5,6 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# The version GPUI decodes with: we hand it pre-decoded frames (see images.rs).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 slotmap.workspace = true
 gpui-kit.workspace = true
 page.workspace = true

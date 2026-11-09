@@ -130,6 +130,8 @@ pub enum Decl {
     FlexWrap(bool),
     JustifyContent(Justify),
     AlignItems(Align),
+    /// Where wrapped flex lines go (as `Justify`: it has the same values).
+    AlignContent(Justify),
     AlignSelf(Option<Align>),
     RowGap(LenSpec),
     ColumnGap(LenSpec),
@@ -141,6 +143,8 @@ pub enum Decl {
     GridTracks(Option<Arc<[TrackSpec]>>),
     GridAreas(Option<GridAreas>),
     GridArea(Option<Arc<str>>),
+    GridRowStart(Option<i16>),
+    GridColumnStart(Option<i16>),
     GridColumn(Option<GridSpan>),
     Overflow(Overflow),
     Opacity(f32),
@@ -682,16 +686,15 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 Err(_) => Some(parse_align(p)?),
             }))
         }
-        "align-content" => {
-            let _ = parse_justify(p)?; // accepted, not modelled
-        }
+        "align-content" => out.push(D::AlignContent(parse_justify(p)?)),
         "place-items" => {
             out.push(D::AlignItems(parse_align(p)?));
             let _ = p.try_parse(parse_align);
         }
         "place-content" => {
-            let j = parse_justify(p)?;
-            let j = p.try_parse(parse_justify).unwrap_or(j);
+            let a = parse_justify(p)?;
+            let j = p.try_parse(parse_justify).unwrap_or(a);
+            out.push(D::AlignContent(a));
             out.push(D::JustifyContent(j));
         }
         "gap" | "grid-gap" => {
@@ -739,10 +742,36 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         }
         "grid-area" => {
             let name = p.try_parse(|p| p.expect_ident_cloned()).ok().filter(|n| !n.eq_ignore_ascii_case("auto"));
-            while p.next().is_ok() {}
+            // `grid-area: 1 / 1` (row start / column start / ...): line numbers.
+            let mut lines = Vec::new();
+            while let Ok(t) = p.next().cloned() {
+                if let Token::Number { int_value: Some(n), .. } = t {
+                    lines.push(n);
+                }
+            }
+            if name.is_none() && !lines.is_empty() {
+                out.push(D::GridRowStart(lines.first().map(|&n| n as i16)));
+                out.push(D::GridColumnStart(lines.get(1).map(|&n| n as i16)));
+            }
             out.push(D::GridArea(name.map(|n| Arc::from(&*n))));
         }
+        "grid-row-start" | "grid-row" => {
+            let n = p.try_parse(|p| p.expect_integer()).ok();
+            while p.next().is_ok() {}
+            out.push(D::GridRowStart(n.map(|n| n as i16)));
+        }
+        "grid-column-start" => {
+            let n = p.try_parse(|p| p.expect_integer()).ok();
+            while p.next().is_ok() {}
+            out.push(D::GridColumnStart(n.map(|n| n as i16)));
+        }
         "grid-column" | "grid-column-end" => {
+            if name == "grid-column"
+                && let Ok(n) = p.try_parse(|p| p.expect_integer())
+            {
+                // `grid-column: 2 / 4`: a start line (and maybe an end).
+                out.push(D::GridColumnStart(Some(n as i16)));
+            }
             let mut span = None;
             let mut values = Vec::new();
             while !p.is_exhausted() {
@@ -1311,15 +1340,29 @@ fn parse_border_inner<'i>(rest: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -
 // ---------------------------------------------------------------------------
 // Backgrounds
 
-fn first_gradient_color<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
+/// One color standing in for a gradient: linear gradients by their first
+/// stop; radial ones (dot patterns, vignettes) by their last, which is
+/// usually what fills most of the box.
+fn gradient_color<'i>(p: &mut Parser<'i>, radial: bool) -> PResult<'i, Color> {
     p.parse_nested_block(|p| {
+        let mut stops = Vec::new();
         loop {
             if let Ok(c) = p.try_parse(parse_color) {
-                while p.next().is_ok() {}
-                return Ok(c);
+                stops.push(c);
+                continue;
             }
-            p.next()?;
+            if p.next().is_err() {
+                break;
+            }
         }
+        // A transparent stop: a pattern (grid lines, dots) or a fade
+        // overlay. One solid color would cover the box; drawing none is
+        // closer.
+        if stops.iter().any(|c| c.is_transparent()) {
+            return Ok(Color::TRANSPARENT);
+        }
+        let pick = if radial { stops.last() } else { stops.first() };
+        pick.copied().ok_or_else(|| p.new_error_for_next_token())
     })
 }
 
@@ -1362,7 +1405,7 @@ fn parse_image_layer<'i>(p: &mut Parser<'i>) -> PResult<'i, ImageLayer> {
             let name = name.to_ascii_lowercase();
             if name.contains("gradient") {
                 if layer.gradient.is_none() {
-                    layer.gradient = first_gradient_color(p).ok();
+                    layer.gradient = gradient_color(p, name.contains("radial")).ok();
                 }
             } else if name.contains("image") || name == "element" || name == "paint" {
                 layer.other_image = true;

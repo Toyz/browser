@@ -57,6 +57,7 @@ pub struct ComputedStyle {
     pub flex_wrap: bool,
     pub justify_content: Option<Justify>,
     pub align_items: Option<Align>,
+    pub align_content: Option<Justify>,
     pub align_self: Option<Align>,
     pub row_gap: Length,
     pub column_gap: Length,
@@ -70,6 +71,9 @@ pub struct ComputedStyle {
     pub grid_areas: Option<GridAreas>,
     /// `grid-area: <name>` on a grid item.
     pub grid_area: Option<Arc<str>>,
+    /// Explicit grid lines (`grid-row-start: 1`): items can share a cell.
+    pub grid_row_start: Option<i16>,
+    pub grid_column_start: Option<i16>,
     pub overflow: Overflow,
     pub opacity: f32,
     pub transitions: Option<Arc<Transitions>>,
@@ -77,7 +81,7 @@ pub struct ComputedStyle {
     /// `box-shadow` layers (front first).
     pub shadows: Option<Arc<[Shadow]>>,
     /// `transform: translate(x, y)`: drawn this far from where it's laid out.
-    pub translate: (Length, Length),
+    pub translate: (Offset, Offset),
     /// `mask-image` is set: the background is a stencil (usually an icon).
     pub masked: bool,
     /// The mask image's (absolute) URL, if it's one we can fetch.
@@ -144,6 +148,7 @@ impl ComputedStyle {
             flex_wrap: false,
             justify_content: None,
             align_items: None,
+            align_content: None,
             align_self: None,
             row_gap: Length::ZERO,
             column_gap: Length::ZERO,
@@ -155,9 +160,11 @@ impl ComputedStyle {
             grid_tracks: None,
             grid_areas: None,
             grid_area: None,
+            grid_row_start: None,
+            grid_column_start: None,
             overflow: Overflow::Visible,
             opacity: 1.0,
-            translate: (Length::ZERO, Length::ZERO),
+            translate: (Offset { px: 0.0, pct: 0.0 }, Offset { px: 0.0, pct: 0.0 }),
             shadows: None,
             transitions: None,
             animations: None,

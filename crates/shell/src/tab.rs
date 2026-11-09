@@ -446,7 +446,7 @@ impl Tab {
                 .background_spawn(async move { net::fetch_bytes(&url).and_then(render::images::prepare) })
                 .await
                 .ok()
-                .map(|(image, _, _)| image);
+                .map(|p| p.image);
             this.update(cx, |this, cx| {
                 this.favicon = icon;
                 cx.notify();
@@ -537,7 +537,7 @@ impl Tab {
                 let updated = this.update(cx, |this, cx| {
                     let debug = std::env::var_os("BROWSER_DEBUG").is_some();
                     let state = match result {
-                        Ok((image, width, height)) => ImageState::Ready { image, width, height },
+                        Ok(prepared) => prepared.into_state(),
                         Err(err) => {
                             if debug {
                                 eprintln!("image failed: {url}: {err:#}");

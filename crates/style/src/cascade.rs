@@ -93,7 +93,12 @@ impl RuleIndex {
         let mut index = RuleIndex::default();
         for (rule_ix, rule) in rules.iter().enumerate() {
             for (sel_ix, selector) in rule.selectors.slice().iter().enumerate() {
-                if selector.pseudo_element().map(|pe| pe.0.as_str()) != pseudo {
+                // `::-webkit-input-placeholder` is `::placeholder` with an accent.
+                let name = selector.pseudo_element().map(|pe| match pe.0.as_str() {
+                    "-webkit-input-placeholder" | "-moz-placeholder" => "placeholder",
+                    other => other,
+                });
+                if name != pseudo {
                     continue;
                 }
                 let entry = Entry {
@@ -214,6 +219,7 @@ struct Indexes {
     element: RuleIndex,
     before: RuleIndex,
     after: RuleIndex,
+    placeholder: RuleIndex,
 }
 
 impl Indexes {
@@ -222,7 +228,8 @@ impl Indexes {
         Self {
             element: RuleIndex::new(rules.clone(), None),
             before: RuleIndex::new(rules.clone(), Some("before")),
-            after: RuleIndex::new(rules, Some("after")),
+            after: RuleIndex::new(rules.clone(), Some("after")),
+            placeholder: RuleIndex::new(rules, Some("placeholder")),
         }
     }
 
@@ -230,6 +237,7 @@ impl Indexes {
         match which {
             Pseudo::Before => &self.before,
             Pseudo::After => &self.after,
+            Pseudo::Placeholder => &self.placeholder,
         }
     }
 }
@@ -239,6 +247,8 @@ impl Indexes {
 pub enum Pseudo {
     Before,
     After,
+    /// A text field's placeholder text (only its color is used).
+    Placeholder,
 }
 
 fn ua_indexes(quirks: bool) -> &'static Indexes {
@@ -578,7 +588,8 @@ impl Styler {
         }
         let mut style = ComputedStyle::inherit(element_style);
         self.cascade(&mut style, element_style, matched);
-        (style.content.is_some() && style.display != Display::None).then_some(style)
+        let generates = which == Pseudo::Placeholder || style.content.is_some();
+        (generates && style.display != Display::None).then_some(style)
     }
 
     fn cascade(&self, style: &mut ComputedStyle, parent: &ComputedStyle, mut matched: Vec<Matched>) {
@@ -721,6 +732,7 @@ impl Styler {
             Decl::FlexWrap(v) => s.flex_wrap = *v,
             Decl::JustifyContent(v) => s.justify_content = Some(*v),
             Decl::AlignItems(v) => s.align_items = Some(*v),
+            Decl::AlignContent(v) => s.align_content = Some(*v),
             Decl::AlignSelf(v) => s.align_self = *v,
             Decl::RowGap(v) => s.row_gap = non_auto(len(v)),
             Decl::ColumnGap(v) => s.column_gap = non_auto(len(v)),
@@ -761,9 +773,22 @@ impl Styler {
             }
             Decl::GridAreas(v) => s.grid_areas = v.clone(),
             Decl::GridArea(v) => s.grid_area = v.clone(),
+            Decl::GridRowStart(v) => s.grid_row_start = *v,
+            Decl::GridColumnStart(v) => s.grid_column_start = *v,
             Decl::Overflow(v) => s.overflow = *v,
             Decl::Opacity(v) => s.opacity = *v,
-            Decl::Translate(x, y) => s.translate = (len(x), len(y)),
+            Decl::Translate(x, y) => {
+                // Percentages are of the box itself, so keep them apart.
+                let offset = |spec: &LenSpec| match spec {
+                    LenSpec::Lin(l) => Offset { px: len(&LenSpec::Lin(Lin { pct: 0.0, ..*l })).px_or_zero(), pct: l.pct },
+                    other => match len(other) {
+                        Length::Px(v) => Offset { px: v, pct: 0.0 },
+                        Length::Percent(p) => Offset { px: 0.0, pct: p },
+                        Length::Auto => Offset::default(),
+                    },
+                };
+                s.translate = (offset(x), offset(y));
+            }
             Decl::TransitionProperty(v) => Arc::make_mut(s.transitions.get_or_insert_default()).properties = v.clone(),
             Decl::TransitionDuration(v) => Arc::make_mut(s.transitions.get_or_insert_default()).durations = v.clone(),
             Decl::TransitionDelay(v) => Arc::make_mut(s.transitions.get_or_insert_default()).delays = v.clone(),

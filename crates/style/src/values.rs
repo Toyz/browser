@@ -402,6 +402,25 @@ pub enum Overflow {
     Scroll,
 }
 
+/// A translation: pixels plus a percentage of the box's own size
+/// (`translateY(calc(100% + 20px))`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Offset {
+    pub px: f32,
+    pub pct: f32,
+}
+
+impl Offset {
+    pub fn is_zero(self) -> bool {
+        self.px == 0.0 && self.pct == 0.0
+    }
+
+    /// In px, for a box `size` px long.
+    pub fn resolve(self, size: f32) -> f32 {
+        self.px + self.pct / 100.0 * size
+    }
+}
+
 /// A timing function.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Easing {

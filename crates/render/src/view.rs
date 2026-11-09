@@ -209,7 +209,7 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
-        .children(row.absolutes.iter().map(|b| deferred(render_box(b, cx, b.margin(), false)).into_any_element()))
+        .children(row.absolutes.iter().map(|b| clipped_deferred(render_box(b, cx, b.margin(), false))))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
@@ -246,6 +246,15 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             .into_any_element();
     }
     inner
+}
+
+/// The shadows GPUI can draw faithfully for this box. CSS clips an outer
+/// shadow to outside the box; GPUI draws the whole shape behind it, which a
+/// box without a background shows (a `0 1px` underline became a grey slab).
+fn visible_shadows(shadows: &[style::Shadow], s: &ComputedStyle, palette: &Palette) -> Vec<BoxShadow> {
+    let opaque = s.painted_background().is_some();
+    let kept: Vec<style::Shadow> = shadows.iter().copied().filter(|sh| sh.inset || opaque).collect();
+    box_shadows(&kept, palette)
 }
 
 /// CSS `box-shadow` layers as GPUI shadows.
@@ -306,7 +315,7 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .when(!s.max_height.is_auto(), |d| d.max_h(len(s.outer_height(s.max_height))))
         .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
         .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
-        .when_some(s.shadows.as_ref(), |d, shadows| d.shadow(box_shadows(shadows, palette)))
+        .when_some(s.shadows.as_ref(), |d, shadows| d.shadow(visible_shadows(shadows, s, palette)))
         .flex_grow(s.flex_grow)
         .flex_shrink(s.flex_shrink)
         .when(!s.flex_basis.is_auto(), |d| d.flex_basis(len(s.flex_basis)))
@@ -323,6 +332,8 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
             Some(GridSpan::Full) => d.col_span_full(),
             None => d,
         })
+        .when_some(s.grid_row_start.filter(|n| *n > 0), |d, n| d.row_start(n))
+        .when_some(s.grid_column_start.filter(|n| *n > 0), |d, n| d.col_start(n))
         .map(|d| apply_position(d, s))
 }
 
@@ -332,13 +343,14 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
 fn apply_position(d: Div, s: &ComputedStyle) -> Div {
     // `transform: translate()`: shift the box without moving anything else,
     // which is what a relative offset does. Percentages are of its own size.
-    let own = |l: style::Length, size: style::Length, edges: f32| match (l, size) {
-        (style::Length::Px(v), _) => v,
-        (style::Length::Percent(p), style::Length::Px(w)) => (w + edges) * p / 100.0,
-        _ => 0.0,
-    };
     // Of the border box: with `box-sizing: border-box` that's the width itself.
     let (ew, eh) = if s.border_box { (0.0, 0.0) } else { (s.horizontal_edges(), s.vertical_edges()) };
+    let own = |o: style::Offset, size: style::Length, edges: f32| match size {
+        style::Length::Px(w) => o.resolve(w + edges),
+        // Unknown size: an estimate (a line of text) beats ignoring it.
+        _ if o.pct != 0.0 => o.resolve(s.font_size * 1.4 + edges),
+        _ => o.px,
+    };
     let tx = own(s.translate.0, s.width, ew);
     let ty = own(s.translate.1, s.height, eh);
     let shifted = |side: style::Side, v: style::Length| -> style::Length {
@@ -429,7 +441,7 @@ fn render_flow_children(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement
             if is_out_of_flow(child) {
                 // Positioned boxes paint above in-flow content (and their
                 // parent's border, which GPUI paints after children).
-                return deferred(render_box(child, cx, child.margin(), false)).into_any_element();
+                return clipped_deferred(render_box(child, cx, child.margin(), false));
             }
             let m = child.margin();
             let top = m.top.px_or_zero();
@@ -447,7 +459,7 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
         .iter()
         .map(|child| {
             let el = render_box(child, cx, child.margin(), false);
-            if is_out_of_flow(child) { deferred(el).into_any_element() } else { el }
+            if is_out_of_flow(child) { clipped_deferred(el) } else { el }
         })
         .collect()
 }
@@ -592,7 +604,7 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     }
 
     let content = match state {
-        Some(ImageState::Ready { image, .. }) => img(image).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+        Some(ImageState::Ready { image, padded, width, height }) => crate::images::picture(&image, &padded, width, height),
         Some(ImageState::Failed) | None if natural_width.is_none() => match &i.alt {
             Some(alt) => div()
                 .text_sm()
@@ -625,7 +637,7 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
     let lookup = |url: &str| -> Option<(std::sync::Arc<Image>, f32, f32)> {
         let url = Url::parse(url).ok()?;
         match cx.images.borrow().get(&url)? {
-            ImageState::Ready { image, width, height } => Some((image.clone(), *width, *height)),
+            ImageState::Ready { image, width, height, .. } => Some((image.clone(), *width, *height)),
             _ => None,
         }
     };
@@ -699,6 +711,15 @@ fn apply_alignment(d: Div, s: &ComputedStyle) -> Div {
         Some(Justify::SpaceBetween) => d.justify_between(),
         Some(Justify::SpaceAround) => d.justify_around(),
         Some(Justify::SpaceEvenly) => d.justify_evenly(),
+    };
+    let d = match s.align_content {
+        None => d,
+        Some(Justify::Start) => d.content_start(),
+        Some(Justify::Center) => d.content_center(),
+        Some(Justify::End) => d.content_end(),
+        Some(Justify::SpaceBetween) => d.content_between(),
+        Some(Justify::SpaceAround) => d.content_around(),
+        Some(Justify::SpaceEvenly) => d.content_evenly(),
     };
     match s.align_items {
         Some(Align::Stretch) | None => d,
@@ -817,5 +838,75 @@ impl Element for ControlHost {
         if let Some(child) = &mut self.child {
             child.paint(window, cx);
         }
+    }
+}
+
+/// Like GPUI's `deferred()` (drawn after everything else, so positioned boxes
+/// land on top of later rows), but clipped to where it was placed: the page.
+/// Plain `deferred` draws unclipped, over the browser's own tab strip.
+fn clipped_deferred(child: AnyElement) -> AnyElement {
+    ClippedDeferred { child: Some(child) }.into_any_element()
+}
+
+struct ClippedDeferred {
+    child: Option<AnyElement>,
+}
+
+impl IntoElement for ClippedDeferred {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for ClippedDeferred {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let id = self.child.as_mut().expect("child").request_layout(window, cx);
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        _cx: &mut App,
+    ) {
+        let child = self.child.take().expect("child");
+        let offset = window.element_offset();
+        let mask = window.content_mask();
+        window.defer_draw(child, offset, 1, Some(mask));
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        _window: &mut Window,
+        _cx: &mut App,
+    ) {
     }
 }

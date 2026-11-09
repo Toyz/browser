@@ -5758,6 +5758,7 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "html",
+ "image",
  "imagesize 0.13.0",
  "net",
  "page",
