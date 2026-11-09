@@ -39,6 +39,9 @@ pub struct CaptureJob {
     pub bench: Option<usize>,
     /// A two-finger sideways swipe after the click: (px, released?).
     pub swipe: Option<(f32, bool)>,
+    /// Real trackpad scrolling: a gesture of this many px down (negative:
+    /// up), then momentum events, drawing a frame after each.
+    pub wheel: Option<f32>,
     /// Keystrokes to send after the click (`enter` ends with Enter).
     pub keys: Option<String>,
     /// Click here (window coordinates) before capturing, then let it settle.
@@ -73,6 +76,7 @@ impl Args {
         let mut click = None;
         let mut keys = None;
         let mut swipe = None;
+        let mut wheel = None;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -91,6 +95,7 @@ impl Args {
                         Some((n.parse().ok()?, end))
                     })
                 }
+                "--wheel" => wheel = it.next().and_then(|n| n.parse().ok()),
                 "--click" => {
                     click = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
                         Some((x.parse().ok()?, y.parse().ok()?))
@@ -121,7 +126,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

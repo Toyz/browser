@@ -783,6 +783,8 @@ fn render_paragraph(p: &Arc<Paragraph>, cx: &RenderCx) -> AnyElement {
             .flex()
             .flex_row()
             .overflow_x_scroll()
+            // A vertical wheel scrolls the page, not this sideways.
+            .restrict_scroll_to_axis()
             .track_scroll(&handle)
             .on_scroll(move |event, _, _| sideways::maybe_claim(&claim, event))
             .child(div().flex_none().min_w_full().child(flow))

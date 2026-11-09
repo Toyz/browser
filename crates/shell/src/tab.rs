@@ -111,7 +111,13 @@ pub struct Tab {
     swipe_velocity: f32,
     /// Let go: the page slides from, to, starting when.
     swipe_release: Option<(f32, f32, std::time::Instant)>,
+    /// The page a swipe uncovers: its history index and its own list,
+    /// at the scroll position it was left at.
+    swipe_peek: Option<(usize, ListState)>,
     _swipe_task: Option<Task<()>>,
+    /// Ends a swipe whose end never arrives (macOS reports a cancelled
+    /// gesture as just another move).
+    _swipe_watchdog: Option<Task<()>>,
     /// Hover restyles wait until scrolling stops (like Chrome): otherwise
     /// every element passing under the pointer restyles the page.
     scrolling_until: Option<std::time::Instant>,
@@ -190,7 +196,9 @@ impl Tab {
             swipe_active: false,
             swipe_velocity: 0.0,
             swipe_release: None,
+            swipe_peek: None,
             _swipe_task: None,
+            _swipe_watchdog: None,
             _scroll_end: None,
             page_gen: 0,
             hover_styler: None,
@@ -1075,16 +1083,70 @@ impl Tab {
                         PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }),
                         cx,
                     );
-                    window.dispatch_event(event(0.0, TouchPhase::Started), cx);
+                    // A frame between events, like real input: what's on screen
+                    // decides where the next one goes.
+                    let send = |window: &mut Window, cx: &mut App, e| {
+                        let t = std::time::Instant::now();
+                        window.dispatch_event(e, cx);
+                        window.draw(cx).clear(cx);
+                        if std::env::var_os("BROWSER_DEBUG").is_some() {
+                            eprintln!("swipe frame {:.2}ms", t.elapsed().as_secs_f64() * 1000.0);
+                        }
+                    };
+                    send(window, cx, event(0.0, TouchPhase::Started));
                     for _ in 0..10 {
-                        window.dispatch_event(event(dx / 10.0, TouchPhase::Moved), cx);
+                        send(window, cx, event(dx / 10.0, TouchPhase::Moved));
                     }
                     if end {
-                        window.dispatch_event(event(0.0, TouchPhase::Ended), cx);
+                        send(window, cx, event(0.0, TouchPhase::Ended));
                     }
                 })
                 .ok();
                 cx.background_executor().timer(Duration::from_millis(1500)).await;
+            }
+            if let Some(dy) = job.wheel {
+                // Like a trackpad: fingers move, lift, then momentum (macOS
+                // sends it with no phase, which arrives as Moved).
+                let mut times = Vec::new();
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    let position = point(px(500.), window.viewport_size().height * 0.6);
+                    let event = |delta: f32, touch_phase| {
+                        PlatformInput::Scroll(ScrollEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(point(px(0.), px(-delta))),
+                            modifiers: Modifiers::default(),
+                            touch_phase,
+                            source: Default::default(),
+                        })
+                    };
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }),
+                        cx,
+                    );
+                    let mut frame = |window: &mut Window, cx: &mut App, e| {
+                        let t = std::time::Instant::now();
+                        window.dispatch_event(e, cx);
+                        window.draw(cx).clear(cx);
+                        times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    };
+                    frame(window, cx, event(0.0, TouchPhase::Started));
+                    for _ in 0..20 {
+                        frame(window, cx, event(dy / 30.0, TouchPhase::Moved));
+                    }
+                    frame(window, cx, event(0.0, TouchPhase::Ended));
+                    for i in 0..30 {
+                        frame(window, cx, event(dy / 30.0 * (1.0 - i as f32 / 30.0), TouchPhase::Moved));
+                    }
+                })
+                .ok();
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "wheel: {} frames, median {:.2}ms, max {:.2}ms",
+                    times.len(),
+                    times[times.len() / 2],
+                    times.last().copied().unwrap_or_default()
+                );
             }
             if let Some(text) = job.typing.clone() {
                 this.update(cx, |_, cx| cx.emit(TabEvent::TypeInOmnibox(text))).ok();
@@ -1347,36 +1409,51 @@ impl Tab {
                     // Nowhere to go: the page gives a little, reluctantly.
                     self.swipe = if open { next.clamp(-width, width) } else { (self.swipe + dx * 0.2).clamp(-48.0, 48.0) };
                     self.swipe_velocity = if open { dx } else { 0.0 };
+                    if self.swipe != 0.0 {
+                        self._swipe_watchdog = Some(cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(500)).await;
+                            this.update_in(cx, |this, window, cx| this.finish_swipe(true, window, cx)).ok();
+                        }));
+                    }
                     cx.notify();
                 }
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
-                self.swipe_active = false;
-                let from = std::mem::take(&mut self.swipe);
-                if from == 0.0 {
-                    return;
-                }
-                let flicked = self.swipe_velocity * from.signum() > SWIPE_FLICK;
-                let open = if from > 0.0 { self.can_go_back() } else { self.can_go_forward() };
-                let go = open && event.touch_phase == TouchPhase::Ended && (from.abs() >= width * SWIPE_GO || flicked);
-                let to = if go { width * from.signum() } else { 0.0 };
-                self.swipe_release = Some((from, to, std::time::Instant::now()));
-                self._swipe_task = Some(cx.spawn_in(window, async move |this, cx| {
-                    cx.background_executor().timer(SWIPE_SETTLE).await;
-                    this.update_in(cx, |this, window, cx| {
-                        this.swipe_release = None;
-                        if go && from > 0.0 {
-                            this.go_back(window, cx);
-                        } else if go {
-                            this.go_forward(window, cx);
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                }));
-                cx.notify();
+                self.finish_swipe(event.touch_phase == TouchPhase::Ended, window, cx)
             }
         }
+    }
+
+    /// The fingers lifted (`ended`) or the gesture was cancelled: slide the
+    /// page the rest of the way, or back.
+    fn finish_swipe(&mut self, ended: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.swipe_active = false;
+        self._swipe_watchdog = None;
+        let from = std::mem::take(&mut self.swipe);
+        if from == 0.0 {
+            return;
+        }
+        let width = f32::from(window.viewport_size().width);
+        let flicked = self.swipe_velocity * from.signum() > SWIPE_FLICK;
+        let open = if from > 0.0 { self.can_go_back() } else { self.can_go_forward() };
+        let go = open && ended && (from.abs() >= width * SWIPE_GO || flicked);
+        let to = if go { width * from.signum() } else { 0.0 };
+        self.swipe_release = Some((from, to, std::time::Instant::now()));
+        self._swipe_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(SWIPE_SETTLE).await;
+            this.update_in(cx, |this, window, cx| {
+                this.swipe_release = None;
+                this.swipe_peek = None;
+                if go && from > 0.0 {
+                    this.go_back(window, cx);
+                } else if go {
+                    this.go_forward(window, cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     /// Where the page is mid-swipe (px; 0 when not swiping).
@@ -1390,27 +1467,35 @@ impl Tab {
         from + (to - from) * eased
     }
 
-    /// The page a swipe uncovers: the top of the back/forward page as it
-    /// was left, drawn without interaction (or a blank canvas if it has to
-    /// load).
-    fn render_peek(&self, back: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The page a swipe uncovers: the back/forward page as it was left,
+    /// drawn without interaction (or a blank canvas if it has to load).
+    fn render_peek(&mut self, back: bool, cx: &mut Context<Self>) -> AnyElement {
         let ix = if back { self.history_ix.checked_sub(1) } else { Some(self.history_ix + 1) };
-        let Some((page, scroll)) = ix.and_then(|ix| self.page_cache.get(&ix)) else {
+        let Some((ix, (page, scroll))) = ix.and_then(|ix| Some((ix, self.page_cache.get(&ix)?))) else {
             return div().size_full().bg(self.palette.canvas).into_any_element();
         };
+        // Its own list: only the rows on screen are laid out, and they keep
+        // their measurements while the swipe goes on.
+        if self.swipe_peek.as_ref().is_none_or(|(at, _)| *at != ix) {
+            let list = ListState::new(page.layout.rows.len(), ListAlignment::Top, px(0.));
+            list.scroll_to(*scroll);
+            self.swipe_peek = Some((ix, list));
+        }
+        let list_state = self.swipe_peek.as_ref().map(|(_, l)| l.clone()).expect("just set");
         let mut rcx = self.render_cx(cx);
         rcx.track_hover = false;
         rcx.controls = Rc::new(|_: &render::Control, _: &style::ComputedStyle, _: &mut Window, _: &mut App| {
             div().into_any_element()
         });
-        // Enough rows to cover the window; the rest is clipped.
-        let rows = page.layout.rows.iter().skip(scroll.item_ix).take(40).map(|row| render::render_row(row, &rcx));
-        let canvas = page.layout.canvas.map(|c| self.palette.color(c)).unwrap_or(self.palette.canvas);
+        let layout = page.layout.clone();
+        let canvas = layout.canvas.map(|c| self.palette.color(c)).unwrap_or(self.palette.canvas);
+        // Its own id scope: paragraph ids restart on every page, and two
+        // pages' rows sharing element state would undo each other's caches.
         div()
+            .id("swipe-peek")
             .size_full()
-            .overflow_hidden()
             .bg(canvas)
-            .child(div().flex().flex_col().mt(-scroll.offset_in_item).children(rows))
+            .child(list(list_state, move |ix, _, _| render::render_row(&layout.rows[ix], &rcx)).size_full())
             .into_any_element()
     }
 
@@ -1741,14 +1826,11 @@ impl Render for Tab {
                     .left(px(if back { lower_left } else { upper_left }))
                     .size_full()
                     .map(|p| if open { p.child(self.render_peek(back, cx)) } else { p.bg(cx.theme().secondary) });
-                // Nothing under the fingers reacts mid-gesture.
-                let shield = div().id("swipe-shield").absolute().top_0().left_0().size_full().occlude();
                 if back {
                     d.child(peek.child(dim)).child(edge_shadow(upper_left)).child(page)
                 } else {
                     d.child(page.child(dim)).child(edge_shadow(upper_left)).child(peek)
                 }
-                .child(shield)
             })
             .when(self.loading.is_some(), |d| {
                 // Indeterminate progress: a bar sweeping across the top.
