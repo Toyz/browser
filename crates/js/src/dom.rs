@@ -221,7 +221,9 @@ impl Runtime {
     fn exec(&mut self, node: Option<NodeId>, code: &str, what: &str) {
         let id = node.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
         self.call_global("__setCurrentScript", &[id]);
-        if let Err(e) = self.cx.eval(Source::from_bytes(code)) {
+        // Named by URL, so stack traces say where (inline scripts: the page).
+        let path = if what.contains("://") { what.to_owned() } else { format!("{} (inline)", self.dom.borrow().doc.url) };
+        if let Err(e) = self.cx.eval(Source::from_bytes(code).with_path(std::path::Path::new(&path))) {
             // With the JS stack, when there is one.
             let stack = e
                 .clone()

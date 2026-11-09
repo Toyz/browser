@@ -719,3 +719,16 @@ fn platform_extras() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), r#"true 5 2 12 a\.b <div id="d"></div> msg hi"#);
 }
+
+#[test]
+fn template_content_persists_and_attributes_are_seen() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const t = document.createElement("template");
+        t.innerHTML = '<div id="a" class="x">hi</div>';
+        const same = t.content === t.content;
+        const div = t.content.firstChild;
+        const out = [same, div.hasAttributes(), document.createElement("b").hasAttributes(), typeof performance.timing.responseStart, document.importNode(t.content, true).firstChild.id];
+        document.getElementById("o").textContent = out.join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true false number a");
+}

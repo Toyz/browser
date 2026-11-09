@@ -460,6 +460,17 @@
   const nodeList = (arr) => { const l = new NodeList(); for (const x of arr) l.push(x); return l; };
 
   class Node extends EventTarget {
+    // Merge adjacent text nodes, drop empty ones.
+    normalize() {
+      for (let c = this.firstChild; c; ) {
+        const next = c.nextSibling;
+        if (c.nodeType === 3) {
+          while (c.nextSibling && c.nextSibling.nodeType === 3) { c.data += c.nextSibling.data; c.nextSibling.remove(); }
+          if (!c.data) c.remove();
+        } else if (c.nodeType === 1) c.normalize();
+        c = c.parentNode === this ? c.nextSibling : next;
+      }
+    }
     get assignedSlot() { return assignedSlotOf(this); }
     // On a <slot>: the light nodes shown in it.
     assignedNodes(opts) {
@@ -642,6 +653,12 @@
     setAttribute(name, value) { N.setAttr(this.__id, String(name), String(value)); }
     removeAttribute(name) { N.removeAttr(this.__id, String(name)); }
     hasAttribute(name) { return N.getAttr(this.__id, String(name)) !== null; }
+    hasAttributes() { return N.attrNames(this.__id).length > 0; }
+    getAttributeNode(name) { const value = this.getAttribute(name); return value === null ? null : { name, localName: name, value, ownerElement: this, specified: true }; }
+    lookupNamespaceURI() { return null; }
+    getAnimations() { return []; }
+    requestFullscreen() { return Promise.reject(new TypeError("Fullscreen isn't available")); }
+    setPointerCapture() {} releasePointerCapture() {} hasPointerCapture() { return false; }
     toggleAttribute(name, force) {
       const has = this.hasAttribute(name);
       const want = force === undefined ? !has : !!force;
@@ -963,9 +980,11 @@
       // Parsed templates keep their contents in a fragment of their own.
       const parsed = N.templateContent(this.__id);
       if (parsed !== null) return wrap(parsed);
-      const f = document.createDocumentFragment();
-      for (const c of this.childNodes) f.appendChild(c.cloneNode(true));
-      return f;
+      // A script-made template: one fragment for good, holding what
+      // innerHTML/appendChild put in the element.
+      if (!this._content) this._content = document.createDocumentFragment();
+      while (this.firstChild) this._content.appendChild(this.firstChild);
+      return this._content;
     }
   }
   // Canvas 2D: the context records operations; before each snapshot they're
@@ -1871,7 +1890,30 @@
     requestIdleCallback: (fn) => addTimer(() => fn({ didTimeout: false, timeRemaining: () => 10 }), 1, [], false),
     cancelIdleCallback: clearTimer,
     queueMicrotask: (fn) => { Promise.resolve().then(fn); },
-    performance: { now: () => N.now(), timeOrigin: Date.now(), mark() {}, measure() {}, getEntriesByType() { return []; }, getEntriesByName() { return []; } },
+    performance: (() => {
+      const origin = Date.now() - N.now();
+      const t = Math.round(origin);
+      // Navigation Timing (old and new style): one plausible page load.
+      const timing = {
+        navigationStart: t, fetchStart: t, domainLookupStart: t, domainLookupEnd: t, connectStart: t, connectEnd: t, secureConnectionStart: t,
+        requestStart: t, responseStart: t, responseEnd: t, domLoading: t, domInteractive: t, domContentLoadedEventStart: t,
+        domContentLoadedEventEnd: t, domComplete: t, loadEventStart: t, loadEventEnd: t, unloadEventStart: 0, unloadEventEnd: 0,
+        redirectStart: 0, redirectEnd: 0, toJSON() { return this; },
+      };
+      const navigation = { name: location.href, entryType: "navigation", startTime: 0, duration: 0, type: "navigate", redirectCount: 0, transferSize: 0, encodedBodySize: 0, decodedBodySize: 0, responseStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0, toJSON() { return this; } };
+      const marks = [];
+      return {
+        now: () => N.now(), timeOrigin: origin, timing, navigation: { type: 0, redirectCount: 0 },
+        mark(name, opts) { const m = { name, entryType: "mark", startTime: N.now(), duration: 0, detail: opts && opts.detail }; marks.push(m); return m; },
+        measure(name) { const m = { name, entryType: "measure", startTime: 0, duration: N.now() }; marks.push(m); return m; },
+        clearMarks() { marks.length = 0; }, clearMeasures() {},
+        getEntries() { return [navigation, ...marks]; },
+        getEntriesByType(type) { return type === "navigation" ? [navigation] : marks.filter((m) => m.entryType === type); },
+        getEntriesByName(name) { return marks.filter((m) => m.name === name); },
+        setResourceTimingBufferSize() {}, toJSON() { return { timeOrigin: origin, timing }; },
+        addEventListener() {}, removeEventListener() {},
+      };
+    })(),
     localStorage: storage("local"), sessionStorage: storage("session"),
     matchMedia,
     getComputedStyle: (el) => el.style,
