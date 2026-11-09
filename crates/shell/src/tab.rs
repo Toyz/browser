@@ -419,7 +419,9 @@ impl Tab {
         };
         // The page we're leaving is the referrer.
         let referer = self.page.as_ref().map(|p| p.url.clone());
-        let page = loader::deep(move || loader::load(&url, env, post.as_deref(), referer.as_ref()).map_err(Arc::new));
+        // sessionStorage belongs to the tab.
+        let session = cx.entity_id().as_u64();
+        let page = loader::deep(move || loader::load(&url, env, post.as_deref(), referer.as_ref(), session).map_err(Arc::new));
         cx.background_spawn(page).shared()
     }
 

@@ -247,6 +247,52 @@ pub fn request(req: &HttpRequest) -> Result<HttpResponse> {
     })
 }
 
+/// `document.cookie` for a page: the jar's cookies for its URL, minus
+/// HttpOnly ones (and Secure ones on http pages), as `a=1; b=2`.
+pub fn script_cookies(url: &Url) -> String {
+    let Some(host) = url.host_str() else { return String::new() };
+    let jar = agent().cookie_jar_lock();
+    let names: Vec<String> = jar.iter().map(|c| c.name().to_owned()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    // The domains and paths a cookie for this URL can be stored under.
+    let labels: Vec<&str> = host.split('.').collect();
+    let domains: Vec<String> = (0..labels.len().saturating_sub(1).max(1)).map(|i| labels[i..].join(".")).collect();
+    let mut paths = vec!["/".to_owned()];
+    let mut acc = String::new();
+    for seg in url.path().split('/').filter(|s| !s.is_empty()) {
+        acc.push('/');
+        acc.push_str(seg);
+        paths.push(acc.clone());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for name in &names {
+        'found: for d in &domains {
+            for p in paths.iter().rev() {
+                let Some(c) = jar.get(d, p, name) else { continue };
+                let attrs = c.to_string().to_ascii_lowercase();
+                let http_only = attrs.split(';').any(|a| a.trim() == "httponly");
+                let secure = attrs.split(';').any(|a| a.trim() == "secure");
+                if !http_only && (!secure || url.scheme() == "https") {
+                    out.push(format!("{}={}", c.name(), c.value()));
+                }
+                break 'found;
+            }
+        }
+    }
+    out.join("; ")
+}
+
+/// `document.cookie = "..."`: into the jar (scripts can't make HttpOnly
+/// cookies).
+pub fn set_script_cookie(url: &Url, text: &str) {
+    let text: String = text.split(';').filter(|a| !a.trim().eq_ignore_ascii_case("httponly")).collect::<Vec<_>>().join(";");
+    let Ok(uri) = url.as_str().parse::<ureq::http::Uri>() else { return };
+    // An owned string: a 'static cookie.
+    if let Ok(cookie) = ureq::Cookie::parse(text, &uri) {
+        agent().cookie_jar_lock().insert(cookie, &uri).ok();
+    }
+    save_cookies();
+}
+
 /// Fetch a URL, following redirects. Non-2xx responses still return their body
 /// (error pages are documents too).
 pub fn fetch(url: &Url) -> Result<Response> {

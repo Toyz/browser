@@ -10,6 +10,7 @@ fn run(html: &str) -> page::Document {
         dark: false,
         budget: Duration::from_secs(5),
         debug: true,
+        session: 0,
     };
     js::start(doc, opts).0
 }
@@ -82,7 +83,7 @@ fn probe() {
     let html = std::fs::read_to_string(&path).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0 };
     let doc = js::start(doc, opts).0;
     let root_el = doc.children(doc.root()).iter().copied().find(|&n| doc.element(n).is_some()).unwrap();
     println!("html class: {:?}", doc.element(root_el).unwrap().attr("class"));
@@ -122,7 +123,7 @@ fn probe_text() {
     let html = std::fs::read_to_string(std::env::var("PAGE").unwrap()).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0 };
     let doc = js::start(doc, opts).0;
     println!("{}", text_of(&doc, "o"));
 }
@@ -156,7 +157,7 @@ fn cors_fetch_and_xhr() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(30), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(30), debug: true, session: 0 };
     let (doc, host) = js::start(doc, opts);
     // The first paint waits for quick requests; the rest come as updates.
     let mut text = text_of(&doc, "o");
@@ -188,7 +189,7 @@ fn modules_static_dynamic_and_top_level_await() {
         base,
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
     let doc = js::start(doc, opts).0;
     assert_eq!(text_of(&doc, "o"), "hello modules true 42");
 }
@@ -251,7 +252,7 @@ fn websocket_echo() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0 };
     let (doc, host) = js::start(doc, opts);
     let mut text = text_of(&doc, "o");
     if let Some(host) = &host {
@@ -274,7 +275,7 @@ fn probe_tree() {
     let html = std::fs::read_to_string(std::env::var("PAGE").unwrap()).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
     let (mut doc, host) = js::start(doc, opts);
     if let Some(host) = &host {
         let until = std::time::Instant::now() + Duration::from_secs(6);
@@ -352,4 +353,19 @@ fn prelude_loads_completely() {
         document.getElementById("o").textContent = [typeof __listeningIds, typeof __shadowStyles, typeof crypto.subtle.digest, typeof WebSocket, typeof fetch].join(" ");
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "function function function function function");
+}
+
+#[test]
+fn storage_and_cookies() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        localStorage.setItem("a", "1");
+        localStorage.b = "2";
+        sessionStorage.setItem("s", "x");
+        const keys = Object.keys(localStorage).sort().join(",");
+        localStorage.removeItem("a");
+        document.cookie = "flavor=oatmeal; path=/";
+        document.cookie = "secret=1; HttpOnly";
+        document.getElementById("o").textContent = [keys, localStorage.length, localStorage.getItem("b"), sessionStorage.s, document.cookie.includes("flavor=oatmeal")].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "a,b 1 2 x true");
 }

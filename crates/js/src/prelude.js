@@ -991,7 +991,6 @@
 
   let readyState = "loading";
   let currentScript = null;
-  const cookies = Object.create(null);
   class Document extends Node {
     get documentElement() { return wrap(elementChildren(this.__id)[0] === undefined ? null : elementChildren(this.__id)[0]); }
     get head() { return this.querySelector("head"); }
@@ -1014,12 +1013,8 @@
     get defaultView() { return window; }
     get referrer() { return ""; }
     get domain() { return location.hostname; }
-    get cookie() { return Object.entries(cookies).map(([k, v]) => k + "=" + v).join("; "); }
-    set cookie(v) {
-      const pair = String(v).split(";")[0];
-      const i = pair.indexOf("=");
-      if (i > 0) cookies[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
-    }
+    get cookie() { return N.cookie(); }
+    set cookie(v) { N.setCookie(String(v)); }
     get visibilityState() { return "visible"; }
     get hidden() { return false; }
     get compatMode() { return "CSS1Compat"; }
@@ -1116,16 +1111,25 @@
     } catch (e) { reportError(e); }
   }
 
-  const storage = () => {
-    const data = new Map();
-    return {
-      getItem: (k) => (data.has(String(k)) ? data.get(String(k)) : null),
-      setItem: (k, v) => { data.set(String(k), String(v)); },
-      removeItem: (k) => { data.delete(String(k)); },
-      clear: () => data.clear(),
-      key: (i) => Array.from(data.keys())[i] || null,
-      get length() { return data.size; },
+  // Web storage: the data lives in Rust (localStorage on disk per origin,
+  // sessionStorage per tab); `storage.key = value` works too.
+  const storage = (kind) => {
+    const api = {
+      getItem: (k) => N.storage(kind, "get", String(k), ""),
+      setItem: (k, v) => { N.storage(kind, "set", String(k), String(v)); },
+      removeItem: (k) => { N.storage(kind, "remove", String(k), ""); },
+      clear: () => { N.storage(kind, "clear", "", ""); },
+      key: (i) => { const keys = N.storage(kind, "keys", "", ""); return keys && keys[i] !== undefined ? keys[i] : null; },
+      get length() { const keys = N.storage(kind, "keys", "", ""); return keys ? keys.length : 0; },
     };
+    return new Proxy(api, {
+      get(t, k) { if (k in t || typeof k !== "string") return t[k]; const v = t.getItem(k); return v === null ? undefined : v; },
+      set(t, k, v) { t.setItem(k, v); return true; },
+      deleteProperty(t, k) { t.removeItem(k); return true; },
+      has(t, k) { return k in t || t.getItem(k) !== null; },
+      ownKeys() { return N.storage(kind, "keys", "", "") || []; },
+      getOwnPropertyDescriptor(t, k) { const v = t.getItem(k); return v === null ? undefined : { value: v, enumerable: true, configurable: true, writable: true }; },
+    });
   };
 
   // A small URL implementation (enough for the common uses).
@@ -1276,7 +1280,7 @@
     cancelIdleCallback: clearTimer,
     queueMicrotask: (fn) => { Promise.resolve().then(fn); },
     performance: { now: () => N.now(), timeOrigin: Date.now(), mark() {}, measure() {}, getEntriesByType() { return []; }, getEntriesByName() { return []; } },
-    localStorage: storage(), sessionStorage: storage(),
+    localStorage: storage("local"), sessionStorage: storage("session"),
     matchMedia,
     getComputedStyle: (el) => el.style,
     MutationObserver: observer("MutationObserver"),

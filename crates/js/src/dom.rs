@@ -119,6 +119,8 @@ pub(crate) struct Dom {
     fetch_tx: mpsc::Sender<ToJs>,
     /// Requests in flight.
     fetches: usize,
+    /// The tab, for sessionStorage.
+    session: u64,
     /// Open WebSockets: where their outgoing frames go.
     sockets: HashMap<u32, mpsc::Sender<crate::websocket::Outgoing>>,
 }
@@ -153,6 +155,7 @@ impl Runtime {
             fetch_tx,
             fetches: 0,
             sockets: HashMap::new(),
+            session: opts.session,
             shadows: HashMap::new(),
             hosts: HashMap::new(),
             doc,
@@ -1048,6 +1051,52 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         if let Some(tx) = d.borrow().sockets.get(&id) {
             tx.send(crate::websocket::Outgoing::Close(code, reason)).ok();
         }
+        Ok(JsValue::undefined())
+    }));
+    // ---- storage: storage(kind "local"|"session", op, key, value) ----
+    add("storage", 4, Box::new(|d, a, cx| {
+        use crate::storage::{Kind, with};
+        let dom = d.borrow();
+        let kind = if arg_string(a, 0, cx)? == "session" { Kind::Session(dom.session) } else { Kind::Local };
+        // Opaque origins (data:) get nothing that lasts.
+        let origin = match dom.doc.url.origin() {
+            o if o.is_tuple() => o.ascii_serialization(),
+            _ if dom.doc.url.scheme() == "file" => "file://".to_owned(),
+            _ => return Ok(JsValue::null()),
+        };
+        drop(dom);
+        let op = arg_string(a, 1, cx)?;
+        let key = arg_string(a, 2, cx)?;
+        Ok(match op.as_str() {
+            "get" => with(kind, &origin, |area| (area.get(&key).cloned(), false)).map_or(JsValue::null(), |v| js_str(&v)),
+            "set" => {
+                let value = arg_string(a, 3, cx)?;
+                with(kind, &origin, |area| ((), area.insert(key, value.clone()).as_ref() != Some(&value)));
+                JsValue::undefined()
+            }
+            "remove" => {
+                with(kind, &origin, |area| ((), area.remove(&key).is_some()));
+                JsValue::undefined()
+            }
+            "clear" => {
+                with(kind, &origin, |area| {
+                    let had = !area.is_empty();
+                    area.clear();
+                    ((), had)
+                });
+                JsValue::undefined()
+            }
+            _ => {
+                let keys: Vec<JsValue> = with(kind, &origin, |area| (area.keys().map(|k| js_str(k)).collect(), false));
+                JsArray::from_iter(keys, cx).into()
+            }
+        })
+    }));
+    add("cookie", 0, Box::new(|d, _, _| Ok(js_str(&net::script_cookies(&d.borrow().doc.url)))));
+    add("setCookie", 1, Box::new(|d, a, cx| {
+        let text = arg_string(a, 0, cx)?;
+        let url = d.borrow().doc.url.clone();
+        net::set_script_cookie(&url, &text);
         Ok(JsValue::undefined())
     }));
     // ---- crypto (bytes travel as latin1 strings) ----

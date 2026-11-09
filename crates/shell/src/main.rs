@@ -557,6 +557,7 @@ fn main() {
         favicons::Favicons::init(persist.then(history::data_dir).flatten(), cx);
         fonts::init(cx);
         net::init(persist.then(history::data_dir).flatten());
+        js::storage::init(persist.then(history::data_dir).flatten());
         let bounds = Bounds::centered(None, size(px(args.width), px(args.height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

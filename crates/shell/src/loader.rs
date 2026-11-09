@@ -82,7 +82,7 @@ pub fn may_load(page: &Url, url: &Url) -> bool {
 }
 
 /// Fetch → parse → style → build boxes. Blocking: run it in the background.
-pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>) -> anyhow::Result<LoadedPage> {
+pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>, session: u64) -> anyhow::Result<LoadedPage> {
     if url.scheme() == "view-source" {
         let inner = Url::parse(url.path()).map_err(|e| anyhow::anyhow!("bad view-source URL: {e}"))?;
         let response = net::fetch(&inner)?;
@@ -133,6 +133,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
                 dark: env.dark,
                 budget: std::time::Duration::from_millis(1500),
                 debug: std::env::var_os("BROWSER_DEBUG").is_some(),
+                session,
             },
         )
     } else {

@@ -15,6 +15,7 @@
 pub mod cors;
 mod dom;
 mod modules;
+pub mod storage;
 pub mod websocket;
 
 use std::sync::Arc;
@@ -39,6 +40,8 @@ pub struct Options {
     /// How long the first paint waits for the page's scripts.
     pub budget: Duration,
     pub debug: bool,
+    /// The tab (for `sessionStorage`).
+    pub session: u64,
 }
 
 /// To the script thread.
