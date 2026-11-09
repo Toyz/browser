@@ -2090,13 +2090,36 @@ fn calc_to_len<'i>(p: &mut Parser<'i>) -> PResult<'i, LenSpec> {
         CalcVal::Len(l) => Ok(LenSpec::Lin(l)),
         CalcVal::Num(0.0) => Ok(LenSpec::px(0.0)),
         CalcVal::Num(_) => err(p),
+        CalcVal::Terms(terms) => Ok(LenSpec::Sum(terms)),
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum CalcVal {
     Num(f32),
     Len(Lin),
+    /// Lengths that aren't linear (`min()`/`max()`/`clamp()` inside): Σ k·term.
+    Terms(Vec<(f32, LenSpec)>),
+}
+
+impl CalcVal {
+    /// As a sum of terms (numbers only as `0`).
+    fn terms(self) -> Option<Vec<(f32, LenSpec)>> {
+        match self {
+            CalcVal::Terms(t) => Some(t),
+            CalcVal::Len(l) => Some(vec![(1.0, LenSpec::Lin(l))]),
+            CalcVal::Num(0.0) => Some(Vec::new()),
+            CalcVal::Num(_) => None,
+        }
+    }
+
+    fn scaled(self, k: f32) -> CalcVal {
+        match self {
+            CalcVal::Num(a) => CalcVal::Num(a * k),
+            CalcVal::Len(l) => CalcVal::Len(l.scale(k)),
+            CalcVal::Terms(t) => CalcVal::Terms(t.into_iter().map(|(a, s)| (a * k, s)).collect()),
+        }
+    }
 }
 
 fn calc_sum<'i>(p: &mut Parser<'i>) -> PResult<'i, CalcVal> {
@@ -2115,7 +2138,13 @@ fn calc_sum<'i>(p: &mut Parser<'i>) -> PResult<'i, CalcVal> {
             (CalcVal::Len(a), CalcVal::Len(b)) => CalcVal::Len(a.plus(b.scale(sign))),
             // `0` mixed with lengths is fine in practice
             (CalcVal::Len(a), CalcVal::Num(0.0)) | (CalcVal::Num(0.0), CalcVal::Len(a)) => CalcVal::Len(a),
-            _ => return err(p),
+            (a, b) => match (a.terms(), b.scaled(sign).terms()) {
+                (Some(mut a), Some(b)) => {
+                    a.extend(b);
+                    CalcVal::Terms(a)
+                }
+                _ => return err(p),
+            },
         };
     }
     Ok(acc)
@@ -2134,8 +2163,8 @@ fn calc_product<'i>(p: &mut Parser<'i>) -> PResult<'i, CalcVal> {
         acc = match (acc, rhs, divide) {
             (CalcVal::Num(a), CalcVal::Num(b), false) => CalcVal::Num(a * b),
             (CalcVal::Num(a), CalcVal::Num(b), true) if b != 0.0 => CalcVal::Num(a / b),
-            (CalcVal::Len(a), CalcVal::Num(b), false) | (CalcVal::Num(b), CalcVal::Len(a), false) => CalcVal::Len(a.scale(b)),
-            (CalcVal::Len(a), CalcVal::Num(b), true) if b != 0.0 => CalcVal::Len(a.scale(1.0 / b)),
+            (v, CalcVal::Num(b), false) | (CalcVal::Num(b), v, false) => v.scaled(b),
+            (v, CalcVal::Num(b), true) if b != 0.0 => v.scaled(1.0 / b),
             _ => return err(p),
         };
     }
@@ -2152,6 +2181,25 @@ fn calc_value<'i>(p: &mut Parser<'i>) -> PResult<'i, CalcVal> {
         Token::Percentage { unit_value, .. } => Ok(CalcVal::Len(Lin::pct(unit_value * 100.0))),
         Token::ParenthesisBlock => p.parse_nested_block(calc_sum),
         Token::Function(ref f) if f.eq_ignore_ascii_case("calc") => p.parse_nested_block(calc_sum),
+        // `calc(clamp(...) - 32px)`: a term of its own.
+        Token::Function(ref f) if ["min", "max", "clamp"].iter().any(|n| f.eq_ignore_ascii_case(n)) => {
+            let name = f.to_ascii_lowercase();
+            let spec = p.parse_nested_block(|p| match name.as_str() {
+                "clamp" => {
+                    let lo = calc_or_len(p)?;
+                    p.expect_comma()?;
+                    let pref = calc_or_len(p)?;
+                    p.expect_comma()?;
+                    let hi = calc_or_len(p)?;
+                    Ok(LenSpec::Clamp(Box::new([lo, pref, hi])))
+                }
+                _ => {
+                    let items = p.parse_comma_separated(calc_or_len)?;
+                    Ok(if name == "min" { LenSpec::Min(items) } else { LenSpec::Max(items) })
+                }
+            })?;
+            Ok(CalcVal::Terms(vec![(1.0, spec)]))
+        }
         _ => err(p),
     }
 }

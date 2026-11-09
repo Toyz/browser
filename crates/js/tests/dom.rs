@@ -789,6 +789,18 @@ fn nested_template_contents_survive_copies() {
 }
 
 #[test]
+fn offset_parent_chains_end() {
+    let doc = run(r##"<body><div><span id="s">x</span></div><p id="o"></p><script>
+        let n = 0;
+        for (let e = document.getElementById("s"); e && n < 10; e = e.offsetParent) n++;
+        const d = document.createElement("div");
+        d.innerHTML = '<a style="top:1px;float:left;opacity:.55">a</a>';
+        document.getElementById("o").textContent = n + " " + document.body.offsetParent + " " + document.createElement("i").offsetParent + " " + document.ownerDocument + " " + d.firstChild.style.opacity;
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "2 null null null 0.55");
+}
+
+#[test]
 fn template_contents_are_inert() {
     let doc = run(r##"<body><p id="o"></p><script>
         let made = 0;

@@ -2194,10 +2194,9 @@ fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
     let width_hint = e.attr("width").and_then(|w| w.trim().parse::<f32>().ok());
     let mut best: Option<(String, f32, f32)> = None; // (url, density, score)
     if let Some(srcset) = e.attr("srcset") {
-        for candidate in srcset.split(',') {
-            let mut parts = candidate.split_whitespace();
-            let Some(url) = parts.next() else { continue };
-            let descriptor = parts.next().unwrap_or("1x");
+        for (url, descriptor) in srcset_candidates(srcset) {
+            let url = url.as_str();
+            let descriptor = descriptor.as_deref().unwrap_or("1x");
             let density = if let Some(x) = descriptor.strip_suffix('x') {
                 x.parse::<f32>().unwrap_or(1.0)
             } else if let Some(w) = descriptor.strip_suffix('w') {
@@ -2224,6 +2223,44 @@ fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
         return None;
     }
     Some((base.join(&url).ok()?, density.max(0.1)))
+}
+
+/// `srcset` candidates as the HTML spec splits them: a URL runs to the next
+/// whitespace (commas inside it are part of it, as in CDN URLs like
+/// `x._SX300_,QL80_.jpg`), then descriptors up to a comma outside parentheses.
+fn srcset_candidates(srcset: &str) -> Vec<(String, Option<String>)> {
+    let mut out = Vec::new();
+    let mut rest = srcset;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+        if rest.is_empty() {
+            return out;
+        }
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (url, after) = rest.split_at(end);
+        // A URL ending in commas has no descriptors.
+        if url.ends_with(',') {
+            out.push((url.trim_end_matches(',').to_owned(), None));
+            rest = after;
+            continue;
+        }
+        let mut depth = 0;
+        let mut stop = after.len();
+        for (i, c) in after.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth <= 0 => {
+                    stop = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let descriptor = after[..stop].split_whitespace().next().map(str::to_owned);
+        out.push((url.to_owned(), descriptor));
+        rest = &after[stop..];
+    }
 }
 
 /// A CSS color as SVG understands it (theme colors use the light palette).
@@ -3280,6 +3317,13 @@ mod tests {
         assert_eq!(float.style.width, Length::Px(200.0));
         assert_eq!(row.style.border_width.top, 0.0, "anonymous boxes have no borders");
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["next", "three"]);
+    }
+
+    #[test]
+    fn srcset_urls_may_contain_commas() {
+        let c = srcset_candidates("https://m.media-amazon.com/x._SX300_,QL80_.jpg 1x, https://m.media-amazon.com/x._SX600_,QL80_.jpg 2x,plain.png");
+        let urls: Vec<_> = c.iter().map(|(u, d)| format!("{u} {}", d.as_deref().unwrap_or("-"))).collect();
+        assert_eq!(urls, ["https://m.media-amazon.com/x._SX300_,QL80_.jpg 1x", "https://m.media-amazon.com/x._SX600_,QL80_.jpg 2x", "plain.png -"]);
     }
 
     #[test]

@@ -648,6 +648,8 @@
     get ownerDocument() {
       // Template contents belong to an inert document of their own.
       const id = this.__id;
+      // A document has none (jQuery climbs `parentNode || ownerDocument`).
+      if (N.nodeType(id) === 9) return null;
       return inertFragments.has(id) || inert(id) ? inertDocument : document;
     }
     get isConnected() { return N.connected(this.__id); }
@@ -777,7 +779,8 @@
       if (text) el.setAttribute("style", text); else el.removeAttribute("style");
     };
     const api = {
-      getPropertyValue(name) { const d = decls().find(([k]) => k === name); return d ? d[1].replace(/\s*!important$/, "") : ""; },
+      // Values read back serialized as browsers do (`.5` → `0.5`).
+      getPropertyValue(name) { const d = decls().find(([k]) => k === name); return d ? d[1].replace(/\s*!important$/, "").replace(/(^|[\s(,])(-?)\.(\d)/g, "$1$20.$3") : ""; },
       setProperty(name, value, priority) {
         const list = decls().filter(([k]) => k !== name);
         if (value !== null && value !== undefined && value !== "") list.push([name, String(value) + (priority ? " !important" : "")]);
@@ -916,7 +919,12 @@
     get offsetHeight() { return Math.round(measure(this)?.[3] || 0); }
     get offsetTop() { const r = measure(this); return r ? Math.round(r[1] + pageScroll()) : 0; }
     get offsetLeft() { return Math.round(measure(this)?.[0] || 0); }
-    get offsetParent() { return this.parentNode && this.parentNode.nodeType === 1 ? document.body : null; }
+    // The body (no positions known here), but never the body's or root's
+    // own: `while (el = el.offsetParent)` loops have to end.
+    get offsetParent() {
+      if (this === document.body || this === document.documentElement || !N.connected(this.__id)) return null;
+      return document.body;
+    }
     get scrollTop() { return 0; }
     set scrollTop(_) {}
     get scrollLeft() { return 0; }

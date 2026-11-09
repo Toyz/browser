@@ -1523,6 +1523,19 @@ mod tests {
     }
 
     #[test]
+    fn clamp_inside_calc() {
+        let (doc, s) = styled(
+            r#"<p>x</p><em>y</em>"#,
+            "p { --w: calc((clamp(1000px, 100vw, 1069px) - 32px) / 2 + 10px); width: var(--w) } em { width: calc(min(50%, 300px) - 20px) }",
+        );
+        let vw = MediaEnv::default().width;
+        let want = (vw.clamp(1000.0, 1069.0) - 32.0) / 2.0 + 10.0;
+        assert_eq!(style_of(&doc, &s, "p").width, Length::Px(want));
+        // `min(50%, 300px)` resolves to its fixed side here.
+        assert_eq!(style_of(&doc, &s, "em").width, Length::Px(280.0));
+    }
+
+    #[test]
     fn gradients_parse_fully() {
         let (doc, s) = styled(
             r#"<p>x</p><em>y</em><b>z</b>"#,

@@ -41,8 +41,28 @@ impl MediaEnv {
 /// Could this query list match on *some* screen (any size, either color
 /// scheme)? Print-only stylesheets and the like can be dropped at parse time.
 pub fn can_ever_match(list: &str) -> bool {
-    [(320.0, 640.0), (1280.0, 900.0), (3000.0, 2000.0)].into_iter().any(|(width, height)| {
-        [false, true].into_iter().any(|dark| matches(list, &MediaEnv { width, height, dark, scripting: false }))
+    // A few typical screens, plus each breakpoint the query names and its
+    // neighbors (a `(min-width: 1069px) and (max-width: 1167px)` band
+    // matches none of the typical ones).
+    let mut sizes = vec![320.0, 1280.0, 3000.0];
+    let mut number = String::new();
+    for c in list.chars().chain([' ']) {
+        if c.is_ascii_digit() || c == '.' {
+            number.push(c);
+        } else if !number.is_empty() {
+            if let Ok(v) = number.parse::<f32>() {
+                for v in [v, v * 16.0] {
+                    sizes.extend([v - 1.0, v, v + 1.0]);
+                }
+            }
+            number.clear();
+        }
+    }
+    let heights: Vec<f32> = [640.0, 900.0, 2000.0].into_iter().chain(sizes.iter().copied().skip(3)).collect();
+    sizes.iter().any(|&width| {
+        [false, true].into_iter().any(|dark| {
+            heights.iter().any(|&height| matches(list, &MediaEnv { width, height, dark, scripting: false }))
+        })
     })
 }
 
@@ -94,7 +114,8 @@ fn eval_condition(s: &str, env: &MediaEnv) -> bool {
             let close = matching_paren(rest).unwrap_or(rest.len() - 1);
             (&rest[..=close], &rest[close + 1..])
         } else {
-            match rest.find(char::is_whitespace) {
+            // A word ends at whitespace or a parenthesis (`and(min-width...)`).
+            match rest.find(|c: char| c.is_whitespace() || c == '(') {
                 Some(i) => (&rest[..i], &rest[i..]),
                 None => (rest, ""),
             }
@@ -267,5 +288,11 @@ mod tests {
         assert!(matches("(max-width: 500px) or (min-width: 900px)", &e));
         assert!(matches("not (max-width: 500px)", &e));
         assert!(matches("(scripting: none)", &e));
+        assert!(can_ever_match("(min-width:1069px) and (max-width:1167px)"));
+        assert!(!can_ever_match("print"));
+        let e = env(1100.0);
+        assert!(matches("(min-width:1069px) and (max-width:1167px)", &e));
+        assert!(matches("(min-width:1069px)and (max-width:1167px)", &e));
+        assert!(matches("screen and(min-width:1069px)", &e));
     }
 }

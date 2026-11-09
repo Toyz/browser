@@ -169,6 +169,8 @@ pub enum LenSpec {
     Min(Vec<LenSpec>),
     Max(Vec<LenSpec>),
     Clamp(Box<[LenSpec; 3]>),
+    /// `calc()` around `min()`/`max()`/`clamp()`: a sum of scaled terms.
+    Sum(Vec<(f32, LenSpec)>),
 }
 
 impl LenSpec {
@@ -199,6 +201,18 @@ impl LenSpec {
                         .find(|l| matches!(l, Length::Percent(_)))
                         .unwrap_or(Length::Auto)
                 }
+            }
+            LenSpec::Sum(terms) => {
+                let (mut px, mut pct) = (0.0, 0.0);
+                for (k, term) in terms {
+                    match term.resolve(cx) {
+                        Length::Px(v) => px += k * v,
+                        Length::Percent(p) => pct += k * p,
+                        Length::Auto => return Length::Auto,
+                    }
+                }
+                // Like a mixed `calc(100% - 2rem)`: the percentage wins.
+                if pct != 0.0 { Length::Percent(pct) } else { Length::Px(px) }
             }
             LenSpec::Clamp(parts) => {
                 let [lo, pref, hi] = &**parts;

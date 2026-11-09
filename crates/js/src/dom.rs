@@ -195,7 +195,7 @@ impl Runtime {
         let hooks = Rc::new(Hooks::default());
         let mut cx = Context::builder().module_loader(modules.clone()).host_hooks(hooks.clone()).build().expect("a JS context");
         // Runaway loops end with an exception instead of a stuck thread.
-        cx.runtime_limits_mut().set_loop_iteration_limit(200_000_000);
+        cx.runtime_limits_mut().set_loop_iteration_limit(std::env::var("JS_LOOP_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(200_000_000));
         // Deep enough for big framework bundles (Boa's value stack defaults
         // to 10k entries; browsers allow ~10k nested calls).
         cx.runtime_limits_mut().set_recursion_limit(10_000);
