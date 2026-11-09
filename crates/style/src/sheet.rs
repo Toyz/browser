@@ -25,6 +25,17 @@ pub struct StyleRule {
     pub media: Arc<[Arc<str>]>,
 }
 
+/// An `@font-face` rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFace {
+    /// The family name pages use it by.
+    pub family: Arc<str>,
+    /// Font files to try, in order: (absolute URL, `format()` hint).
+    pub sources: Vec<(Arc<str>, Option<String>)>,
+    pub weight: (u16, u16),
+    pub italic: bool,
+}
+
 /// `@keyframes` frames: (offset 0..=1, declarations), in source order.
 pub type Keyframes = Vec<(f32, Arc<[Decl]>)>;
 
@@ -33,6 +44,8 @@ pub struct Stylesheet {
     pub rules: Vec<StyleRule>,
     /// `@keyframes name { ... }`.
     pub keyframes: Vec<(Arc<str>, Keyframes)>,
+    /// `@font-face` rules (only those whose `unicode-range` covers Latin).
+    pub font_faces: Vec<FontFace>,
     /// `@import`s: (url as written, media query list). Resolved by the caller.
     pub imports: Vec<(String, String)>,
 }
@@ -73,6 +86,7 @@ enum AtPrelude {
     Media(Arc<str>),
     Import(String, String),
     Keyframes(Arc<str>),
+    FontFace,
     Skip,
 }
 
@@ -112,6 +126,7 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 consume_rest(input);
                 AtPrelude::Group(true)
             }
+            "font-face" => AtPrelude::FontFace,
             "keyframes" | "-webkit-keyframes" | "-moz-keyframes" => {
                 let name = match input.next()?.clone() {
                     cssparser::Token::Ident(s) | cssparser::Token::QuotedString(s) => Arc::from(&*s),
@@ -160,6 +175,18 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 parse_rule_list(input, self);
                 self.media.pop();
             }
+            AtPrelude::FontFace => {
+                let mut face = FontFaceParser::default();
+                for _ in RuleBodyParser::new(input, &mut face) {}
+                if let (Some(family), false, true) = (face.family, face.sources.is_empty(), face.latin) {
+                    self.sheet.font_faces.push(FontFace {
+                        family,
+                        sources: face.sources,
+                        weight: face.weight.unwrap_or((400, 400)),
+                        italic: face.italic,
+                    });
+                }
+            }
             AtPrelude::Keyframes(name) => {
                 let mut frames = KeyframesParser::default();
                 for _ in StyleSheetParser::new(input, &mut frames) {}
@@ -202,6 +229,133 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
             });
         }
         Ok(())
+    }
+}
+
+/// The descriptors of an `@font-face` block.
+struct FontFaceParser {
+    family: Option<Arc<str>>,
+    sources: Vec<(Arc<str>, Option<String>)>,
+    weight: Option<(u16, u16)>,
+    italic: bool,
+    /// Its `unicode-range` covers Latin text (or it has none).
+    latin: bool,
+}
+
+impl Default for FontFaceParser {
+    fn default() -> Self {
+        Self { family: None, sources: Vec::new(), weight: None, italic: false, latin: true }
+    }
+}
+
+impl<'i> DeclarationParser<'i> for FontFaceParser {
+    type Declaration = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_value(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i>,
+        _start: &ParserState,
+    ) -> Result<(), ParseError<Self::Error>> {
+        use cssparser::Token;
+        match &*name.to_ascii_lowercase() {
+            "font-family" => {
+                let mut words = Vec::new();
+                while let Ok(t) = input.next() {
+                    match t {
+                        Token::QuotedString(s) | Token::Ident(s) => words.push(s.to_string()),
+                        _ => {}
+                    }
+                }
+                if !words.is_empty() {
+                    self.family = Some(words.join(" ").into());
+                }
+            }
+            "src" => {
+                let _ = input.parse_comma_separated(|p| {
+                    let url = p.try_parse(crate::props::parse_url).ok().flatten();
+                    let mut format = None;
+                    while let Ok(t) = p.next().cloned() {
+                        if let Token::Function(f) = t
+                            && f.eq_ignore_ascii_case("format")
+                        {
+                            format = p
+                                .parse_nested_block(|p| {
+                                    Ok::<_, ParseError<SelectorParseErrorKind>>(match p.next()?.clone() {
+                                        Token::QuotedString(s) | Token::Ident(s) => Some(s.to_ascii_lowercase()),
+                                        _ => None,
+                                    })
+                                })
+                                .unwrap_or(None);
+                        }
+                    }
+                    if let Some(url) = url {
+                        self.sources.push((url, format));
+                    }
+                    Ok::<_, ParseError<SelectorParseErrorKind>>(())
+                });
+            }
+            "font-weight" => {
+                let mut values = Vec::new();
+                while let Ok(t) = input.next() {
+                    match t {
+                        Token::Number { value, .. } => values.push(value.clamp(1.0, 1000.0) as u16),
+                        Token::Ident(id) if id.eq_ignore_ascii_case("bold") => values.push(700),
+                        Token::Ident(id) if id.eq_ignore_ascii_case("normal") => values.push(400),
+                        _ => {}
+                    }
+                }
+                if let Some(&first) = values.first() {
+                    self.weight = Some((first, *values.last().unwrap_or(&first)));
+                }
+            }
+            "font-style" => {
+                if let Ok(id) = input.expect_ident_cloned() {
+                    self.italic = matches!(&*id.to_ascii_lowercase(), "italic" | "oblique");
+                }
+                while input.next().is_ok() {}
+            }
+            "unicode-range" => {
+                // Keep the subset that has the basic Latin letters.
+                let raw = consume_rest(input).to_ascii_lowercase();
+                self.latin = raw.split(',').any(|range| {
+                    let range = range.trim().trim_start_matches("u+");
+                    let (lo, hi) = match range.split_once('-') {
+                        Some((a, b)) => (a.replace('?', "0"), b.to_owned()),
+                        None => (range.replace('?', "0"), range.replace('?', "f")),
+                    };
+                    let (lo, hi) = (u32::from_str_radix(&lo, 16).unwrap_or(u32::MAX), u32::from_str_radix(&hi, 16).unwrap_or(0));
+                    lo <= 0x41 && 0x41 <= hi
+                });
+            }
+            _ => {
+                while input.next().is_ok() {}
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for FontFaceParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = SelectorParseErrorKind;
+}
+
+impl<'i> QualifiedRuleParser<'i> for FontFaceParser {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = SelectorParseErrorKind;
+}
+
+impl<'i> RuleBodyItemParser<'i, (), SelectorParseErrorKind> for FontFaceParser {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
     }
 }
 

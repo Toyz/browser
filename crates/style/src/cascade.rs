@@ -17,7 +17,7 @@ use url::Url;
 use crate::media::{self, MediaEnv};
 use crate::props::{Decl, FontSizeSpec, GridCols, LineHeightSpec, WeightSpec, Wide, parse_declaration};
 use crate::selector::{ElementRef, ElementState};
-use crate::sheet::{StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet, Keyframes};
+use crate::sheet::{FontFace, Keyframes, StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet};
 use crate::values::*;
 use crate::{ComputedStyle, CustomProps};
 
@@ -285,6 +285,7 @@ pub struct StyleData {
     /// ...and some puts it before a combinator or inside `:has()`.
     state_reaches_others: bool,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
+    font_faces: Arc<Vec<FontFace>>,
 }
 
 const STATE_PSEUDOS: [&str; 5] = [":hover", ":active", ":focus", ":target", ":checked"];
@@ -327,8 +328,14 @@ impl StyleData {
     pub fn from_sheets(sheets: Vec<Stylesheet>, base: Option<Url>) -> Self {
         let mut keyframes: HashMap<Arc<str>, Arc<Keyframes>> = HashMap::new();
         let mut rules: Vec<StyleRule> = Vec::new();
+        let mut font_faces: Vec<FontFace> = Vec::new();
         for sheet in sheets {
             rules.extend(sheet.rules);
+            for face in sheet.font_faces {
+                if !font_faces.contains(&face) {
+                    font_faces.push(face);
+                }
+            }
             for (name, frames) in sheet.keyframes {
                 // Later definitions win.
                 keyframes.insert(name, Arc::new(frames));
@@ -354,7 +361,39 @@ impl StyleData {
                 }
             }
         }
-        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules, state_reaches_others, keyframes }
+        Self {
+            rules: Arc::new(rules),
+            conditions: Arc::new(conditions),
+            base,
+            has_state_rules,
+            state_reaches_others,
+            keyframes,
+            font_faces: Arc::new(font_faces),
+        }
+    }
+
+    /// Every family name some rule's `font-family` mentions (lowercase).
+    pub fn used_font_families(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        for rule in self.rules.iter() {
+            for d in rule.normal.iter().chain(rule.important.iter()) {
+                match d {
+                    Decl::FontNames(names) => out.extend(names.iter().map(|n| n.to_lowercase())),
+                    // `font-family: var(--font)`: can't tell; any face might be it.
+                    Decl::Unresolved { name, raw } if name.contains("font") => {
+                        out.extend(raw.split(',').map(|n| n.trim().trim_matches(|c| c == '"' || c == '\'').to_lowercase()));
+                        out.extend(self.font_faces.iter().map(|f| f.family.to_lowercase()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// The page's web fonts (`@font-face`).
+    pub fn font_faces(&self) -> &[FontFace] {
+        &self.font_faces
     }
 
     /// Does any rule depend on hover/active/focus state?

@@ -261,8 +261,17 @@ impl Omnibox {
 
 impl Render for Omnibox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
         let focused = self.is_focused(window, cx);
+        // Visited sites show their own icon.
+        let favicons: Vec<_> = self
+            .suggestions
+            .iter()
+            .map(|s| match s {
+                Suggestion::Visit { url, .. } if focused => crate::favicons::Favicons::get(url, cx),
+                _ => None,
+            })
+            .collect();
+        let theme = cx.theme();
         let scheme = self.url.as_ref().map(|u| u.scheme());
         // Only plain http gets the red warning.
         let secure = scheme != Some("http");
@@ -278,7 +287,7 @@ impl Render for Omnibox {
         let open = focused && !self.suggestions.is_empty();
         let muted = theme.muted_foreground;
 
-        let rows = self.suggestions.iter().enumerate().map(|(ix, s)| {
+        let rows = self.suggestions.iter().zip(favicons).enumerate().map(|(ix, (s, favicon))| {
             let (icon, primary, secondary): (Lucide, String, String) = match s {
                 Suggestion::Search(q) => (Lucide::Search, q.clone(), "DuckDuckGo search".into()),
                 Suggestion::Visit { url, title } if title.is_empty() => {
@@ -297,7 +306,10 @@ impl Render for Omnibox {
                 .text_sm()
                 .when(ix == self.selected, |d| d.bg(theme.accent))
                 .hover(|d| d.bg(theme.accent))
-                .child(Icon::new(icon).small().text_color(muted))
+                .map(|d| match favicon {
+                    Some(image) => d.child(img(image).size(px(16.)).flex_none()),
+                    None => d.child(Icon::new(icon).small().text_color(muted)),
+                })
                 .child(div().flex_none().max_w(relative(0.6)).truncate().child(primary))
                 .when(!secondary.is_empty(), |d| {
                     d.child(div().text_color(muted).truncate().child(format!("— {secondary}")))

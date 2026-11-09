@@ -923,7 +923,8 @@ impl Element for InlineFlow {
         // Reuse last frame's layout for this paragraph if it's still valid.
         if let Some(id) = id {
             let para = self.para.clone();
-            let generation = if para.objects.is_empty() { 0 } else { self.cx.images_generation };
+            let images = if para.objects.is_empty() { 0 } else { self.cx.images_generation };
+            let generation = images.wrapping_mul(1 << 20) ^ self.cx.fonts_generation;
             self.state = window.with_element_state(id, |cache: Option<FlowCache>, _| {
                 let state = match cache {
                     Some((p, g, state)) if Arc::ptr_eq(&p, &para) && g == generation => state,

@@ -16,6 +16,7 @@ pub mod values;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use sheet::FontFace;
 pub use cascade::{DARK_CANVAS, Pseudo, StyleData, StyleSource, Styler, collect_style_sources};
 pub use selector::ElementState;
 pub use media::MediaEnv;

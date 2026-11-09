@@ -74,6 +74,10 @@ pub struct Tab {
     page: Option<LoadedPage>,
     error: Option<String>,
     list_state: ListState,
+    /// Rows nobody has measured yet need a height guess, or GPUI counts them
+    /// as 0px and the scrollbar shrinks and jumps as they scroll into view.
+    /// Set by `reset_rows`, applied after the next frame measures some.
+    row_hint_pending: bool,
     hovered_link: Option<Url>,
     loading: Option<Task<()>>,
     prerender: Option<Prerender>,
@@ -82,6 +86,9 @@ pub struct Tab {
     images_pending: usize,
     /// Bumped per finished image (invalidates cached inline layouts).
     images_generation: u64,
+    /// Bumped when web fonts arrive.
+    fonts_generation: u64,
+    _fonts_task: Option<Task<()>>,
     _image_task: Option<Task<()>>,
     favicon: Option<Arc<Image>>,
     _favicon_task: Option<Task<()>>,
@@ -149,6 +156,7 @@ impl Tab {
             error: None,
             // Measure well beyond the viewport so fast scrolling stays smooth.
             list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
+            row_hint_pending: false,
             hovered_link: None,
             loading: None,
             prerender: None,
@@ -156,6 +164,8 @@ impl Tab {
             images: ImageStore::default(),
             images_pending: 0,
             images_generation: 0,
+            fonts_generation: 0,
+            _fonts_task: None,
             _image_task: None,
             favicon: None,
             _favicon_task: None,
@@ -273,7 +283,7 @@ impl Tab {
         self.page_ix = ix;
         self.loading = None;
         self.error = None;
-        self.list_state.reset(page.layout.rows.len());
+        self.reset_rows(page.layout.rows.len());
         self.list_state.scroll_to(scroll);
         self.install(page, window, cx);
         // The window may have been resized since.
@@ -340,7 +350,7 @@ impl Tab {
                         // Redirects may have moved us; record where we actually are.
                         this.history[this.history_ix] = page.url.clone();
                         History::record(&page.url, page.title.as_deref(), cx);
-                        this.list_state.reset(page.layout.rows.len());
+                        this.reset_rows(page.layout.rows.len());
                         let fragment = page.url.fragment().map(str::to_owned);
                         // Keep the page we're leaving for back/forward (not on reload).
                         if this.page_ix != this.history_ix {
@@ -426,7 +436,9 @@ impl Tab {
         self.hovered_link = None;
         self.element_state = Arc::default();
         self.load_images(cx);
-        self.load_favicon(favicon, cx);
+        self.load_fonts(cx);
+        let site = self.page.as_ref().map(|p| p.url.clone());
+        self.load_favicon(site, favicon, cx);
         self.schedule_refresh(refresh, window, cx);
         self.sync_keyframes(window);
     }
@@ -461,19 +473,169 @@ impl Tab {
         self.show(url, true, window, cx);
     }
 
-    fn load_favicon(&mut self, url: Option<Url>, cx: &mut Context<Self>) {
+    /// Fetch the page's web fonts, register them, then re-lay out its text.
+    fn load_fonts(&mut self, cx: &mut Context<Self>) {
+        self._fonts_task = None;
+        let Some(page) = &self.page else { return };
+        let Some(styles) = &page.styles else { return };
+        let page_url = page.url.clone();
+        let palette = self.palette.clone();
+        let mut fetch: Vec<(String, Vec<String>, (u16, u16))> = Vec::new(); // url → CSS families, weights
+        let mut known = false;
+        // Only families the page actually asks for (a font CSS may declare dozens).
+        let used = styles.used_font_families();
+        {
+            let registry = cx.global::<crate::fonts::WebFonts>();
+            for face in styles.font_faces() {
+                let Some(src) = crate::fonts::pick_source(face) else { continue };
+                if let Some(loaded) = registry.loaded.get(src) {
+                    // Registered by an earlier page: just the alias.
+                    if let Some(family) = loaded {
+                        palette.fonts.add(&face.family, family);
+                        known = true;
+                    }
+                    continue;
+                }
+                if !used.contains(&face.family.to_lowercase()) {
+                    continue;
+                }
+                if let Some(i) = fetch.iter().position(|(u, _, _)| u == src) {
+                    fetch[i].1.push(face.family.to_string());
+                } else if fetch.len() < crate::fonts::MAX_FONTS_PER_PAGE {
+                    fetch.push((src.to_owned(), vec![face.family.to_string()], face.weight));
+                }
+            }
+        }
+        if known {
+            self.fonts_changed(cx);
+        }
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            eprintln!("web fonts: used {:?}, fetching {:?}", used.len(), fetch.iter().map(|f| (&f.0, &f.1)).collect::<Vec<_>>());
+        }
+        if fetch.is_empty() {
+            return;
+        }
+        self._fonts_task = Some(cx.spawn(async move |this, cx| {
+            let tasks: Vec<_> = fetch
+                .into_iter()
+                .map(|(src, families, weights)| {
+                    let page_url = page_url.clone();
+                    cx.background_spawn(async move {
+                        let url = url::Url::parse(&src).ok()?;
+                        if !loader::may_load(&page_url, &url) {
+                            return Some((src, families, Vec::new()));
+                        }
+                        let bytes = net::fetch_bytes(&url);
+                        let decoded = bytes.as_ref().map(|b| crate::fonts::decode_all(b.clone(), weights)).unwrap_or_default();
+                        if std::env::var_os("BROWSER_DEBUG").is_some() {
+                            eprintln!("web font {src}: {:?} bytes -> {} fonts", bytes.as_ref().map(|b| b.len()).map_err(|e| e.to_string()), decoded.len());
+                        }
+                        Some((src, families, decoded))
+                    })
+                })
+                .collect();
+            let results = futures::future::join_all(tasks).await;
+            this.update(cx, |this, cx| {
+                let mut faces = Vec::new();
+                let mut aliases = Vec::new();
+                for (src, families, decoded) in results.into_iter().flatten() {
+                    let family = decoded.first().map(|(_, f)| f.clone());
+                    for (data, _) in decoded {
+                        faces.push(std::borrow::Cow::Owned(data));
+                    }
+                    if let Some(family) = &family {
+                        aliases.extend(families.into_iter().map(|css| (css, family.clone())));
+                    }
+                    cx.global_mut::<crate::fonts::WebFonts>().loaded.insert(src, family);
+                }
+                if faces.is_empty() {
+                    return;
+                }
+                let added = cx.text_system().add_fonts(faces);
+                if let Err(err) = &added
+                    && std::env::var_os("BROWSER_DEBUG").is_some()
+                {
+                    eprintln!("web fonts rejected: {err:#}");
+                }
+                if added.is_ok() {
+                    for (css, family) in aliases {
+                        this.palette.fonts.add(&css, &family);
+                    }
+                    if std::env::var_os("BROWSER_DEBUG").is_some() {
+                        eprintln!("web fonts loaded for {}", this.page.as_ref().map(|p| p.url.to_string()).unwrap_or_default());
+                    }
+                    this.fonts_changed(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Text metrics changed: every row's layout is stale.
+    fn fonts_changed(&mut self, cx: &mut Context<Self>) {
+        self.fonts_generation += 1;
+        if let Some(page) = &self.page {
+            let rows = page.layout.rows.len();
+            self.list_state.remeasure_items(0..rows);
+        }
+        cx.notify();
+    }
+
+    fn reset_rows(&mut self, rows: usize) {
+        self.list_state.reset(rows);
+        self.row_hint_pending = true;
+    }
+
+    /// Give unmeasured rows the average height of the ones laid out so far,
+    /// so the scrollbar starts near the page's real length.
+    fn apply_row_hint(&mut self, window: &mut Window) {
+        if !self.row_hint_pending {
+            return;
+        }
+        let rows = self.list_state.item_count();
+        let (mut sum, mut count) = (px(0.), 0usize);
+        for ix in self.list_state.logical_scroll_top().item_ix..rows {
+            match self.list_state.bounds_for_item(ix) {
+                Some(b) => {
+                    sum += b.size.height;
+                    count += 1;
+                }
+                None if count > 0 => break,
+                None => {}
+            }
+        }
+        if count == 0 {
+            if rows > 0 {
+                window.request_animation_frame();
+            }
+            return;
+        }
+        self.row_hint_pending = false;
+        self.list_state.clone().with_uniform_item_height(sum / count as f32);
+    }
+
+    fn load_favicon(&mut self, site: Option<Url>, url: Option<Url>, cx: &mut Context<Self>) {
+        // The site's icon from last time, until (or unless) this one loads.
+        self.favicon = site.as_ref().and_then(|s| crate::favicons::Favicons::get(s, cx));
         let Some(url) = url else {
-            self.favicon = None;
+            self._favicon_task = None;
             return;
         };
         self._favicon_task = Some(cx.spawn(async move |this, cx| {
-            let icon = cx
-                .background_spawn(async move { net::fetch_bytes(&url).and_then(render::images::prepare) })
-                .await
-                .ok()
-                .map(|p| p.image);
+            let loaded = cx
+                .background_spawn(async move {
+                    let bytes = net::fetch_bytes(&url).ok()?;
+                    let image = render::images::prepare(bytes.clone()).ok()?.image;
+                    Some((bytes, image))
+                })
+                .await;
             this.update(cx, |this, cx| {
-                this.favicon = icon;
+                if let Some((bytes, image)) = loaded {
+                    if let Some(site) = site {
+                        crate::favicons::Favicons::store(&site, bytes, image.clone(), cx);
+                    }
+                    this.favicon = Some(image);
+                }
                 cx.notify();
             })
             .ok();
@@ -767,7 +929,7 @@ impl Tab {
                     // Keep roughly the same place in the page.
                     let top = this.list_state.logical_scroll_top();
                     let rows = page.layout.rows.len();
-                    this.list_state.reset(rows);
+                    this.reset_rows(rows);
                     this.list_state.scroll_to(ListOffset {
                         item_ix: top.item_ix.min(rows.saturating_sub(1)),
                         offset_in_item: top.offset_in_item,
@@ -923,6 +1085,14 @@ impl Tab {
                     let t = std::time::Instant::now();
                     cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
                     times.push(t.elapsed().as_secs_f64() * 1000.0);
+                    if std::env::var_os("SCROLLBAR_TRACE").is_some() {
+                        this.update(cx, |this, _| {
+                            let max = this.list_state.max_offset_for_scrollbar().y;
+                            let at = -this.list_state.scroll_px_offset_for_scrollbar().y;
+                            eprintln!("frame {f}: at {at:.0} of {max:.0} = {:.3}", at / max.max(px(1.)));
+                        })
+                        .ok();
+                    }
                 }
                 times.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let avg = times.iter().sum::<f64>() / times.len() as f64;
@@ -993,6 +1163,7 @@ impl Tab {
             palette: self.palette.clone(),
             images: self.images.clone(),
             images_generation: self.images_generation,
+            fonts_generation: self.fonts_generation,
             track_hover,
             on_block_hover: Rc::new(move |node, hovered, window, cx| {
                 block_hover
@@ -1351,9 +1522,10 @@ impl Tab {
 
     /// No page yet: the Feather start page, with your most visited sites.
     fn render_new_tab(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
         let sites = cx.global::<History>().top_sites(8);
-        let tiles = sites.into_iter().enumerate().map(|(ix, entry)| {
+        let icons: Vec<_> = sites.iter().map(|e| crate::favicons::Favicons::get(&e.url, cx)).collect();
+        let theme = cx.theme();
+        let tiles = sites.into_iter().zip(icons).enumerate().map(|(ix, (entry, icon))| {
             let host = entry.url.host_str().unwrap_or_default().trim_start_matches("www.").to_owned();
             let initial = host.chars().next().unwrap_or('?').to_ascii_uppercase().to_string();
             let url = entry.url.clone();
@@ -1378,7 +1550,10 @@ impl Tab {
                         .justify_center()
                         .text_lg()
                         .text_color(theme.muted_foreground)
-                        .child(initial),
+                        .map(|d| match icon {
+                            Some(icon) => d.child(img(icon).size(px(24.))),
+                            None => d.child(initial),
+                        }),
                 )
                 .child(div().w_full().text_xs().text_center().truncate().child(host))
                 .on_click(cx.listener(move |this, _, window, cx| this.navigate(url.clone(), window, cx)))
@@ -1413,6 +1588,7 @@ impl Tab {
 impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.animation_frame(window);
+        self.apply_row_hint(window);
         let theme = cx.theme();
         let accent = theme.primary;
         let palette = &self.palette;

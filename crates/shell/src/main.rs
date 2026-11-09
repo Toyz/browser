@@ -6,6 +6,8 @@
 extern crate gpui_kit as gpui;
 
 mod capture;
+mod favicons;
+mod fonts;
 mod history;
 mod loader;
 mod omnibox;
@@ -548,10 +550,13 @@ fn main() {
         FORCED_APPEARANCE.set(args.dark).ok();
         // SVG sprite sheets (`<use href="icons.svg#x">`) load through the cache.
         render::set_text_fetcher(net::fetch_text_cached);
-        let capturing = args.capture.is_some();
-        History::init(!capturing, cx);
-        // Cookies persist (screenshot runs keep them in memory).
-        net::init((!capturing).then(history::data_dir).flatten());
+        // Screenshot runs keep history, cookies and icons in memory, unless
+        // pointed at a profile of their own.
+        let persist = args.capture.is_none() || std::env::var_os("FEATHER_DATA_DIR").is_some();
+        History::init(persist, cx);
+        favicons::Favicons::init(persist.then(history::data_dir).flatten(), cx);
+        fonts::init(cx);
+        net::init(persist.then(history::data_dir).flatten());
         let bounds = Bounds::centered(None, size(px(args.width), px(args.height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -591,7 +596,7 @@ fn main() {
         })
         .expect("failed to open window");
         // Screenshot runs shouldn't steal focus from whatever you're doing.
-        cx.activate(!capturing);
+        cx.activate(args.capture.is_none());
     });
 }
 

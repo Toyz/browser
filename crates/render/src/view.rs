@@ -19,8 +19,9 @@ use crate::images::{ImageState, ImageStore};
 /// The fonts installed on this system, for resolving CSS `font-family` lists.
 #[derive(Default)]
 pub struct FontBook {
-    /// lowercase name → the system's spelling
-    installed: HashMap<String, SharedString>,
+    /// lowercase name → the system's spelling (or, for web fonts, the
+    /// family the font file itself declares)
+    installed: RefCell<HashMap<String, SharedString>>,
     /// Resolved lists, keyed by the names themselves. (Not by `Arc` address:
     /// after a restyle frees the old lists, new ones can reuse the addresses.)
     cache: RefCell<HashMap<style::FontNames, Option<SharedString>>>,
@@ -29,9 +30,17 @@ pub struct FontBook {
 impl FontBook {
     pub fn new(names: impl IntoIterator<Item = String>) -> Self {
         Self {
-            installed: names.into_iter().map(|n| (n.to_lowercase(), n.into())).collect(),
+            installed: RefCell::new(names.into_iter().map(|n| (n.to_lowercase(), n.into())).collect()),
             cache: RefCell::default(),
         }
+    }
+
+    /// A web font arrived: pages naming `css_family` get `family` (the name
+    /// inside the font file, which is what the text system knows it by).
+    pub fn add(&self, css_family: &str, family: &str) {
+        self.installed.borrow_mut().insert(css_family.to_lowercase(), family.to_owned().into());
+        self.installed.borrow_mut().entry(family.to_lowercase()).or_insert_with(|| family.to_owned().into());
+        self.cache.borrow_mut().clear();
     }
 
     /// First installed family in the list, or `None` if a generic keyword
@@ -55,7 +64,7 @@ impl FontBook {
             if generic {
                 break;
             }
-            if let Some(installed) = self.installed.get(&lower) {
+            if let Some(installed) = self.installed.borrow().get(&lower) {
                 found = Some(installed.clone());
                 break;
             }
@@ -133,6 +142,8 @@ pub struct RenderCx {
     /// Bumped whenever an image finishes loading (cached inline layouts with
     /// images in them must be redone: their sizes may have changed).
     pub images_generation: u64,
+    /// Bumped when web fonts arrive (every cached text layout is stale).
+    pub fonts_generation: u64,
     pub on_link_click: LinkClick,
     pub on_link_hover: LinkHover,
     /// Report hover per element (only when the page has `:hover`-style rules).

@@ -36,10 +36,11 @@ It is deeply cursed, and it renders Wikipedia.
 - **Interaction:** links, `:hover`, `:active`, `:focus`, `:target`, `:checked`, cursors
 - **Forms:** text fields, textareas, checkboxes, radios, selects, buttons, labels; GET and POST submission
 - **Dark mode:** `prefers-color-scheme`, `color-scheme`, `light-dark()`
+- **Fonts and motion:** `@font-face` web fonts (WOFF, WOFF2, variable fonts instanced per weight), `box-shadow`, CSS transitions and `@keyframes` animations
 
 ## What doesn't (yet)
 
-JavaScript. The plan is [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, because of course. Until then, sites that build themselves in JS (Google search, most web apps) stay blank or send their no-JS fallback. Also missing: CSS transitions and animations, `box-shadow`, web fonts, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md).
+JavaScript. The plan is [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, because of course. Until then, sites that build themselves in JS (Google search, most web apps) stay blank or send their no-JS fallback. Also missing: rotated and scaled transforms, real gradients, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md).
 
 ## Running it
 

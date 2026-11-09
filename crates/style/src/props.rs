@@ -40,7 +40,7 @@ fn resolve_css_url(raw: &str) -> Option<Arc<str>> {
 }
 
 /// `url(...)` (quoted or not), resolved.
-fn parse_url<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Arc<str>>> {
+pub(crate) fn parse_url<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Arc<str>>> {
     match p.next()?.clone() {
         Token::UnquotedUrl(u) => Ok(resolve_css_url(&u)),
         Token::Function(f) if f.eq_ignore_ascii_case("url") => {

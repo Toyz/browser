@@ -9,6 +9,12 @@ name = "feather"
 path = "src/main.rs"
 
 [dependencies]
+# Web fonts: WOFF/WOFF2 decoding (pure Rust) and reading their family names.
+wuff = "0.2"
+ttf-parser = "0.25"
+# Variable fonts: GPUI draws them at their default instance only, so static
+# instances are cut per weight (pure Rust zlib, no C).
+allsorts = { version = "0.16", default-features = false, features = ["flate2_rust"] }
 slotmap.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
