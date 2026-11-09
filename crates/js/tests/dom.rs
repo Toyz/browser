@@ -687,3 +687,35 @@ fn keys_reach_scripts() {
     }
     assert_eq!(text, "Enter Enter 13 true true");
 }
+
+#[test]
+fn tree_walker_and_create_event() {
+    let doc = run(r##"<body><div id="r"><p>a<b>b</b></p><!--c--><i>d</i></div><p id="o"></p><script>
+        const w = document.createTreeWalker(document.getElementById("r"), NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+        const seen = [];
+        while (w.nextNode()) seen.push(w.currentNode.nodeType === 3 ? w.currentNode.data : w.currentNode.localName);
+        const ev = document.createEvent("CustomEvent");
+        ev.initCustomEvent("x", true, false, 42);
+        let got = 0;
+        document.body.addEventListener("x", (e) => { got = e.detail; });
+        document.getElementById("r").dispatchEvent(ev);
+        document.getElementById("o").textContent = seen.join(",") + " " + got;
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "p,a,b,b,i,d 42");
+}
+
+#[test]
+fn platform_extras() {
+    let doc = run(r##"<body><div id="d"></div><p id="o"></p><script>
+        const out = [];
+        out.push(document.getElementById("d") instanceof HTMLDivElement);
+        const c = structuredClone({ a: [1, { b: new Date(5) }], m: new Map([[1, 2]]) });
+        out.push(c.a[1].b.getTime(), c.m.get(1));
+        out.push(new DOMMatrix([2, 0, 0, 2, 10, 0]).transformPoint({ x: 1, y: 1 }).x);
+        const ch = new MessageChannel();
+        ch.port2.onmessage = (e) => { out.push("msg " + e.data); document.getElementById("o").textContent = out.join(" "); };
+        ch.port1.postMessage("hi");
+        out.push(CSS.escape("a.b"), new XMLSerializer().serializeToString(document.getElementById("d")));
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), r#"true 5 2 12 a\.b <div id="d"></div> msg hi"#);
+}

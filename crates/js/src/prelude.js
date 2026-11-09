@@ -283,11 +283,14 @@
     stopPropagation() { this._stop = true; }
     stopImmediatePropagation() { this._stop = true; this._stopNow = true; }
     composedPath() { return this._path || []; }
+    // document.createEvent()-style setup.
+    initEvent(type, bubbles, cancelable) { this.type = String(type); this.bubbles = !!bubbles; this.cancelable = !!cancelable; }
     get returnValue() { return !this.defaultPrevented; }
     set returnValue(v) { if (!v) this.preventDefault(); }
   }
   class CustomEvent extends Event {
     constructor(type, init) { super(type, init); this.detail = init && init.detail !== undefined ? init.detail : null; }
+    initCustomEvent(type, bubbles, cancelable, detail) { this.initEvent(type, bubbles, cancelable); this.detail = detail === undefined ? null : detail; }
   }
   class UIEvent extends Event {}
   class MouseEvent extends UIEvent {
@@ -296,6 +299,10 @@
       this.button = init.button || 0; this.buttons = init.buttons || 0;
       this.clientX = init.clientX || 0; this.clientY = init.clientY || 0;
       this.ctrlKey = !!init.ctrlKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; this.metaKey = !!init.metaKey;
+    }
+    initMouseEvent(type, bubbles, cancelable, view, detail, sx, sy, cx, cy, ctrl, alt, shift, meta, button, related) {
+      this.initEvent(type, bubbles, cancelable);
+      Object.assign(this, { view, detail, screenX: sx, screenY: sy, clientX: cx, clientY: cy, ctrlKey: !!ctrl, altKey: !!alt, shiftKey: !!shift, metaKey: !!meta, button: button || 0, relatedTarget: related || null });
     }
   }
   class KeyboardEvent extends UIEvent {
@@ -552,6 +559,11 @@
     get wholeText() { return this.data; }
   }
   class Comment extends CharacterData {}
+  // Node types pages (and polyfills patching them) expect to exist.
+  class CDATASection extends Text {}
+  class ProcessingInstruction extends CharacterData {}
+  class DocumentType extends Node {}
+  class Attr extends Node {}
 
   class DOMTokenList {
     constructor(el, attr) { this._el = el; this._attr = attr; }
@@ -1005,9 +1017,19 @@
       ellipse(x, y, rx, ry, rot, a0, a1, ccw) { rec("ellipse", x, y, rx, ry, rot, a0, a1, ccw ? 1 : 0); },
       rect(x, y, w, h) { rec("rect", x, y, w, h); },
       roundRect(x, y, w, h, r) { rec("roundRect", x, y, w, h, Array.isArray(r) ? r[0] || 0 : r || 0); },
-      fill(a, b) { rec("fill", typeof a === "string" ? a : typeof b === "string" ? b : "nonzero"); },
-      stroke() { rec("stroke"); },
-      clip() { rec("clip"); },
+      fill(a, b) {
+        const rule = typeof a === "string" ? a : typeof b === "string" ? b : "nonzero";
+        if (a instanceof Path2D) { rec("beginPath"); for (const [op, args] of a._ops) rec(op, ...args); }
+        rec("fill", rule);
+      },
+      stroke(p) {
+        if (p instanceof Path2D) { rec("beginPath"); for (const [op, args] of p._ops) rec(op, ...args); }
+        rec("stroke");
+      },
+      clip(p) {
+        if (p instanceof Path2D) { rec("beginPath"); for (const [op, args] of p._ops) rec(op, ...args); }
+        rec("clip");
+      },
       fillRect(x, y, w, h) { rec("fillRect", x, y, w, h); },
       strokeRect(x, y, w, h) { rec("strokeRect", x, y, w, h); },
       clearRect(x, y, w, h) { rec("clearRect", x, y, w, h); },
@@ -1082,11 +1104,30 @@
     get contentWindow() { return null; }
     get contentDocument() { return null; }
   }
+  // Element interfaces with nothing of their own here, for `instanceof`.
+  const plain = (name, base = HTMLElement) => ({ [name]: class extends base {} })[name];
+  const HTMLDivElement = plain("HTMLDivElement"), HTMLSpanElement = plain("HTMLSpanElement");
+  const HTMLParagraphElement = plain("HTMLParagraphElement"), HTMLHeadingElement = plain("HTMLHeadingElement");
+  const HTMLUListElement = plain("HTMLUListElement"), HTMLOListElement = plain("HTMLOListElement"), HTMLLIElement = plain("HTMLLIElement");
+  const HTMLTableElement = plain("HTMLTableElement"), HTMLTableRowElement = plain("HTMLTableRowElement"), HTMLTableCellElement = plain("HTMLTableCellElement");
+  const HTMLLabelElement = plain("HTMLLabelElement"), HTMLPictureElement = plain("HTMLPictureElement"), HTMLSourceElement = plain("HTMLSourceElement");
+  const HTMLSlotElement = plain("HTMLSlotElement"), HTMLUnknownElement = plain("HTMLUnknownElement"), HTMLBodyElement = plain("HTMLBodyElement");
+  const HTMLHeadElement = plain("HTMLHeadElement"), HTMLHtmlElement = plain("HTMLHtmlElement"), HTMLMetaElement = plain("HTMLMetaElement");
+  const HTMLBRElement = plain("HTMLBRElement"), HTMLHRElement = plain("HTMLHRElement"), HTMLPreElement = plain("HTMLPreElement");
+  const HTMLDialogElement = plain("HTMLDialogElement"), HTMLDetailsElement = plain("HTMLDetailsElement");
+  const SVGElement = plain("SVGElement", Element);
+  const SVGSVGElement = plain("SVGSVGElement", SVGElement), SVGPathElement = plain("SVGPathElement", SVGElement), SVGGElement = plain("SVGGElement", SVGElement);
   const elementClasses = {
     a: HTMLAnchorElement, img: HTMLImageElement, script: HTMLScriptElement, link: HTMLLinkElement, style: HTMLStyleElement,
     input: HTMLInputElement, textarea: HTMLTextAreaElement, select: HTMLSelectElement, option: HTMLOptionElement,
     button: HTMLButtonElement, form: HTMLFormElement, template: HTMLTemplateElement, canvas: HTMLCanvasElement,
     video: HTMLMediaElement, audio: HTMLMediaElement, iframe: HTMLIFrameElement,
+    div: HTMLDivElement, span: HTMLSpanElement, p: HTMLParagraphElement,
+    h1: HTMLHeadingElement, h2: HTMLHeadingElement, h3: HTMLHeadingElement, h4: HTMLHeadingElement, h5: HTMLHeadingElement, h6: HTMLHeadingElement,
+    ul: HTMLUListElement, ol: HTMLOListElement, li: HTMLLIElement, table: HTMLTableElement, tr: HTMLTableRowElement, td: HTMLTableCellElement, th: HTMLTableCellElement,
+    label: HTMLLabelElement, picture: HTMLPictureElement, source: HTMLSourceElement, slot: HTMLSlotElement, body: HTMLBodyElement, head: HTMLHeadElement,
+    html: HTMLHtmlElement, meta: HTMLMetaElement, br: HTMLBRElement, hr: HTMLHRElement, pre: HTMLPreElement, dialog: HTMLDialogElement, details: HTMLDetailsElement,
+    svg: SVGSVGElement, path: SVGPathElement, g: SVGGElement,
   };
 
   class DocumentFragment extends Node {
@@ -1419,14 +1460,31 @@
     createTextNode(text) { return wrap(N.createText(String(text))); }
     createComment(text) { return wrap(N.createComment(String(text))); }
     createDocumentFragment() { return wrap(N.createFragment()); }
-    createEvent() { return new Event(""); }
+    createEvent(kind) {
+      const k = String(kind).toLowerCase();
+      if (k === "customevent") return new CustomEvent("");
+      if (k === "mouseevent" || k === "mouseevents") return new MouseEvent("");
+      if (k === "keyboardevent" || k === "keyboardevents") return new KeyboardEvent("");
+      if (k === "uievent" || k === "uievents") return new UIEvent("");
+      if (k === "focusevent") return new FocusEvent("");
+      return new Event("");
+    }
     createRange() {
       return { selectNodeContents() {}, setStart() {}, setEnd() {}, collapse() {}, getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0 }; }, createContextualFragment: (html) => wrap(N.parseHTML("div", String(html))) };
     }
-    createTreeWalker(root) {
-      const all = [root, ...root.querySelectorAll("*")];
-      let i = 0;
-      return { currentNode: root, nextNode() { i++; return (this.currentNode = all[i] || null); } };
+    createTreeWalker(root, whatToShow, filter) { return new TreeWalker(root, whatToShow, filter); }
+    createNodeIterator(root, whatToShow, filter) {
+      const walker = new TreeWalker(root, whatToShow, filter);
+      let started = false;
+      return {
+        root, whatToShow: walker.whatToShow, filter: walker.filter,
+        nextNode() {
+          if (!started) { started = true; if (walker._accept(root) === 1) return root; }
+          return walker.nextNode();
+        },
+        previousNode() { return walker.previousNode(); },
+        detach() {},
+      };
     }
     importNode(n, deep) { return n.cloneNode(deep); }
     adoptNode(n) { return n; }
@@ -1680,6 +1738,60 @@
     if (resized) window.dispatchEvent(new Event("resize"));
   }
 
+  // DOM traversal (document.createTreeWalker / createNodeIterator).
+  const NodeFilter = {
+    FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
+    SHOW_ALL: 0xffffffff, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2, SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
+    SHOW_PROCESSING_INSTRUCTION: 0x40, SHOW_COMMENT: 0x80, SHOW_DOCUMENT: 0x100, SHOW_DOCUMENT_TYPE: 0x200, SHOW_DOCUMENT_FRAGMENT: 0x400,
+  };
+  class TreeWalker {
+    constructor(root, whatToShow, filter) {
+      this.root = root;
+      this.whatToShow = whatToShow === undefined ? NodeFilter.SHOW_ALL : whatToShow >>> 0;
+      this.filter = filter || null;
+      this.currentNode = root;
+    }
+    _accept(node) {
+      if (!(this.whatToShow & (1 << (node.nodeType - 1)))) return NodeFilter.FILTER_SKIP;
+      if (!this.filter) return NodeFilter.FILTER_ACCEPT;
+      const f = typeof this.filter === "function" ? this.filter : this.filter.acceptNode.bind(this.filter);
+      return f(node) || NodeFilter.FILTER_ACCEPT;
+    }
+    // Document order, staying under the root.
+    _next(node, skipChildren) {
+      if (!skipChildren && node.firstChild) return node.firstChild;
+      for (let n = node; n && n !== this.root; n = n.parentNode) if (n.nextSibling) return n.nextSibling;
+      return null;
+    }
+    nextNode() {
+      let n = this.currentNode, skip = false;
+      for (;;) {
+        n = this._next(n, skip);
+        if (!n) return null;
+        const r = this._accept(n);
+        if (r === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+        skip = r === NodeFilter.FILTER_REJECT;
+      }
+    }
+    previousNode() {
+      let n = this.currentNode;
+      while (n && n !== this.root) {
+        let prev = n.previousSibling;
+        if (prev) { while (prev.lastChild) prev = prev.lastChild; n = prev; } else n = n.parentNode;
+        if (n && this._accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n);
+      }
+      return null;
+    }
+    parentNode() {
+      for (let n = this.currentNode; n && n !== this.root; ) { n = n.parentNode; if (n && this._accept(n) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = n); }
+      return null;
+    }
+    firstChild() { for (let c = this.currentNode.firstChild; c; c = c.nextSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
+    lastChild() { for (let c = this.currentNode.lastChild; c; c = c.previousSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
+    nextSibling() { for (let c = this.currentNode.nextSibling; c; c = c.nextSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
+    previousSibling() { for (let c = this.currentNode.previousSibling; c; c = c.previousSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
+  }
+
   const observer = (name) => class {
     constructor(cb) { this._cb = cb; }
     observe(target) {
@@ -1732,10 +1844,15 @@
     document, location, history, navigator: navigatorImpl, console: consoleImpl, getSelection,
     Window, HTMLDocument: Document,
     Node, Element, HTMLElement, Text, Comment, Document, DocumentFragment, CharacterData, EventTarget,
+    CDATASection, ProcessingInstruction, DocumentType, Attr,
     HTMLAnchorElement, HTMLImageElement, Image, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
     HTMLTextAreaElement, HTMLSelectElement, HTMLOptionElement, HTMLButtonElement, HTMLFormElement,
     HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement: HTMLMediaElement, HTMLAudioElement: HTMLMediaElement,
-    HTMLIFrameElement, HTMLDivElement: HTMLElement, HTMLSpanElement: HTMLElement, SVGElement: Element,
+    HTMLIFrameElement, HTMLDivElement, HTMLSpanElement, SVGElement, SVGSVGElement, SVGPathElement, SVGGElement,
+    HTMLParagraphElement, HTMLHeadingElement, HTMLUListElement, HTMLOListElement, HTMLLIElement, HTMLTableElement,
+    HTMLTableRowElement, HTMLTableCellElement, HTMLLabelElement, HTMLPictureElement, HTMLSourceElement, HTMLSlotElement,
+    HTMLUnknownElement, HTMLBodyElement, HTMLHeadElement, HTMLHtmlElement, HTMLMetaElement, HTMLBRElement, HTMLHRElement,
+    HTMLPreElement, HTMLDialogElement, HTMLDetailsElement,
     NodeList, HTMLCollection: NodeList, DOMTokenList,
     Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent, InputEvent, FocusEvent, PointerEvent: MouseEvent,
     URL, URLSearchParams,
@@ -1760,7 +1877,7 @@
     getComputedStyle: (el) => el.style,
     MutationObserver: observer("MutationObserver"),
     IntersectionObserver: observer("IntersectionObserver"),
-    ResizeObserver,
+    ResizeObserver, NodeFilter, TreeWalker,
     PerformanceObserver: observer("PerformanceObserver"),
     outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
     screen: { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24 },
@@ -1768,7 +1885,13 @@
     scrollTo() {}, scrollBy() {}, scroll() {},
     alert() {}, confirm() { return false; }, prompt() { return null; },
     open() { return null; }, close() {}, focus() {}, blur() {}, print() {},
-    postMessage() {},
+    // Messages to this window arrive asynchronously, as `message` events.
+    postMessage(data, origin) {
+      setTimeout(() => {
+        const ev = new MessageEvent("message", { data, origin: location.origin, source: window });
+        window.dispatchEvent(ev);
+      }, 0);
+    },
     atob: (s) => base64Decode(String(s)), btoa: (s) => base64Encode(String(s)),
     reportError,
     isSecureContext: true,
@@ -2351,6 +2474,30 @@
   class MessageEvent extends Event {
     constructor(type, init) { super(type, init); init = init || {}; this.data = init.data; this.origin = init.origin || ""; this.lastEventId = ""; this.source = null; this.ports = []; }
   }
+  // MessageChannel: two entangled ports; messages arrive as tasks (React's
+  // scheduler and YouTube use them to yield).
+  class MessagePort extends EventTarget {
+    constructor() { super(); this._other = null; this._started = false; this._queue = []; this.onmessage = null; }
+    postMessage(data) {
+      const other = this._other;
+      if (!other) return;
+      setTimeout(() => {
+        // (dispatchEvent runs onmessage too.)
+        other.dispatchEvent(new MessageEvent("message", { data, source: null }));
+      }, 0);
+    }
+    start() { this._started = true; }
+    close() { this._other = null; }
+  }
+  class MessageChannel {
+    constructor() {
+      this.port1 = new MessagePort();
+      this.port2 = new MessagePort();
+      this.port1._other = this.port2;
+      this.port2._other = this.port1;
+    }
+  }
+  Object.assign(window, { MessageChannel, MessagePort });
   class CloseEvent extends Event {
     constructor(type, init) { super(type, init); init = init || {}; this.code = init.code || 0; this.reason = init.reason || ""; this.wasClean = !!init.wasClean; }
   }
@@ -2440,6 +2587,195 @@
   });
 
   // ---- hooks for the host ----------------------------------------------
+
+  // ---- more of the platform pages expect ---------------------------------
+
+  class DOMRectReadOnly {
+    constructor(x = 0, y = 0, width = 0, height = 0) { Object.assign(this, { x, y, width, height }); }
+    get top() { return Math.min(this.y, this.y + this.height); }
+    get left() { return Math.min(this.x, this.x + this.width); }
+    get right() { return Math.max(this.x, this.x + this.width); }
+    get bottom() { return Math.max(this.y, this.y + this.height); }
+    toJSON() { return { x: this.x, y: this.y, width: this.width, height: this.height, top: this.top, left: this.left, right: this.right, bottom: this.bottom }; }
+    static fromRect(r = {}) { return new this(r.x, r.y, r.width, r.height); }
+  }
+  class DOMRect extends DOMRectReadOnly {}
+  class DOMPoint {
+    constructor(x = 0, y = 0, z = 0, w = 1) { Object.assign(this, { x, y, z, w }); }
+    static fromPoint(p = {}) { return new this(p.x, p.y, p.z, p.w); }
+    matrixTransform(m) { return new DOMPoint(m.a * this.x + m.c * this.y + m.e, m.b * this.x + m.d * this.y + m.f); }
+  }
+  // 2D only.
+  class DOMMatrix {
+    constructor(init) {
+      let v = [1, 0, 0, 1, 0, 0];
+      if (Array.isArray(init) && init.length >= 6) v = init.length === 16 ? [init[0], init[1], init[4], init[5], init[12], init[13]] : init.slice(0, 6);
+      else if (typeof init === "string") { const m = /matrix\(([^)]*)\)/.exec(init); if (m) v = m[1].split(",").map(Number); }
+      [this.a, this.b, this.c, this.d, this.e, this.f] = v;
+      this.is2D = true;
+    }
+    get m11() { return this.a; } get m12() { return this.b; } get m21() { return this.c; } get m22() { return this.d; } get m41() { return this.e; } get m42() { return this.f; }
+    get isIdentity() { return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 && this.e === 0 && this.f === 0; }
+    multiply(o) { const m = this; return new DOMMatrix([m.a * o.a + m.c * o.b, m.b * o.a + m.d * o.b, m.a * o.c + m.c * o.d, m.b * o.c + m.d * o.d, m.a * o.e + m.c * o.f + m.e, m.b * o.e + m.d * o.f + m.f]); }
+    translate(x = 0, y = 0) { return this.multiply(new DOMMatrix([1, 0, 0, 1, x, y])); }
+    scale(x = 1, y = x) { return this.multiply(new DOMMatrix([x, 0, 0, y, 0, 0])); }
+    rotate(deg = 0) { const r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r); return this.multiply(new DOMMatrix([c, s, -s, c, 0, 0])); }
+    inverse() { const { a, b, c, d, e, f } = this; const det = a * d - b * c || 1; return new DOMMatrix([d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det]); }
+    transformPoint(p = {}) { return new DOMPoint(p.x || 0, p.y || 0).matrixTransform(this); }
+    toString() { return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`; }
+  }
+
+  // Ranges: positions in the tree (no layout of their own).
+  class StaticRange {
+    constructor(init = {}) { Object.assign(this, { startContainer: init.startContainer, startOffset: init.startOffset || 0, endContainer: init.endContainer, endOffset: init.endOffset || 0 }); }
+    get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
+  }
+  class Range {
+    constructor() { this.startContainer = this.endContainer = document; this.startOffset = this.endOffset = 0; }
+    get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
+    get commonAncestorContainer() {
+      const ancestors = new Set();
+      for (let n = this.startContainer; n; n = n.parentNode) ancestors.add(n);
+      for (let n = this.endContainer; n; n = n.parentNode) if (ancestors.has(n)) return n;
+      return document;
+    }
+    setStart(n, o) { this.startContainer = n; this.startOffset = o; }
+    setEnd(n, o) { this.endContainer = n; this.endOffset = o; }
+    setStartBefore(n) { this.setStart(n.parentNode, Array.prototype.indexOf.call(n.parentNode.childNodes, n)); }
+    setStartAfter(n) { this.setStart(n.parentNode, Array.prototype.indexOf.call(n.parentNode.childNodes, n) + 1); }
+    setEndBefore(n) { this.setEnd(n.parentNode, Array.prototype.indexOf.call(n.parentNode.childNodes, n)); }
+    setEndAfter(n) { this.setEnd(n.parentNode, Array.prototype.indexOf.call(n.parentNode.childNodes, n) + 1); }
+    selectNode(n) { this.setStartBefore(n); this.setEndAfter(n); }
+    selectNodeContents(n) { this.setStart(n, 0); this.setEnd(n, n.nodeType === 3 ? n.data.length : n.childNodes.length); }
+    collapse(toStart) { if (toStart) this.setEnd(this.startContainer, this.startOffset); else this.setStart(this.endContainer, this.endOffset); }
+    cloneRange() { const r = new Range(); r.setStart(this.startContainer, this.startOffset); r.setEnd(this.endContainer, this.endOffset); return r; }
+    insertNode(node) {
+      const c = this.startContainer;
+      if (c.nodeType === 3) { const rest = c.splitText ? c.splitText(this.startOffset) : null; c.parentNode.insertBefore(node, rest || c.nextSibling); }
+      else c.insertBefore(node, c.childNodes[this.startOffset] || null);
+    }
+    createContextualFragment(html) { return wrap(N.parseHTML("div", String(html))); }
+    getBoundingClientRect() { const el = this.startContainer && this.startContainer.nodeType === 1 ? this.startContainer : this.startContainer && this.startContainer.parentNode; return el && el.getBoundingClientRect ? el.getBoundingClientRect() : new DOMRect(); }
+    getClientRects() { return [this.getBoundingClientRect()]; }
+    toString() { return this.startContainer === this.endContainer && this.startContainer.nodeType === 3 ? this.startContainer.data.slice(this.startOffset, this.endOffset) : ""; }
+    deleteContents() {} extractContents() { return document.createDocumentFragment(); } cloneContents() { return document.createDocumentFragment(); }
+    surroundContents(n) { this.insertNode(n); } detach() {}
+    compareBoundaryPoints() { return 0; }
+  }
+  class Selection {}
+  Object.setPrototypeOf(selection, Selection.prototype);
+  document.createRange = () => new Range();
+
+  class XMLSerializer {
+    serializeToString(n) { return n.nodeType === 9 ? n.documentElement.outerHTML : n.nodeType === 3 ? n.data : n.outerHTML || ""; }
+  }
+
+  // Path2D: recorded, replayed by fill(path) / stroke(path) / clip(path).
+  class Path2D {
+    constructor(other) { this._ops = other instanceof Path2D ? other._ops.slice() : []; }
+    addPath(p) { if (p instanceof Path2D) this._ops.push(...p._ops); }
+  }
+  for (const name of ["moveTo", "lineTo", "closePath", "quadraticCurveTo", "bezierCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect"]) {
+    Path2D.prototype[name] = function (...a) { this._ops.push([name, a]); };
+  }
+
+  const cssEscapeImpl = (v) => String(v).replace(/[\0-\x1f\x7f]|^-?\d|^-$|[^\w-]/g, (c, i) => (/[\0-\x1f\x7f]|\d/.test(c) && (i === 0 || /^-/.test(String(v))) ? "\\" + c.charCodeAt(0).toString(16) + " " : "\\" + c));
+  const CSSApi = {
+    supports(prop, value) {
+      if (value === undefined) return !/^\s*selector\(/.test(String(prop)) || true;
+      return typeof prop === "string";
+    },
+    escape: cssEscapeImpl,
+    registerProperty() {},
+  };
+  class CSSStyleDeclaration {}
+
+  // Deep copies (the structured clone algorithm, minus transfer).
+  function structuredCloneImpl(value, seen = new Map()) {
+    if (value === null || typeof value !== "object") {
+      if (typeof value === "function" || typeof value === "symbol") throw new DOMException("could not be cloned", "DataCloneError");
+      return value;
+    }
+    if (seen.has(value)) return seen.get(value);
+    let out;
+    if (value instanceof Date) out = new Date(value.getTime());
+    else if (value instanceof RegExp) out = new RegExp(value.source, value.flags);
+    else if (value instanceof Map) { out = new Map(); seen.set(value, out); for (const [k, v] of value) out.set(structuredCloneImpl(k, seen), structuredCloneImpl(v, seen)); return out; }
+    else if (value instanceof Set) { out = new Set(); seen.set(value, out); for (const v of value) out.add(structuredCloneImpl(v, seen)); return out; }
+    else if (ArrayBuffer.isView(value)) out = new value.constructor(value);
+    else if (value instanceof ArrayBuffer) out = value.slice(0);
+    else if (typeof Blob !== "undefined" && value instanceof Blob) out = value;
+    else if (Array.isArray(value)) { out = []; seen.set(value, out); value.forEach((v, i) => { out[i] = structuredCloneImpl(v, seen); }); return out; }
+    else { out = {}; seen.set(value, out); for (const k of Object.keys(value)) out[k] = structuredCloneImpl(value[k], seen); return out; }
+    seen.set(value, out);
+    return out;
+  }
+
+  // Other tabs aren't ours to talk to: a channel that hears nothing.
+  class BroadcastChannel extends EventTarget {
+    constructor(name) { super(); this.name = String(name); this.onmessage = null; }
+    postMessage() {} close() {}
+  }
+
+  class FileReader extends EventTarget {
+    constructor() { super(); this.readyState = 0; this.result = null; this.error = null; }
+    _read(blob, how) {
+      this.readyState = 1;
+      Promise.resolve(blob.arrayBuffer ? blob.arrayBuffer() : new ArrayBuffer(0)).then((buf) => {
+        const bytes = new Uint8Array(buf);
+        if (how === "text") this.result = new TextDecoder().decode(bytes);
+        else if (how === "url") { let bin = ""; for (const b of bytes) bin += String.fromCharCode(b); this.result = "data:" + (blob.type || "application/octet-stream") + ";base64," + btoa(bin); }
+        else if (how === "binary") { let bin = ""; for (const b of bytes) bin += String.fromCharCode(b); this.result = bin; }
+        else this.result = buf;
+        this.readyState = 2;
+        for (const type of ["load", "loadend"]) { const ev = new Event(type); if (typeof this["on" + type] === "function") this["on" + type](ev); this.dispatchEvent(ev); }
+      });
+    }
+    readAsText(b) { this._read(b, "text"); } readAsDataURL(b) { this._read(b, "url"); }
+    readAsArrayBuffer(b) { this._read(b, "buffer"); } readAsBinaryString(b) { this._read(b, "binary"); }
+    abort() {}
+  }
+
+  const eventWith = (name, fields, base = Event) => ({ [name]: class extends base {
+    constructor(type, init) { super(type, init); init = init || {}; for (const [k, d] of Object.entries(fields)) this[k] = init[k] !== undefined ? init[k] : d; }
+  } })[name];
+  const events = {
+    WheelEvent: eventWith("WheelEvent", { deltaX: 0, deltaY: 0, deltaZ: 0, deltaMode: 0 }, MouseEvent),
+    TouchEvent: eventWith("TouchEvent", { touches: [], targetTouches: [], changedTouches: [] }, UIEvent),
+    DragEvent: eventWith("DragEvent", { dataTransfer: null }, MouseEvent),
+    ClipboardEvent: eventWith("ClipboardEvent", { clipboardData: null }),
+    TransitionEvent: eventWith("TransitionEvent", { propertyName: "", elapsedTime: 0, pseudoElement: "" }),
+    AnimationEvent: eventWith("AnimationEvent", { animationName: "", elapsedTime: 0, pseudoElement: "" }),
+    ErrorEvent: eventWith("ErrorEvent", { message: "", filename: "", lineno: 0, colno: 0, error: null }),
+    PromiseRejectionEvent: eventWith("PromiseRejectionEvent", { promise: null, reason: undefined }),
+    PageTransitionEvent: eventWith("PageTransitionEvent", { persisted: false }),
+    HashChangeEvent: eventWith("HashChangeEvent", { oldURL: "", newURL: "" }),
+    PopStateEvent: eventWith("PopStateEvent", { state: null }),
+    StorageEvent: eventWith("StorageEvent", { key: null, oldValue: null, newValue: null, url: "", storageArea: null }),
+    ProgressEvent: eventWith("ProgressEvent", { lengthComputable: false, loaded: 0, total: 0 }),
+  };
+
+  class MediaQueryList extends EventTarget {}
+  class NamedNodeMap {}
+
+  Object.assign(window, {
+    DOMRect, DOMRectReadOnly, DOMPoint, DOMPointReadOnly: DOMPoint, DOMMatrix, DOMMatrixReadOnly: DOMMatrix,
+    Range, StaticRange, Selection, XMLSerializer, Path2D, CSS: CSSApi, CSSStyleDeclaration,
+    structuredClone: (v) => structuredCloneImpl(v), BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap,
+    Audio: function Audio(src) { const a = document.createElement("audio"); if (src !== undefined) a.setAttribute("src", src); return a; },
+    Option: function Option(text, value, defaultSelected, selected) {
+      const o = document.createElement("option");
+      if (text !== undefined) o.textContent = String(text);
+      if (value !== undefined) o.setAttribute("value", String(value));
+      if (defaultSelected || selected) o.setAttribute("selected", "");
+      return o;
+    },
+    Notification: Object.assign(function Notification() { throw new TypeError("Notifications aren't available"); }, { permission: "default", requestPermission: () => Promise.resolve("denied") }),
+    visualViewport: Object.assign(new EventTarget(), {
+      get width() { return viewport[0]; }, get height() { return viewport[1]; }, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0,
+    }),
+    ...events,
+  });
 
   // Declarative shadow roots (made from <template shadowrootmode>).
   {
