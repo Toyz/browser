@@ -627,3 +627,39 @@ fn layout_reaches_scripts() {
     }
     assert_eq!(text, "300x150 | 10,20 300 1024");
 }
+
+#[test]
+fn mouse_events_reach_scripts() {
+    let doc = html::parse_scripted(
+        r##"<body><canvas id="c"></canvas><p id="o"></p><script>
+        const c = document.getElementById("c");
+        c.getBoundingClientRect();
+        c.addEventListener("mousedown", (e) => { document.getElementById("o").textContent = e.type + " " + e.clientX + "," + e.clientY + " " + e.offsetX + "," + e.offsetY + " " + e.buttons; });
+        window.addEventListener("wheel", (e) => { document.getElementById("o").textContent += " wheel " + e.deltaY; });
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let c = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("c")).unwrap();
+    let root = doc.root();
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !host.hears_mouse(&[c]) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(host.hears_mouse(&[c]) && host.hears_mouse(&[root]));
+    host.send(js::ToJs::Layout { rects: vec![(c, [10.0, 20.0, 300.0, 150.0])], viewport: (1000.0, 700.0) });
+    host.send(js::ToJs::Mouse { kind: "mousedown", node: c, x: 50.0, y: 60.0, button: 0, buttons: 1, delta: (0.0, 0.0) });
+    host.send(js::ToJs::Mouse { kind: "wheel", node: c, x: 50.0, y: 60.0, button: 0, buttons: 0, delta: (0.0, 120.0) });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.contains("wheel") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "mousedown 50,60 40,40 1 wheel 120");
+}

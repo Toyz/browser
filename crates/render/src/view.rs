@@ -717,6 +717,31 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
         _ => div().into_any_element(),
     };
 
+    // Scripts listening to it (a <canvas> app): where it is, and hover.
+    let d = match i.node.filter(|&n| (cx.wants_bounds)(n)) {
+        Some(node) => {
+            let report = cx.on_bounds.clone();
+            d.relative().child(
+                canvas(move |bounds, window, cx| report(node, bounds, window, cx), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        }
+        None => d,
+    };
+    let d = match i.node.filter(|_| cx.track_hover && !s.pointer_events_none && s.visible && i.link.is_none()) {
+        Some(node) => {
+            let report = cx.on_block_hover.clone();
+            return d
+                .id(("img", i.id))
+                .on_hover(move |hovered, window, cx| report(node, *hovered, window, cx))
+                .child(content)
+                .into_any_element();
+        }
+        None => d,
+    };
     match &i.link {
         Some(url) => {
             let url = url.clone();

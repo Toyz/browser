@@ -69,6 +69,9 @@ pub enum ToJs {
     /// An `EventSource` event: `open`, `error`, or a message (type, data,
     /// last event id).
     Sse { id: u32, kind: &'static str, event: String, data: String, last_id: String },
+    /// A mouse event over `node`: `mousedown`, `mouseup`, `mousemove`,
+    /// `dblclick` or `wheel`, at viewport coordinates.
+    Mouse { kind: &'static str, node: NodeId, x: f32, y: f32, button: i16, buttons: u16, delta: (f32, f32) },
     /// Where the elements scripts measure are (`[x, y, width, height]`,
     /// relative to the viewport), and the viewport's size.
     Layout { rects: Vec<(NodeId, [f32; 4])>, viewport: (f32, f32) },
@@ -105,6 +108,9 @@ pub struct ScriptHost {
     /// Elements whose geometry scripts read (getBoundingClientRect,
     /// ResizeObserver): the tab reports where they are.
     pub measured: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>>,
+    /// Elements with mouse listeners (down/up/move/wheel/dblclick, or
+    /// pointer events); the document's root stands for window/document.
+    pub mouse_listening: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>>,
 }
 
 impl ScriptHost {
@@ -113,6 +119,12 @@ impl ScriptHost {
     }
 
     /// Whether a click on `path` (the node and its ancestors) is heard.
+    /// Whether mouse events on `path` (the node and its ancestors) are heard.
+    pub fn hears_mouse(&self, path: &[NodeId]) -> bool {
+        let set = self.mouse_listening.read().unwrap_or_else(|e| e.into_inner());
+        !set.is_empty() && path.iter().any(|n| set.contains(n))
+    }
+
     pub fn hears_click(&self, path: &[NodeId]) -> bool {
         let set = self.listening.read().unwrap_or_else(|e| e.into_inner());
         path.iter().any(|n| set.contains(n))
@@ -161,6 +173,8 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
     let listening = Arc::new(std::sync::RwLock::new(Default::default()));
     let measured: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>> = Arc::new(std::sync::RwLock::new(Default::default()));
     let shared_measured = measured.clone();
+    let mouse_listening: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>> = Arc::new(std::sync::RwLock::new(Default::default()));
+    let shared_mouse = mouse_listening.clone();
     let fallback = doc.clone();
     let budget = opts.budget;
     let shared_listening = listening.clone();
@@ -168,7 +182,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         .name("feather-js".into())
         .stack_size(256 << 20)
         .spawn(move || {
-            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening, shared_measured);
+            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening, shared_measured, shared_mouse);
             rt.run_initial_scripts();
             // Data the page fetched while loading makes the first paint
             // too, if it's quick.
@@ -180,7 +194,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         return (fallback, None);
     }
     let first = first_rx.recv_timeout(budget).unwrap_or(fallback);
-    (first, Some(ScriptHost { tx, updates, listening, measured }))
+    (first, Some(ScriptHost { tx, updates, listening, measured, mouse_listening }))
 }
 
 /// When the next timer is due, for `recv_timeout`.

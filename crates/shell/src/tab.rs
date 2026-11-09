@@ -1950,26 +1950,37 @@ impl Render for Tab {
             .bg(canvas)
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
                     // A click in a form field focuses the field (it handled
                     // the event first); don't take focus back from it.
                     if !this.focus_handle.contains_focused(window, cx) {
                         this.focus_handle.focus(window, cx);
                     }
                     this.mouse_down = true;
+                    this.script_mouse("mousedown", event.position, 0, (0.0, 0.0));
                     this.interaction_changed(window, cx);
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
                     this.mouse_down = false;
+                    this.script_mouse("mouseup", event.position, 0, (0.0, 0.0));
+                    if event.click_count == 2 {
+                        this.script_mouse("dblclick", event.position, 0, (0.0, 0.0));
+                    }
                     this.script_mouse_up();
                     this.interaction_changed(window, cx);
                 }),
             )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
+                this.script_mouse("mousemove", event.position, 0, (0.0, 0.0));
+            }))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 this.scrolling_until = Some(std::time::Instant::now() + Duration::from_millis(150));
+                // Wheel listeners (zooming maps and graphs): deltaY > 0 scrolls down.
+                let delta = event.delta.pixel_delta(px(16.));
+                this.script_mouse("wheel", event.position, 0, (-f32::from(delta.x), -f32::from(delta.y)));
                 this.track_swipe(event, window, cx);
             }))
             .map(|d| {

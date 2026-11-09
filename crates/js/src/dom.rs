@@ -147,6 +147,8 @@ pub(crate) struct Runtime {
     listening: Arc<RwLock<HashSet<NodeId>>>,
     /// Elements scripts read the geometry of (the tab reports their boxes).
     measured: Arc<RwLock<HashSet<NodeId>>>,
+    /// Elements with mouse listeners.
+    mouse_listening: Arc<RwLock<HashSet<NodeId>>>,
     opts: Options,
     modules: Rc<crate::modules::WebModules>,
     hooks: Rc<Hooks>,
@@ -163,6 +165,7 @@ impl Runtime {
         updates: async_channel::Sender<FromJs>,
         listening: Arc<RwLock<HashSet<NodeId>>>,
         measured: Arc<RwLock<HashSet<NodeId>>>,
+        mouse_listening: Arc<RwLock<HashSet<NodeId>>>,
     ) -> Runtime {
         let dom = Rc::new(RefCell::new(Dom {
             fetch_tx,
@@ -202,7 +205,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, updates, listening, measured, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
+        let mut rt = Runtime { cx, dom, rx, updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -429,6 +432,9 @@ impl Runtime {
         let measured = self.call_global("__measuredIds", &[]);
         let measured = self.node_set(measured);
         *self.measured.write().unwrap_or_else(|e| e.into_inner()) = measured;
+        let mouse = self.call_global("__mouseIds", &[]);
+        let mouse = self.node_set(mouse);
+        *self.mouse_listening.write().unwrap_or_else(|e| e.into_inner()) = mouse;
     }
 
     fn node_set(&mut self, ids: JsValue) -> HashSet<NodeId> {
@@ -533,6 +539,19 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Mouse { kind, node, x, y, button, buttons, delta } => {
+                let args = [
+                    js_str(kind),
+                    JsValue::from(node_to_number(node)),
+                    JsValue::from(x),
+                    JsValue::from(y),
+                    JsValue::from(button),
+                    JsValue::from(buttons),
+                    JsValue::from(delta.0),
+                    JsValue::from(delta.1),
+                ];
+                self.call_global("__dispatchMouse", &args);
+            }
             ToJs::Layout { rects, viewport } => {
                 let flat: Vec<JsValue> = rects
                     .iter()

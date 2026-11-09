@@ -27,6 +27,8 @@ pub enum LayoutBox {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImageBox {
     pub id: usize,
+    /// The `<img>` / `<canvas>` element (for scripts: mouse events, layout).
+    pub node: Option<NodeId>,
     pub style: Arc<ComputedStyle>,
     pub src: Arc<Url>,
     /// Pixel density of the chosen source (`2x` srcset candidates are drawn at half size).
@@ -1305,7 +1307,7 @@ impl Builder<'_> {
 
     /// `<img>`: a block-level image box if it's displayed as a block (or
     /// floats), otherwise an inline object flowing with the text.
-    fn build_image(&mut self, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+    fn build_image(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
         let alt = element.attr("alt").map(str::trim).filter(|a| !a.is_empty());
         let Some((src, density)) = pick_image_source(element, &self.base_url) else {
             if let Some(alt) = alt {
@@ -1316,6 +1318,7 @@ impl Builder<'_> {
         let attr = |name| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
         let image = ImageBox {
             id: self.next_id(),
+            node: Some(node),
             style: style.clone(),
             src: Arc::new(src),
             density,
@@ -1406,6 +1409,7 @@ impl Builder<'_> {
         let number = |name: &str| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
         let image = ImageBox {
             id: self.next_id(),
+            node: None,
             style: style.clone(),
             src: Arc::new(src),
             density: 1.0,
@@ -1752,14 +1756,14 @@ impl Builder<'_> {
             }
 
             if tag == "img" {
-                self.build_image(element, style, c, link);
+                self.build_image(child, element, style, c, link);
                 continue;
             }
             // A canvas scripts drew on carries its pixels as `src`; one they
             // didn't shows nothing (its fallback content is for no-JS).
             if tag == "canvas" {
                 if element.attr("src").is_some() {
-                    self.build_image(element, style, c, link);
+                    self.build_image(child, element, style, c, link);
                 }
                 continue;
             }

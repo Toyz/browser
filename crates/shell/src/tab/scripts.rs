@@ -141,6 +141,34 @@ impl Tab {
         .detach();
     }
 
+    /// A mouse event in the page: scripts listening under the pointer get
+    /// it (`position` in window coordinates).
+    pub(super) fn script_mouse(&mut self, kind: &'static str, position: Point<Pixels>, button: i16, delta: (f32, f32)) {
+        let Some(page) = self.page.as_ref() else { return };
+        let Some(host) = page.scripts.clone() else { return };
+        let Some(target) = self.click_target() else { return };
+        let Some(doc) = page.doc.as_ref() else { return };
+        let mut path = vec![target];
+        let mut n = target;
+        while let Some(p) = doc.parent(n) {
+            path.push(p);
+            n = p;
+        }
+        if !host.hears_mouse(&path) {
+            return;
+        }
+        let buttons = if self.mouse_down { 1 } else { 0 };
+        host.send(js::ToJs::Mouse {
+            kind,
+            node: target,
+            x: f32::from(position.x),
+            y: f32::from(position.y) - crate::CHROME_HEIGHT,
+            button,
+            buttons,
+            delta,
+        });
+    }
+
     /// Mouse up: a click on something that isn't a link still reaches the
     /// page's listeners (links and buttons went through `link_clicked`).
     pub(super) fn script_mouse_up(&mut self) {

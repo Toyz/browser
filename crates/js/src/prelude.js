@@ -314,6 +314,7 @@
       if (list.some((e) => e.fn === fn && e.capture === capture)) return;
       list.push({ fn, capture, once });
       if (type === "click" && this.__id !== undefined) clickListeners.add(this.__id);
+      if (MOUSE_TYPES.includes(type)) { if (this.__id !== undefined) mouseListeners.add(this.__id); N.touch(); }
     }
     removeEventListener(type, fn, opts) {
       const capture = typeof opts === "boolean" ? opts : !!(opts && opts.capture);
@@ -411,6 +412,8 @@
     N.log("error", text);
   }
   const clickListeners = new Set();
+  const mouseListeners = new Set();
+  const MOUSE_TYPES = ["mousedown", "mouseup", "mousemove", "dblclick", "wheel", "pointerdown", "pointerup", "pointermove", "contextmenu"];
 
   // ---- nodes -----------------------------------------------------------
 
@@ -2483,6 +2486,42 @@
     __imageEvent: imageEvent,
     __layout: layout,
     __measuredIds() { return Array.from(measuredIds); },
+    // Elements listening for mouse events (window/document count as the
+    // root, which every target is under).
+    __mouseIds() {
+      const out = [];
+      const listens = (t) => t && t._listeners && MOUSE_TYPES.some((type) => t._listeners[type] && t._listeners[type].length);
+      for (const id of mouseListeners) {
+        const w = wrappers.get(id);
+        if (!listens(w)) continue;
+        const host = w instanceof ShadowRoot ? N.shadowHost(id) : null;
+        out.push(host !== null && host !== undefined ? host : id);
+      }
+      if (listens(window) || listens(document)) out.push(N.root());
+      return out;
+    },
+    __dispatchMouse(kind, id, x, y, button, buttons, dx, dy) {
+      const n = wrap(id);
+      if (!n) return;
+      const r = layoutRects.get(id);
+      const init = {
+        bubbles: true, cancelable: true, composed: true, view: window, detail: kind === "dblclick" ? 2 : 1,
+        clientX: x, clientY: y, screenX: x, screenY: y, pageX: x, pageY: y,
+        offsetX: r ? x - r[0] : x, offsetY: r ? y - r[1] : y, movementX: 0, movementY: 0,
+        button, buttons,
+      };
+      const fire = (type, Kind) => { const ev = new Kind(type, init); Object.assign(ev, init); ev.isTrusted = true; n.dispatchEvent(ev); };
+      if (kind === "wheel") {
+        const ev = new MouseEvent("wheel", init);
+        Object.assign(ev, init, { deltaX: dx, deltaY: dy, deltaZ: 0, deltaMode: 0 });
+        ev.isTrusted = true;
+        n.dispatchEvent(ev);
+        return;
+      }
+      const pointer = { mousedown: "pointerdown", mouseup: "pointerup", mousemove: "pointermove" }[kind];
+      if (pointer) { fire(pointer, MouseEvent); }
+      fire(kind, MouseEvent);
+    },
     __flushCanvases: flushCanvases,
     __traverse: traverse,
     __dispatchClick(id) {
