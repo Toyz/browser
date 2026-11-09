@@ -31,8 +31,9 @@ const MAX_DESCENDANTS: usize = 400;
 pub enum Patch {
     /// Nothing visible changed.
     Unchanged,
-    /// Paint changed: this is the new layout (same geometry, so no re-measuring).
-    Painted(LayoutTree),
+    /// Paint changed: this is the new layout (same geometry, so no
+    /// re-measuring), and which elements changed (before, after).
+    Painted(LayoutTree, Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)>),
     /// Something that affects layout changed: restyle the page (why).
     NeedsRestyle(&'static str),
 }
@@ -46,6 +47,7 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.border_radius = from.border_radius;
     to.opacity = from.opacity;
     to.translate = from.translate;
+    to.shadows = from.shadows.clone();
     to.underline = from.underline;
     to.strikethrough = from.strikethrough;
     to.visible = from.visible;
@@ -150,6 +152,7 @@ pub fn patch(
     styler.set_state(new.clone());
     let mut styles = Styles::new(doc, styler);
     let mut changes: HashMap<NodeId, Arc<ComputedStyle>> = HashMap::new();
+    let mut changed: Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)> = Vec::new();
     // Blocks gaining or losing a background: fine for a box, but a container
     // that was split into rows is drawn differently with one (as a wrapper).
     let mut appearing: Vec<NodeId> = Vec::new();
@@ -177,6 +180,7 @@ pub fn patch(
         if new_style.painted_background().is_some() != old_style.painted_background().is_some() {
             appearing.push(id);
         }
+        changed.push((id, old_style.clone(), new_style.clone()));
         changes.insert(id, new_style);
     }
     if !appearing.is_empty() {
@@ -198,21 +202,77 @@ pub fn patch(
         return Patch::Unchanged;
     }
 
+    match apply(layout, &changes) {
+        Some(tree) => Patch::Painted(tree, changed),
+        None => Patch::Unchanged,
+    }
+}
+
+/// Copy these elements' paint properties into the layout (`None`: none of
+/// them are in it). Hover patches and animation frames both come through here.
+pub fn apply(layout: &LayoutTree, changes: &HashMap<NodeId, Arc<ComputedStyle>>) -> Option<LayoutTree> {
     let mut tree = layout.clone();
     let mut touched = false;
     for row in &mut tree.rows {
-        if row_mentions(row, &changes) {
-            patch_row(row, &changes);
+        if row_mentions(row, changes) {
+            patch_row(row, changes);
             touched = true;
         }
     }
     for b in &mut tree.fixed {
-        if mentions(b, &changes) {
-            patch_box(b, &changes);
+        if mentions(b, changes) {
+            patch_box(b, changes);
             touched = true;
         }
     }
-    if touched { Patch::Painted(tree) } else { Patch::Unchanged }
+    touched.then_some(tree)
+}
+
+/// Every element in the layout with CSS animations, and its style.
+pub fn animated_elements(layout: &LayoutTree) -> Vec<(NodeId, Arc<ComputedStyle>)> {
+    fn walk(b: &LayoutBox, out: &mut Vec<(NodeId, Arc<ComputedStyle>)>) {
+        match b {
+            LayoutBox::Block(block) => {
+                if let Some(n) = block.node
+                    && block.style.animations.is_some()
+                {
+                    out.push((n, block.style.clone()));
+                }
+                block.children.iter().for_each(|c| walk(c, out));
+            }
+            LayoutBox::Paragraph(p) => {
+                for o in &p.objects {
+                    match o {
+                        InlineObject::Block(a) => {
+                            if let Some(n) = a.node
+                                && a.style.animations.is_some()
+                            {
+                                out.push((n, a.style.clone()));
+                            }
+                        }
+                        InlineObject::BlockBox(b) => walk(&LayoutBox::Block((**b).clone()), out),
+                        InlineObject::Image(_) => {}
+                    }
+                }
+            }
+            LayoutBox::Image(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    for row in &layout.rows {
+        for w in row.wrappers.iter() {
+            if let Some(n) = w.node
+                && w.style.animations.is_some()
+                && !out.iter().any(|(m, _)| *m == n)
+            {
+                out.push((n, w.style.clone()));
+            }
+        }
+        walk(&row.content, &mut out);
+        row.absolutes.iter().for_each(|b| walk(b, &mut out));
+    }
+    layout.fixed.iter().for_each(|b| walk(b, &mut out));
+    out
 }
 
 fn pseudos(roots: &[NodeId], styles: &mut Styles) -> Vec<Option<ComputedStyle>> {
@@ -409,7 +469,7 @@ mod tests {
         let layout = crate::build(&doc, &styler);
 
         let over = hovering(&doc, find(&doc, "link"));
-        let Patch::Painted(patched) = patch(&layout, &doc, &mut styler, &idle, &over, true) else {
+        let Patch::Painted(patched, _) = patch(&layout, &doc, &mut styler, &idle, &over, true) else {
             panic!("expected a paint-only patch");
         };
         // Same as restyling from scratch.

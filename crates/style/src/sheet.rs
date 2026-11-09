@@ -25,9 +25,14 @@ pub struct StyleRule {
     pub media: Arc<[Arc<str>]>,
 }
 
+/// `@keyframes` frames: (offset 0..=1, declarations), in source order.
+pub type Keyframes = Vec<(f32, Arc<[Decl]>)>;
+
 #[derive(Default)]
 pub struct Stylesheet {
     pub rules: Vec<StyleRule>,
+    /// `@keyframes name { ... }`.
+    pub keyframes: Vec<(Arc<str>, Keyframes)>,
     /// `@import`s: (url as written, media query list). Resolved by the caller.
     pub imports: Vec<(String, String)>,
 }
@@ -67,6 +72,7 @@ enum AtPrelude {
     Group(bool),
     Media(Arc<str>),
     Import(String, String),
+    Keyframes(Arc<str>),
     Skip,
 }
 
@@ -105,6 +111,13 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
             "layer" | "container" | "scope" | "document" | "-moz-document" => {
                 consume_rest(input);
                 AtPrelude::Group(true)
+            }
+            "keyframes" | "-webkit-keyframes" | "-moz-keyframes" => {
+                let name = match input.next()?.clone() {
+                    cssparser::Token::Ident(s) | cssparser::Token::QuotedString(s) => Arc::from(&*s),
+                    _ => return Err(input.new_error_for_next_token()),
+                };
+                AtPrelude::Keyframes(name)
             }
             "import" if !self.seen_rule => {
                 let url = input.expect_url_or_string()?.to_string();
@@ -147,6 +160,12 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 parse_rule_list(input, self);
                 self.media.pop();
             }
+            AtPrelude::Keyframes(name) => {
+                let mut frames = KeyframesParser::default();
+                for _ in StyleSheetParser::new(input, &mut frames) {}
+                frames.frames.sort_by(|a, b| a.0.total_cmp(&b.0));
+                self.sheet.keyframes.push((name, frames.frames));
+            }
             _ => {}
         }
         Ok(())
@@ -184,6 +203,45 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
         }
         Ok(())
     }
+}
+
+/// The blocks inside `@keyframes`: `from`, `to`, `50%`, `0%, 100%`.
+#[derive(Default)]
+struct KeyframesParser {
+    frames: Keyframes,
+}
+
+impl<'i> QualifiedRuleParser<'i> for KeyframesParser {
+    type Prelude = Vec<f32>;
+    type QualifiedRule = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_prelude(&mut self, input: &mut Parser<'i>) -> Result<Vec<f32>, ParseError<Self::Error>> {
+        input.parse_comma_separated(|p| {
+            match p.next()?.clone() {
+                cssparser::Token::Ident(id) if id.eq_ignore_ascii_case("from") => Ok(0.0),
+                cssparser::Token::Ident(id) if id.eq_ignore_ascii_case("to") => Ok(1.0),
+                cssparser::Token::Percentage { unit_value, .. } => Ok(unit_value.clamp(0.0, 1.0)),
+                _ => Err(p.new_error_for_next_token()),
+            }
+        })
+    }
+
+    fn parse_block(&mut self, offsets: Vec<f32>, _start: &ParserState, input: &mut Parser<'i>) -> Result<(), ParseError<Self::Error>> {
+        let mut decls = Declarations::default();
+        for _ in RuleBodyParser::new(input, &mut decls) {}
+        let decls: Arc<[Decl]> = decls.normal.into();
+        for offset in offsets {
+            self.frames.push((offset, decls.clone()));
+        }
+        Ok(())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for KeyframesParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = SelectorParseErrorKind;
 }
 
 #[derive(Default)]

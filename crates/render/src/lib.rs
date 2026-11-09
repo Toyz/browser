@@ -3,6 +3,7 @@
 //! [`boxes`] builds a plain-data layout tree (off the main thread); [`view`]
 //! turns its rows into GPUI elements on demand, one row per virtualized list item.
 
+pub mod animate;
 pub mod boxes;
 pub mod hover;
 pub mod images;

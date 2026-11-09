@@ -248,6 +248,21 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
     inner
 }
 
+/// CSS `box-shadow` layers as GPUI shadows.
+pub(crate) fn box_shadows(shadows: &[style::Shadow], palette: &Palette) -> Vec<BoxShadow> {
+    shadows
+        .iter()
+        .map(|sh| BoxShadow {
+            color: palette.color(sh.color),
+            offset: point(px(sh.x), px(sh.y)),
+            // GPUI's own shadow presets use CSS's numbers: same meaning.
+            blur_radius: px(sh.blur),
+            spread_radius: px(sh.spread),
+            inset: sh.inset,
+        })
+        .collect()
+}
+
 /// In CSS block flow, an auto-width block fills its container even with auto
 /// margins (they only center it once max-width bites). In flexbox, which we
 /// lay blocks out with, auto margins shrink-wrap instead, so ask for full width.
@@ -291,6 +306,7 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .when(!s.max_height.is_auto(), |d| d.max_h(len(s.outer_height(s.max_height))))
         .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
         .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
+        .when_some(s.shadows.as_ref(), |d, shadows| d.shadow(box_shadows(shadows, palette)))
         .flex_grow(s.flex_grow)
         .flex_shrink(s.flex_shrink)
         .when(!s.flex_basis.is_auto(), |d| d.flex_basis(len(s.flex_basis)))

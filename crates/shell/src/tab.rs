@@ -20,6 +20,7 @@ use render::{ImageState, ImageStore, Palette, RenderCx};
 use style::ElementState;
 use url::Url;
 
+mod animations;
 mod forms;
 
 use crate::capture::{self, CaptureJob};
@@ -91,6 +92,8 @@ pub struct Tab {
     /// and whether it shows the pretty-printed version.
     source_editor: Option<Entity<gpui_kit::component::input::EditorState>>,
     source_pretty: bool,
+    /// Running CSS transitions and animations.
+    animations: animations::Animations,
     /// Form controls' widgets and state.
     forms: forms::Forms,
     /// A form `POST` waiting for its navigation to start loading.
@@ -150,6 +153,7 @@ impl Tab {
             page_gen: 0,
             hover_styler: None,
             forms: Default::default(),
+            animations: Default::default(),
             source_editor: None,
             source_pretty: false,
             pending_post: None,
@@ -391,6 +395,7 @@ impl Tab {
         self._scroll_end = None;
         self.hover_styler = None;
         self.forms = Default::default();
+        self.animations = Default::default();
         self.hover_blocks.clear();
         self.hover_inline = None;
         self.hovered_link = None;
@@ -398,6 +403,7 @@ impl Tab {
         self.load_images(cx);
         self.load_favicon(favicon, cx);
         self.schedule_refresh(refresh, window, cx);
+        self.sync_keyframes(window);
     }
 
     /// Follow a `<meta http-equiv="refresh">` redirect, replacing this
@@ -658,23 +664,35 @@ impl Tab {
         }
     }
 
+    /// A styler for the page as it's styled now (kept between hovers).
+    fn styler(&mut self, window: &Window) -> Option<&style::Styler> {
+        let styles = self.page.as_ref()?.styles.as_ref()?;
+        let env = media_env(window);
+        let signature = styles.signature(&env);
+        if self.hover_styler.as_ref().is_none_or(|(sig, _)| *sig != signature) {
+            self.hover_styler = Some((signature, styles.styler_with_state(env, self.element_state.clone())));
+        }
+        self.hover_styler.as_ref().map(|(_, s)| s)
+    }
+
     /// Try to apply an interaction state change as a paint-only patch.
     /// `Some(None)`: nothing visible changed; `None`: needs a full restyle.
     fn patch_paint(&mut self, state: &Arc<ElementState>, window: &Window) -> Option<Option<render::LayoutTree>> {
         let page = self.page.as_ref()?;
-        let (doc, styles) = (page.doc.as_ref()?, page.styles.as_ref()?);
-        let env = media_env(window);
-        let signature = styles.signature(&env);
+        let signature = page.styles.as_ref()?.signature(&media_env(window));
         if page.signature != signature {
             return None;
         }
-        if self.hover_styler.as_ref().is_none_or(|(sig, _)| *sig != signature) {
-            self.hover_styler = Some((signature, styles.styler_with_state(env, self.element_state.clone())));
-        }
+        self.styler(window)?;
+        let page = self.page.as_ref()?;
+        let (doc, styles) = (page.doc.as_ref()?, page.styles.as_ref()?);
         let (_, styler) = self.hover_styler.as_mut()?;
         match render::hover::patch(&page.layout, doc, styler, &self.element_state, state, styles.state_reaches_others()) {
             render::hover::Patch::Unchanged => Some(None),
-            render::hover::Patch::Painted(layout) => Some(Some(layout)),
+            render::hover::Patch::Painted(layout, changed) => {
+                self.start_transitions(changed);
+                Some(Some(layout))
+            }
             render::hover::Patch::NeedsRestyle(why) => {
                 if std::env::var_os("BROWSER_DEBUG").is_some() {
                     eprintln!("hover can't patch: {why}");
@@ -731,6 +749,7 @@ impl Tab {
                     });
                 }
                 this.load_images(cx);
+                this.sync_keyframes(window);
                 cx.notify();
                 // The pointer moved on while this was building: catch up.
                 this.interaction_changed(window, cx);
@@ -1031,7 +1050,8 @@ impl Tab {
                 .into_any_element();
         }
 
-        let layout = page.layout.clone();
+        // Mid-animation, the frame's in-between styles.
+        let layout = self.animations.display.clone().unwrap_or_else(|| page.layout.clone());
         let rcx = self.render_cx(cx);
         let rcx_fixed = rcx.clone();
         let last = layout.rows.len().saturating_sub(1);
@@ -1141,7 +1161,8 @@ impl Tab {
 }
 
 impl Render for Tab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.animation_frame(window);
         let theme = cx.theme();
         let accent = theme.primary;
         let palette = &self.palette;

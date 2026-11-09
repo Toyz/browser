@@ -402,6 +402,119 @@ pub enum Overflow {
     Scroll,
 }
 
+/// A timing function.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Easing {
+    CubicBezier(f32, f32, f32, f32),
+    /// `steps(n, jump-end)` (`jump_start`: `steps(n, start)`).
+    Steps(u32, bool),
+}
+
+impl Easing {
+    pub const LINEAR: Easing = Easing::CubicBezier(0.0, 0.0, 1.0, 1.0);
+    pub const EASE: Easing = Easing::CubicBezier(0.25, 0.1, 0.25, 1.0);
+
+    /// Progress `t` (0..=1) through the timing function.
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Easing::Steps(n, jump_start) => {
+                let n = n.max(1) as f32;
+                let step = if jump_start { (t * n).ceil() } else { (t * n).floor() };
+                (step / n).min(1.0)
+            }
+            Easing::CubicBezier(x1, y1, x2, y2) => {
+                if (x1, y1, x2, y2) == (0.0, 0.0, 1.0, 1.0) {
+                    return t;
+                }
+                // Solve x(s) = t for the curve parameter s (Newton, then bisection).
+                let bez = |a: f32, b: f32, s: f32| 3.0 * a * s * (1.0 - s).powi(2) + 3.0 * b * s * s * (1.0 - s) + s.powi(3);
+                let dx = |s: f32| 3.0 * x1 * (1.0 - s).powi(2) + 6.0 * (x2 - x1) * s * (1.0 - s) + 3.0 * (1.0 - x2) * s * s;
+                let mut s = t;
+                for _ in 0..8 {
+                    let err = bez(x1, x2, s) - t;
+                    let d = dx(s);
+                    if err.abs() < 1e-5 || d.abs() < 1e-6 {
+                        break;
+                    }
+                    s = (s - err / d).clamp(0.0, 1.0);
+                }
+                if (bez(x1, x2, s) - t).abs() > 1e-3 {
+                    let (mut lo, mut hi) = (0.0, 1.0);
+                    for _ in 0..30 {
+                        s = (lo + hi) / 2.0;
+                        if bez(x1, x2, s) < t { lo = s } else { hi = s }
+                    }
+                }
+                bez(y1, y2, s)
+            }
+        }
+    }
+}
+
+/// `transition-*`: parallel lists, repeated to the length of `properties`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Transitions {
+    pub properties: Vec<Arc<str>>,
+    /// Seconds.
+    pub durations: Vec<f32>,
+    pub delays: Vec<f32>,
+    pub easings: Vec<Easing>,
+}
+
+impl Transitions {
+    /// The (duration, delay, easing) for a property, if it transitions.
+    pub fn for_property(&self, name: &str) -> Option<(f32, f32, Easing)> {
+        let pick = |v: &Vec<f32>, i: usize| if v.is_empty() { 0.0 } else { v[i % v.len()] };
+        let i = self.properties.iter().position(|p| &**p == name || &**p == "all")?;
+        let duration = pick(&self.durations, i);
+        let easing = if self.easings.is_empty() { Easing::EASE } else { self.easings[i % self.easings.len()] };
+        (duration > 0.0).then(|| (duration, pick(&self.delays, i), easing))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnimDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+/// One `animation`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    pub name: Arc<str>,
+    pub duration: f32,
+    pub delay: f32,
+    pub easing: Easing,
+    /// `f32::INFINITY` for `infinite`.
+    pub iterations: f32,
+    pub direction: AnimDirection,
+    /// `animation-fill-mode` forwards / backwards.
+    pub fill_forwards: bool,
+    pub fill_backwards: bool,
+}
+
+/// One `box-shadow` layer, resolved (px).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Shadow {
+    pub x: f32,
+    pub y: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Color,
+    pub inset: bool,
+}
+
+/// A `box-shadow` layer as specified.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowSpec {
+    pub lengths: Vec<LenSpec>,
+    pub color: Color,
+    pub inset: bool,
+}
+
 /// One column of an explicit `grid-template-columns`, resolved.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Track {

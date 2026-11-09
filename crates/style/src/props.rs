@@ -144,6 +144,21 @@ pub enum Decl {
     GridColumn(Option<GridSpan>),
     Overflow(Overflow),
     Opacity(f32),
+    BoxShadow(Option<Arc<[ShadowSpec]>>),
+    TransitionProperty(Vec<Arc<str>>),
+    TransitionDuration(Vec<f32>),
+    TransitionDelay(Vec<f32>),
+    TransitionTiming(Vec<Easing>),
+    /// The `transition` shorthand: (property, duration, delay, easing) per item.
+    Transition(Vec<(Arc<str>, f32, f32, Easing)>),
+    Animation(Option<Arc<[Animation]>>),
+    AnimationName(Vec<Arc<str>>),
+    AnimationDuration(Vec<f32>),
+    AnimationDelay(Vec<f32>),
+    AnimationTiming(Vec<Easing>),
+    AnimationIterations(Vec<f32>),
+    AnimationDirection(Vec<AnimDirection>),
+    AnimationFill(Vec<(bool, bool)>),
     /// `transform` / `translate`: just the translation (x, y).
     Translate(LenSpec, LenSpec),
     Masked(bool),
@@ -485,6 +500,107 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         "mask-position" | "-webkit-mask-position" => out.push(D::MaskPosition(parse_bg_position(p)?)),
         "background-size" => out.push(D::BackgroundSize(parse_bg_size(p)?)),
         "background-position" => out.push(D::BackgroundPosition(parse_bg_position(p)?)),
+        "transition-property" => out.push(D::TransitionProperty(p.parse_comma_separated(|p| {
+            Ok(Arc::from(&*p.expect_ident_cloned()?.to_ascii_lowercase()))
+        })?)),
+        "transition-duration" => out.push(D::TransitionDuration(p.parse_comma_separated(parse_time)?)),
+        "transition-delay" => out.push(D::TransitionDelay(p.parse_comma_separated(parse_time)?)),
+        "transition-timing-function" => out.push(D::TransitionTiming(p.parse_comma_separated(parse_easing)?)),
+        "transition" => {
+            let items = p.parse_comma_separated(|p| {
+                let (mut property, mut times, mut easing) = (Arc::from("all"), Vec::new(), Easing::EASE);
+                while !p.is_exhausted() {
+                    if let Ok(t) = p.try_parse(parse_time) {
+                        times.push(t);
+                    } else if let Ok(e) = p.try_parse(parse_easing) {
+                        easing = e;
+                    } else if let Ok(id) = p.try_parse(|p| p.expect_ident_cloned()) {
+                        property = Arc::from(&*id.to_ascii_lowercase());
+                    } else {
+                        p.next()?;
+                    }
+                }
+                Ok((property, times.first().copied().unwrap_or(0.0), times.get(1).copied().unwrap_or(0.0), easing))
+            })?;
+            out.push(D::Transition(items));
+        }
+        "animation-name" => out.push(D::AnimationName(p.parse_comma_separated(|p| {
+            Ok(match p.next()?.clone() {
+                Token::Ident(s) | Token::QuotedString(s) => Arc::from(&*s),
+                _ => Arc::from("none"),
+            })
+        })?)),
+        "animation-duration" => out.push(D::AnimationDuration(p.parse_comma_separated(parse_time)?)),
+        "animation-delay" => out.push(D::AnimationDelay(p.parse_comma_separated(parse_time)?)),
+        "animation-timing-function" => out.push(D::AnimationTiming(p.parse_comma_separated(parse_easing)?)),
+        "animation-iteration-count" => out.push(D::AnimationIterations(p.parse_comma_separated(parse_iterations)?)),
+        "animation-direction" => out.push(D::AnimationDirection(p.parse_comma_separated(parse_direction)?)),
+        "animation-fill-mode" => out.push(D::AnimationFill(p.parse_comma_separated(parse_fill)?)),
+        "animation" => {
+            let items = p.parse_comma_separated(|p| {
+                let mut a = Animation {
+                    name: Arc::from("none"),
+                    duration: 0.0,
+                    delay: 0.0,
+                    easing: Easing::EASE,
+                    iterations: 1.0,
+                    direction: AnimDirection::Normal,
+                    fill_forwards: false,
+                    fill_backwards: false,
+                };
+                let mut times = 0;
+                while !p.is_exhausted() {
+                    if let Ok(t) = p.try_parse(parse_time) {
+                        if times == 0 { a.duration = t } else { a.delay = t }
+                        times += 1;
+                    } else if let Ok(e) = p.try_parse(parse_easing) {
+                        a.easing = e;
+                    } else if let Ok(n) = p.try_parse(parse_iterations) {
+                        a.iterations = n;
+                    } else if let Ok(d) = p.try_parse(parse_direction) {
+                        a.direction = d;
+                    } else if let Ok((f, b)) = p.try_parse(parse_fill) {
+                        (a.fill_forwards, a.fill_backwards) = (f, b);
+                    } else if let Ok(name) = p.try_parse(|p| match p.next()?.clone() {
+                        Token::Ident(s) if !matches!(&*s.to_ascii_lowercase(), "running" | "paused") => Ok(s),
+                        Token::QuotedString(s) => Ok(s),
+                        _ => err(p),
+                    }) {
+                        a.name = Arc::from(&*name);
+                    } else {
+                        p.next()?;
+                    }
+                }
+                Ok(a)
+            })?;
+            let items: Vec<Animation> = items.into_iter().filter(|a| &*a.name != "none").collect();
+            out.push(D::Animation((!items.is_empty()).then(|| items.into())));
+        }
+        "box-shadow" => {
+            if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
+                out.push(D::BoxShadow(None));
+            } else {
+                let layers = p.parse_comma_separated(|p| {
+                    let mut lengths = Vec::new();
+                    let mut color = None;
+                    let mut inset = false;
+                    while !p.is_exhausted() {
+                        if p.try_parse(|p| p.expect_ident_matching("inset")).is_ok() {
+                            inset = true;
+                        } else if let Ok(l) = p.try_parse(parse_len) {
+                            lengths.push(l);
+                        } else if let Ok(c) = p.try_parse(parse_color) {
+                            color = Some(c);
+                        } else {
+                            p.next()?;
+                        }
+                    }
+                    Ok(ShadowSpec { lengths, color: color.unwrap_or(Color::CurrentColor), inset })
+                })?;
+                let layers: Vec<ShadowSpec> = layers.into_iter().filter(|l| l.lengths.len() >= 2).collect();
+                out.push(D::BoxShadow((!layers.is_empty()).then(|| layers.into())));
+            }
+        }
         "transform" | "translate" => {
             // Only translations: rotations and scales are ignored.
             let (mut x, mut y) = (Vec::new(), Vec::new());
@@ -954,6 +1070,78 @@ fn parse_grid_columns<'i>(p: &mut Parser<'i>) -> PResult<'i, GridCols> {
         Some(min) if count == 0 => GridCols::AutoFill(min),
         _ => GridCols::Count(count.clamp(1, 64) as u16),
     })
+}
+
+/// `150ms`, `.3s`, `0`.
+fn parse_time<'i>(p: &mut Parser<'i>) -> PResult<'i, f32> {
+    match p.next()?.clone() {
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("ms") => Ok(value / 1000.0),
+        Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("s") => Ok(value),
+        Token::Number { value: 0.0, .. } => Ok(0.0),
+        _ => err(p),
+    }
+}
+
+fn parse_easing<'i>(p: &mut Parser<'i>) -> PResult<'i, Easing> {
+    match p.next()?.clone() {
+        Token::Ident(id) => Ok(match &*id.to_ascii_lowercase() {
+            "linear" => Easing::LINEAR,
+            "ease" => Easing::EASE,
+            "ease-in" => Easing::CubicBezier(0.42, 0.0, 1.0, 1.0),
+            "ease-out" => Easing::CubicBezier(0.0, 0.0, 0.58, 1.0),
+            "ease-in-out" => Easing::CubicBezier(0.42, 0.0, 0.58, 1.0),
+            "step-start" => Easing::Steps(1, true),
+            "step-end" => Easing::Steps(1, false),
+            _ => return err(p),
+        }),
+        Token::Function(f) if f.eq_ignore_ascii_case("cubic-bezier") => p.parse_nested_block(|p| {
+            let mut v = [0.0f32; 4];
+            for (i, slot) in v.iter_mut().enumerate() {
+                if i > 0 {
+                    p.expect_comma()?;
+                }
+                *slot = p.expect_number()?;
+            }
+            Ok(Easing::CubicBezier(v[0], v[1], v[2], v[3]))
+        }),
+        Token::Function(f) if f.eq_ignore_ascii_case("steps") => p.parse_nested_block(|p| {
+            let n = p.expect_integer()?.max(1) as u32;
+            let start = p
+                .try_parse(|p| {
+                    p.expect_comma()?;
+                    p.expect_ident_cloned()
+                })
+                .is_ok_and(|id| matches!(&*id.to_ascii_lowercase(), "start" | "jump-start" | "jump-both"));
+            Ok(Easing::Steps(n, start))
+        }),
+        Token::Function(f) if f.eq_ignore_ascii_case("linear") => p.parse_nested_block(|p| {
+            while p.next().is_ok() {}
+            Ok(Easing::LINEAR)
+        }),
+        _ => err(p),
+    }
+}
+
+fn parse_iterations<'i>(p: &mut Parser<'i>) -> PResult<'i, f32> {
+    match p.next()?.clone() {
+        Token::Ident(id) if id.eq_ignore_ascii_case("infinite") => Ok(f32::INFINITY),
+        Token::Number { value, .. } if value >= 0.0 => Ok(value),
+        _ => err(p),
+    }
+}
+
+fn parse_direction<'i>(p: &mut Parser<'i>) -> PResult<'i, AnimDirection> {
+    keyword(p, &[
+        ("normal", AnimDirection::Normal),
+        ("reverse", AnimDirection::Reverse),
+        ("alternate", AnimDirection::Alternate),
+        ("alternate-reverse", AnimDirection::AlternateReverse),
+    ])
+}
+
+/// `animation-fill-mode` → (forwards, backwards).
+fn parse_fill<'i>(p: &mut Parser<'i>) -> PResult<'i, (bool, bool)> {
+    keyword(p, &[("none", (false, false)), ("forwards", (true, false)), ("backwards", (false, true)), ("both", (true, true))])
 }
 
 fn parse_list_style_type<'i>(p: &mut Parser<'i>) -> PResult<'i, ListStyle> {

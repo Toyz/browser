@@ -17,7 +17,7 @@ use url::Url;
 use crate::media::{self, MediaEnv};
 use crate::props::{Decl, FontSizeSpec, GridCols, LineHeightSpec, WeightSpec, Wide, parse_declaration};
 use crate::selector::{ElementRef, ElementState};
-use crate::sheet::{StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet};
+use crate::sheet::{StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet, Keyframes};
 use crate::values::*;
 use crate::{ComputedStyle, CustomProps};
 
@@ -274,6 +274,7 @@ pub struct StyleData {
     has_state_rules: bool,
     /// ...and some puts it before a combinator or inside `:has()`.
     state_reaches_others: bool,
+    keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
 }
 
 const STATE_PSEUDOS: [&str; 5] = [":hover", ":active", ":focus", ":target", ":checked"];
@@ -314,7 +315,16 @@ mod state_tests {
 
 impl StyleData {
     pub fn from_sheets(sheets: Vec<Stylesheet>, base: Option<Url>) -> Self {
-        let rules: Vec<StyleRule> = sheets.into_iter().flat_map(|s| s.rules).collect();
+        let mut keyframes: HashMap<Arc<str>, Arc<Keyframes>> = HashMap::new();
+        let mut rules: Vec<StyleRule> = Vec::new();
+        for sheet in sheets {
+            rules.extend(sheet.rules);
+            for (name, frames) in sheet.keyframes {
+                // Later definitions win.
+                keyframes.insert(name, Arc::new(frames));
+            }
+        }
+        let keyframes = Arc::new(keyframes);
         let mut conditions: Vec<Arc<str>> = Vec::new();
         for rule in &rules {
             for c in rule.media.iter() {
@@ -334,7 +344,7 @@ impl StyleData {
                 }
             }
         }
-        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules, state_reaches_others }
+        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules, state_reaches_others, keyframes }
     }
 
     /// Does any rule depend on hover/active/focus state?
@@ -418,6 +428,7 @@ impl StyleData {
             element_hashes: RefCell::default(),
             attr_cache: RefCell::default(),
             var_cache: RefCell::default(),
+            keyframes: self.keyframes.clone(),
         }
     }
 }
@@ -435,9 +446,42 @@ pub struct Styler {
     element_hashes: RefCell<HashMap<NodeId, Vec<u32>>>,
     attr_cache: RefCell<HashMap<String, Rc<ParsedAttr>>>,
     var_cache: RefCell<HashMap<VarKey, Rc<Vec<Decl>>>>,
+    keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
 }
 
 impl Styler {
+    /// The styles of an element at each keyframe of `@keyframes name`
+    /// (offset, style), with the element's own style at 0% and 100% where
+    /// the keyframes don't say.
+    pub fn keyframe_styles(&self, name: &str, base: &ComputedStyle) -> Option<Vec<(f32, ComputedStyle)>> {
+        let frames = self.keyframes.get(name)?;
+        let mut out: Vec<(f32, ComputedStyle)> = Vec::new();
+        for (offset, decls) in frames.iter() {
+            let mut st = base.clone();
+            for d in decls.iter() {
+                match d {
+                    Decl::Unresolved { name, raw } => {
+                        if let Some(resolved) = self.resolve_vars(name, raw, &st.custom) {
+                            for d in resolved.iter() {
+                                self.apply(&mut st, base, d);
+                            }
+                        }
+                    }
+                    d => self.apply(&mut st, base, d),
+                }
+            }
+            finalize(&mut st);
+            out.push((*offset, st));
+        }
+        if out.first().is_none_or(|f| f.0 > 0.0) {
+            out.insert(0, (0.0, base.clone()));
+        }
+        if out.last().is_none_or(|f| f.0 < 1.0) {
+            out.push((1.0, base.clone()));
+        }
+        Some(out)
+    }
+
     pub fn new(sheets: Vec<Stylesheet>, env: MediaEnv) -> Self {
         StyleData::from_sheets(sheets, None).styler(env)
     }
@@ -720,6 +764,68 @@ impl Styler {
             Decl::Overflow(v) => s.overflow = *v,
             Decl::Opacity(v) => s.opacity = *v,
             Decl::Translate(x, y) => s.translate = (len(x), len(y)),
+            Decl::TransitionProperty(v) => Arc::make_mut(s.transitions.get_or_insert_default()).properties = v.clone(),
+            Decl::TransitionDuration(v) => Arc::make_mut(s.transitions.get_or_insert_default()).durations = v.clone(),
+            Decl::TransitionDelay(v) => Arc::make_mut(s.transitions.get_or_insert_default()).delays = v.clone(),
+            Decl::TransitionTiming(v) => Arc::make_mut(s.transitions.get_or_insert_default()).easings = v.clone(),
+            Decl::Transition(items) => {
+                s.transitions = Some(Arc::new(Transitions {
+                    properties: items.iter().map(|i| i.0.clone()).collect(),
+                    durations: items.iter().map(|i| i.1).collect(),
+                    delays: items.iter().map(|i| i.2).collect(),
+                    easings: items.iter().map(|i| i.3).collect(),
+                }))
+            }
+            Decl::Animation(v) => s.animations = v.clone(),
+            Decl::AnimationName(names) => {
+                let old = s.animations.clone();
+                let list: Vec<Animation> = names
+                    .iter()
+                    .filter(|n| &***n != "none")
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let base = old.as_ref().and_then(|o| o.get(i).cloned());
+                        Animation {
+                            name: name.clone(),
+                            ..base.unwrap_or(Animation {
+                                name: name.clone(),
+                                duration: 0.0,
+                                delay: 0.0,
+                                easing: Easing::EASE,
+                                iterations: 1.0,
+                                direction: AnimDirection::Normal,
+                                fill_forwards: false,
+                                fill_backwards: false,
+                            })
+                        }
+                    })
+                    .collect();
+                s.animations = (!list.is_empty()).then(|| list.into());
+            }
+            Decl::AnimationDuration(v) => each_animation(s, v, |a, x| a.duration = *x),
+            Decl::AnimationDelay(v) => each_animation(s, v, |a, x| a.delay = *x),
+            Decl::AnimationTiming(v) => each_animation(s, v, |a, x| a.easing = *x),
+            Decl::AnimationIterations(v) => each_animation(s, v, |a, x| a.iterations = *x),
+            Decl::AnimationDirection(v) => each_animation(s, v, |a, x| a.direction = *x),
+            Decl::AnimationFill(v) => each_animation(s, v, |a, x| (a.fill_forwards, a.fill_backwards) = *x),
+            Decl::BoxShadow(None) => s.shadows = None,
+            Decl::BoxShadow(Some(specs)) => {
+                let px = |l: Option<&LenSpec>| l.map(|l| len(l).px_or_zero()).unwrap_or(0.0);
+                let shadows: Vec<Shadow> = specs
+                    .iter()
+                    .map(|sp| Shadow {
+                        x: px(sp.lengths.first()),
+                        y: px(sp.lengths.get(1)),
+                        blur: px(sp.lengths.get(2)).max(0.0),
+                        spread: px(sp.lengths.get(3)),
+                        color: sp.color,
+                        inset: sp.inset,
+                    })
+                    // `0 0 #0000` placeholders (Tailwind's ring layers) draw nothing.
+                    .filter(|sh| !sh.color.is_transparent())
+                    .collect();
+                s.shadows = (!shadows.is_empty()).then(|| shadows.into());
+            }
             Decl::Masked(v) => s.masked = *v,
             Decl::Content(v) => s.content = v.clone(),
             Decl::Float(v) => s.float = *v,
@@ -863,6 +969,19 @@ fn non_auto(l: Length) -> Length {
     if l.is_auto() { Length::ZERO } else { l }
 }
 
+/// Apply an `animation-*` longhand list to the animations (cycling it).
+fn each_animation<T>(s: &mut ComputedStyle, values: &[T], set: impl Fn(&mut Animation, &T)) {
+    let Some(list) = &s.animations else { return };
+    if values.is_empty() {
+        return;
+    }
+    let mut list = list.to_vec();
+    for (i, a) in list.iter_mut().enumerate() {
+        set(a, &values[i % values.len()]);
+    }
+    s.animations = Some(list.into());
+}
+
 fn meta_allows_dark(doc: &Document) -> bool {
     doc.descendants(doc.root()).any(|n| {
         doc.element(n).is_some_and(|e| {
@@ -907,6 +1026,21 @@ fn finalize(s: &mut ComputedStyle) {
         if s.border_color.get(side) == Color::CurrentColor {
             s.border_color.set(side, s.color);
         }
+    }
+    if let Some(shadows) = &mut s.shadows
+        && shadows.iter().any(|sh| matches!(sh.color, Color::CurrentColor | Color::LightDark(..)))
+    {
+        let color = s.color;
+        *shadows = shadows
+            .iter()
+            .map(|sh| Shadow {
+                color: match sh.color {
+                    Color::CurrentColor => color,
+                    c => scheme_color(c, dark),
+                },
+                ..*sh
+            })
+            .collect();
     }
     if s.background == Some(Color::CurrentColor) {
         s.background = Some(s.color);

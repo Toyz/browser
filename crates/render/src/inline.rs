@@ -780,6 +780,16 @@ fn paint_flow(
             let x = x + ml;
             let bounds = Bounds::new(point(dx + x, top), size(m.width - ml - mr, m.ascent));
             let border = s.border_width;
+            if let Some(shadows) = &s.shadows {
+                let r = |l: style::Length| clamp_radius(px(l.px_or_zero()), bounds);
+                let corners = Corners {
+                    top_left: r(s.border_radius[0]),
+                    top_right: r(s.border_radius[1]),
+                    bottom_right: r(s.border_radius[2]),
+                    bottom_left: r(s.border_radius[3]),
+                };
+                window.paint_drop_shadows(bounds, corners, &crate::view::box_shadows(shadows, palette));
+            }
             if s.painted_background().is_some() || s.has_border() {
                 let corner = |l: style::Length| {
                     let r = match l {
