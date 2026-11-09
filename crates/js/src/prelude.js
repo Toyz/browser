@@ -1045,7 +1045,8 @@
       else if (c === "}" && depth > 0 && --depth === 0) { out.push(text.slice(start, i + 1).trim()); start = i + 1; }
       else if (c === ";" && depth === 0) { const r = text.slice(start, i + 1).trim(); if (r.startsWith("@")) out.push(r); start = i + 1; }
     }
-    return out.filter((r) => r && !r.startsWith("/*"));
+    // A comment before a rule is part of its text: drop the comment, not the rule.
+    return out.map((r) => r.replace(/^(?:\s*\/\*[\s\S]*?\*\/)+\s*/, "")).filter(Boolean);
   }
   class CSSRule {
     constructor(text, sheet) {

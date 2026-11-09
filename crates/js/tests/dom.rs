@@ -553,13 +553,15 @@ fn declarative_shadow_roots_render_and_reach_scripts() {
 fn cssom_rules_render() {
     let doc = run(r##"<head><style id="s"></style></head><body><p id="o"></p><script>
         const sheet = document.getElementById("s").sheet;
+        const parsed = new CSSStyleSheet();
+        parsed.replaceSync("/* lead */ :host { a: b } /* x */ nav { c: d } .t { e: f }");
         sheet.insertRule(".a { color: red }", 0);
         sheet.insertRule("@media (min-width: 1px) { .b { color: blue } }", sheet.cssRules.length);
         sheet.insertRule(".c { color: green }", 1);
         sheet.deleteRule(1);
-        document.getElementById("o").textContent = sheet.cssRules.length + " " + sheet.cssRules[0].selectorText + " " + document.styleSheets.length;
+        document.getElementById("o").textContent = sheet.cssRules.length + " " + sheet.cssRules[0].selectorText + " " + document.styleSheets.length + " " + parsed.cssRules.map((r) => r.selectorText).join(",");
         </script></body>"##);
-    assert_eq!(text_of(&doc, "o"), "2 .a 1");
+    assert_eq!(text_of(&doc, "o"), "2 .a 1 :host,nav,.t");
     let css = text_of(&doc, "s");
     assert!(css.contains(".a { color: red }") && css.contains("@media (min-width: 1px) { .b { color: blue } }") && !css.contains(".c"), "{css}");
 }
