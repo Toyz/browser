@@ -14,6 +14,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
@@ -288,8 +289,10 @@ impl Browser {
                 .layout
                 .images
                 .iter()
+                .map(|(url, _)| url)
+                .chain(page.layout.fixed_images.iter())
                 .take(MAX_IMAGES)
-                .map(|(url, _)| (**url).clone())
+                .map(|url| (**url).clone())
                 .filter(|url| matches!(store.get(url), None | Some(ImageState::Loading)))
                 .collect();
             for url in &jobs {
@@ -674,6 +677,7 @@ impl Browser {
 
         let layout = page.layout.clone();
         let rcx = self.render_cx(cx);
+        let rcx_fixed = rcx.clone();
         let last = layout.rows.len().saturating_sub(1);
         div()
             .size_full()
@@ -689,6 +693,17 @@ impl Browser {
                 .size_full(),
             )
             .vertical_scrollbar(&self.list_state)
+            // `position: fixed` boxes, pinned over the viewport.
+            .when(!page.layout.fixed.is_empty(), |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .children(page.layout.fixed.iter().map(|b| render::render_fixed(b, &rcx_fixed))),
+                )
+            })
             .into_any_element()
     }
 }

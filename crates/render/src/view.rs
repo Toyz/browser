@@ -296,6 +296,40 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
             Some(GridSpan::Full) => d.col_span_full(),
             None => d,
         })
+        .map(|d| apply_position(d, s))
+}
+
+/// `position` + `top`/`right`/`bottom`/`left`. Absolute boxes are placed
+/// relative to their parent's box (in CSS: the nearest positioned ancestor,
+/// which usually *is* the parent); fixed ones relative to the viewport overlay.
+fn apply_position(d: Div, s: &ComputedStyle) -> Div {
+    let d = match s.position {
+        style::Position::Absolute | style::Position::Fixed => d.absolute(),
+        style::Position::Relative => d.relative(),
+        style::Position::Static | style::Position::Sticky => return d,
+    };
+    let inset = |d: Div, side: style::Side| -> Div {
+        let v = s.inset.get(side);
+        if v.is_auto() {
+            return d;
+        }
+        match side {
+            style::Side::Top => d.top(len(v)),
+            style::Side::Right => d.right(len(v)),
+            style::Side::Bottom => d.bottom(len(v)),
+            style::Side::Left => d.left(len(v)),
+        }
+    };
+    style::Side::ALL.into_iter().fold(d, inset)
+}
+
+/// A `position: fixed` box, for the viewport overlay layer.
+pub fn render_fixed(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
+    render_box(b, cx, b.margin(), false)
+}
+
+fn is_out_of_flow(b: &LayoutBox) -> bool {
+    matches!(b, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed))
 }
 
 /// Render a box with the margins its parent's layout decided on.
@@ -310,11 +344,17 @@ fn render_box(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, in_flow: b
 /// Block flow: stack children vertically, collapsing adjacent vertical margins.
 fn render_flow_children(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     let mut prev_bottom = 0.0f32;
-    let last = children.len().saturating_sub(1);
+    // Absolutely positioned children don't take part in margin collapsing.
+    let last = children.iter().rposition(|c| !is_out_of_flow(c)).unwrap_or(0);
     children
         .iter()
         .enumerate()
         .map(|(ix, child)| {
+            if is_out_of_flow(child) {
+                // Positioned boxes paint above in-flow content (and their
+                // parent's border, which GPUI paints after children).
+                return deferred(render_box(child, cx, child.margin(), false)).into_any_element();
+            }
             let m = child.margin();
             let top = m.top.px_or_zero();
             let space = if ix == 0 { top } else { prev_bottom.max(top) };
@@ -329,7 +369,10 @@ fn render_flow_children(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement
 fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     children
         .iter()
-        .map(|child| render_box(child, cx, child.margin(), false))
+        .map(|child| {
+            let el = render_box(child, cx, child.margin(), false);
+            if is_out_of_flow(child) { deferred(el).into_any_element() } else { el }
+        })
         .collect()
 }
 

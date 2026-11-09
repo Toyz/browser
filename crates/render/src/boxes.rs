@@ -116,6 +116,8 @@ impl Block {
             && s.max_height.is_auto()
             && s.overflow == Overflow::Visible
             && s.opacity >= 1.0
+            // Absolutely positioned children are placed relative to this box.
+            && !self.children.iter().any(|c| matches!(c, LayoutBox::Block(b) if b.style.position == style::Position::Absolute))
     }
 
     /// When split, does it need a wrapper layer around each slice (vs. a plain indent)?
@@ -299,6 +301,10 @@ pub struct LayoutTree {
     /// Every image on the page, in document order, with the rows that show it
     /// (to re-measure them once it loads).
     pub images: Vec<(Arc<Url>, Vec<usize>)>,
+    /// `position: fixed` boxes, drawn over the viewport.
+    pub fixed: Vec<LayoutBox>,
+    /// Images inside fixed boxes.
+    pub fixed_images: Vec<Arc<Url>>,
 }
 
 impl LayoutTree {
@@ -318,12 +324,19 @@ pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
         base_url: doc.base_url(),
         next_id: 0,
         canvas: None,
+        positioned: 0,
+        fixed: Vec::new(),
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
     let canvas = builder.canvas;
+    let fixed = std::mem::take(&mut builder.fixed);
     let mut tree = flatten(root);
     tree.canvas = canvas;
+    for b in &fixed {
+        collect_images(b, &mut tree.fixed_images);
+    }
+    tree.fixed = fixed;
     tree
 }
 
@@ -363,6 +376,11 @@ struct Builder<'a> {
     base_url: Url,
     next_id: usize,
     canvas: Option<Color>,
+    /// How many positioned (non-static) ancestors we're inside, not counting
+    /// `html`/`body` (absolute boxes anchored there are hidden for now).
+    positioned: usize,
+    /// `position: fixed` boxes, rendered over the viewport.
+    fixed: Vec<LayoutBox>,
 }
 
 /// Accumulates the children of one block while walking its subtree.
@@ -372,6 +390,9 @@ struct Container {
     inline: InlineBuilder,
     /// Anchors seen but not yet attached to a box.
     pending_anchors: Vec<String>,
+    /// `position: absolute` children: out of flow, appended after the rest
+    /// (so they don't split lines, and paint on top).
+    absolutes: Vec<LayoutBox>,
 }
 
 impl Container {
@@ -554,6 +575,7 @@ impl Builder<'_> {
             children: Vec::new(),
             inline: InlineBuilder::default(),
             pending_anchors: Vec::new(),
+            absolutes: Vec::new(),
         };
         // Flex and grid containers "blockify" their children: each is an item.
         let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid);
@@ -572,6 +594,7 @@ impl Builder<'_> {
             c.children
         };
         let mut children = children;
+        children.append(&mut c.absolutes);
         if kind == BlockKind::Table {
             layout_table(&mut children);
         }
@@ -623,7 +646,15 @@ impl Builder<'_> {
         if is_element {
             c.inline.nodes.push(id);
         }
+        let root_like = doc.element(id).is_some_and(|e| matches!(&*e.name.local, "html" | "body"));
+        let positioned = is_element && !root_like && parent_style.position != style::Position::Static;
+        if positioned {
+            self.positioned += 1;
+        }
         self.build_children_inner(id, parent_style, c, link, blockify, &mut counter);
+        if positioned {
+            self.positioned -= 1;
+        }
         if is_element {
             c.inline.nodes.pop();
         }
@@ -705,6 +736,30 @@ impl Builder<'_> {
                 .and_then(|href| self.base_url.join(href.trim()).ok())
                 .map(Arc::new);
             let link = own_link.as_ref().or(link);
+
+            // Out-of-flow boxes.
+            match style.position {
+                style::Position::Fixed => {
+                    let kind = block_kind_for(style.display);
+                    let generated = self.generated(child, &style);
+                    let block = self.build_block(child, style, kind, link, generated);
+                    self.fixed.push(LayoutBox::Block(block));
+                    continue;
+                }
+                style::Position::Absolute => {
+                    // Anchored to the page itself: mostly off-screen tricks and
+                    // overlays; not supported yet.
+                    if self.positioned == 0 {
+                        continue;
+                    }
+                    let kind = block_kind_for(style.display);
+                    let generated = self.generated(child, &style);
+                    let block = self.build_block(child, style, kind, link, generated);
+                    c.absolutes.push(LayoutBox::Block(block));
+                    continue;
+                }
+                _ => {}
+            }
 
             if tag == "img" {
                 self.build_image(element, style, c, link);
@@ -1032,6 +1087,17 @@ fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
         return None;
     }
     Some((base.join(&url).ok()?, density.max(0.1)))
+}
+
+fn block_kind_for(display: Display) -> BlockKind {
+    match display {
+        Display::Flex => BlockKind::Flex,
+        Display::Grid => BlockKind::Grid,
+        Display::Table => BlockKind::Table,
+        Display::TableRow => BlockKind::TableRow,
+        Display::TableCell => BlockKind::TableCell,
+        _ => BlockKind::Normal,
+    }
 }
 
 fn list_start(doc: &Document, id: NodeId) -> i64 {
@@ -1797,6 +1863,22 @@ mod tests {
         assert_eq!(block(0).style.outer_width(block(0).style.width), Length::Px(124.0));
         assert_eq!(block(1).style.outer_width(block(1).style.width), Length::Px(100.0));
         assert_eq!(block(0).min_content, 124.0);
+    }
+
+    #[test]
+    fn positioned_boxes() {
+        let tree = layout_css(
+            r##"<div class="card"><span class="badge">new</span><p>text</p></div><div class="bar">fixed</div><a class="skip" href="#m">skip</a><p>after</p>"##,
+            ".card { position: relative; border: 1px solid } .badge { position: absolute; top: 4px; right: 4px } .bar { position: fixed; bottom: 0; left: 0 } .skip { position: absolute; left: -9999px }",
+        );
+        // The card holds its text, then the absolute badge last (out of flow).
+        let LayoutBox::Block(card) = &tree.rows[0].content else { panic!("{:?}", tree.rows[0].content) };
+        let LayoutBox::Block(badge) = card.children.last().unwrap() else { panic!() };
+        assert_eq!(badge.style.position, style::Position::Absolute);
+        assert_eq!(badge.style.inset.top, Length::Px(4.0));
+        assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["after"]);
+        // The fixed bar is an overlay; the page-anchored skip link stays hidden.
+        assert_eq!(tree.fixed.len(), 1);
     }
 
     #[test]

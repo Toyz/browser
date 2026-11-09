@@ -10,4 +10,4 @@ pub mod view;
 
 pub use boxes::{LayoutTree, build, build_plain_text};
 pub use images::{ImageState, ImageStore, PageAssets};
-pub use view::{BlockHover, FontBook, InlineHover, LinkClick, LinkHover, Palette, RenderCx, render_row};
+pub use view::{BlockHover, FontBook, InlineHover, LinkClick, LinkHover, Palette, RenderCx, render_fixed, render_row};

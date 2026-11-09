@@ -107,6 +107,7 @@ pub enum BgSizeSpec {
 pub enum Decl {
     Display(Display),
     Position(Position),
+    Inset(Side, LenSpec),
     Margin(Side, LenSpec),
     Padding(Side, LenSpec),
     BorderWidth(Side, LenSpec),
@@ -303,6 +304,28 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
             ("sticky", Position::Sticky),
             ("-webkit-sticky", Position::Sticky),
         ])?)),
+        "top" | "right" | "bottom" | "left" | "inset-block-start" | "inset-block-end"
+        | "inset-inline-start" | "inset-inline-end" => {
+            let side = match name.trim_start_matches("inset-") {
+                "top" | "block-start" => Side::Top,
+                "right" | "inline-end" => Side::Right,
+                "bottom" | "block-end" => Side::Bottom,
+                _ => Side::Left,
+            };
+            out.push(D::Inset(side, parse_len(p)?));
+        }
+        "inset" => {
+            for (side, v) in Side::ALL.into_iter().zip(four(p, parse_len)?) {
+                out.push(D::Inset(side, v));
+            }
+        }
+        "inset-inline" | "inset-block" => {
+            let first = parse_len(p)?;
+            let second = p.try_parse(parse_len).unwrap_or_else(|_| first.clone());
+            let sides = if name == "inset-inline" { [Side::Left, Side::Right] } else { [Side::Top, Side::Bottom] };
+            out.push(D::Inset(sides[0], first));
+            out.push(D::Inset(sides[1], second));
+        }
         "width" | "inline-size" => out.push(D::Width(parse_len(p)?)),
         "height" | "block-size" => out.push(D::Height(parse_len(p)?)),
         "min-width" | "min-inline-size" => out.push(D::MinWidth(parse_len(p)?)),

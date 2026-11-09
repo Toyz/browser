@@ -585,6 +585,7 @@ impl Styler {
         match d {
             Decl::Display(v) => s.display = *v,
             Decl::Position(v) => s.position = *v,
+            Decl::Inset(side, v) => s.inset.set(*side, len(v)),
             Decl::Margin(side, v) => s.margin.set(*side, len(v)),
             Decl::Padding(side, v) => s.padding.set(*side, non_auto(len(v))),
             Decl::BorderWidth(side, v) => s.border_width.set(*side, len(v).px_or_zero().max(0.0)),
@@ -786,10 +787,11 @@ fn finalize(s: &mut ComputedStyle) {
     if s.background_image == Some(Color::CurrentColor) {
         s.background_image = Some(s.color);
     }
-    // Out-of-flow positioning isn't supported yet (Phase 3); rendering these
-    // in flow puts popups, overlays and off-screen skip links in the page.
-    if matches!(s.position, Position::Absolute | Position::Fixed) {
-        s.display = Display::None;
+    // Out-of-flow boxes are always block-level ("blockified").
+    if matches!(s.position, Position::Absolute | Position::Fixed)
+        && matches!(s.display, Display::Inline | Display::InlineBlock)
+    {
+        s.display = Display::Block;
     }
 }
 

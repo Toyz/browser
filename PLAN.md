@@ -114,7 +114,9 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [ ] Tables (approximate with grid)
 - [ ] Forms: text inputs, buttons, GET form submission
 - [ ] Find in page, text selection & copy, zoom
-- [ ] `position: relative/absolute` (simple cases), `overflow`
+- [x] `position: relative` (offsets), `absolute` (relative to the parent box, painted on top via GPUI `deferred()`), `fixed` (viewport overlay layer). Absolute boxes with no positioned ancestor (besides html/body) stay hidden; `sticky` is static for now.
+- [ ] Real `inline-block` (an atomic box in the line: buttons, nav items, dropdown anchors) via inline objects
+- [ ] `position: sticky`; absolute boxes anchored to a non-parent ancestor; `z-index`; inline `position: relative` offsets
 
 **Done when:** you'd actually use it for reading.
 

@@ -29,6 +29,8 @@ pub struct ComputedStyle {
     // ---- not inherited ----
     pub display: Display,
     pub position: Position,
+    /// `top`/`right`/`bottom`/`left`.
+    pub inset: Edges<Length>,
     pub float: Float,
     pub clear: bool,
     pub vertical_align: VerticalAlign,
@@ -105,6 +107,7 @@ impl ComputedStyle {
         Self {
             display: Display::Inline,
             position: Position::Static,
+            inset: Edges::all(Length::Auto),
             float: Float::None,
             clear: false,
             vertical_align: VerticalAlign::Baseline,
