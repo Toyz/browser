@@ -47,6 +47,8 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.border_radius = from.border_radius;
     to.opacity = from.opacity;
     to.translate = from.translate;
+    to.rotate = from.rotate;
+    to.scale = from.scale;
     to.shadows = from.shadows.clone();
     to.underline = from.underline;
     to.strikethrough = from.strikethrough;

@@ -46,6 +46,8 @@ pub struct InlineFlow {
     blocks: Vec<(u32, AnyElement, LayoutId)>,
     /// The text's own layout node (when there are block children).
     leaf: Option<LayoutId>,
+    /// Rotation of the boxes around this text (for its icons).
+    rotation: f32,
 }
 
 impl InlineFlow {
@@ -57,6 +59,7 @@ impl InlineFlow {
             state: Rc::default(),
             blocks: Vec::new(),
             leaf: None,
+            rotation: crate::view::transform::inherited(),
         }
     }
 }
@@ -670,10 +673,13 @@ fn place(
                         let (w, h) = (m.width, m.ascent);
                         let (t, r, b, l) = edges(&image.style);
                         let picture = match cx.images.borrow().get(&*image.src) {
-                            Some(ImageState::Ready { image, padded, width, height }) => div()
+                            Some(ImageState::Ready { image: picture, padded, width, height }) => div()
                                 .w(w - l - r)
                                 .h(h - t - b)
-                                .child(crate::images::picture(image, padded, *width, *height))
+                                .child(
+                                    crate::view::transform::image(image, cx)
+                                        .unwrap_or_else(|| crate::images::picture(picture, padded, *width, *height)),
+                                )
                                 .into_any_element(),
                             _ => div().into_any_element(),
                         };
@@ -1007,7 +1013,9 @@ impl Element for InlineFlow {
             None => bounds,
         };
         let mut placement = Placement::default();
-        place(&self.para, &self.state, text.origin, text.size.width, &self.cx, &mut placement, window, cx);
+        crate::view::transform::at(self.rotation, || {
+            place(&self.para, &self.state, text.origin, text.size.width, &self.cx, &mut placement, window, cx)
+        });
 
         // Move each block subtree into its slot in the line. If its real size
         // differs from what the lines were broken with, try again next frame.

@@ -833,6 +833,8 @@ impl Styler {
                 };
                 s.translate = (offset(x), offset(y));
             }
+            Decl::Rotate(v) => s.rotate = *v,
+            Decl::Scale(x, y) => s.scale = (*x, *y),
             Decl::TransitionProperty(v) => Arc::make_mut(s.transitions.get_or_insert_default()).properties = v.clone(),
             Decl::TransitionDuration(v) => Arc::make_mut(s.transitions.get_or_insert_default()).durations = v.clone(),
             Decl::TransitionDelay(v) => Arc::make_mut(s.transitions.get_or_insert_default()).delays = v.clone(),
@@ -1357,6 +1359,22 @@ mod tests {
             style = styler.compute(doc, id, &style);
         }
         style
+    }
+
+    #[test]
+    fn rotations_and_scales() {
+        let (doc, s) = styled(
+            r#"<p>x</p><em>y</em><b>z</b><i>w</i>"#,
+            "p { rotate: 45deg } em { transform: translate(2px, 3px) rotate(0.25turn) scale(2, 3) } b { transform: matrix(0, 1, -1, 0, 5, 6) } i { transform: rotate(10deg); scale: 1.5 }",
+        );
+        assert_eq!(style_of(&doc, &s, "p").rotate, 45.0);
+        let em = style_of(&doc, &s, "em");
+        assert_eq!((em.rotate, em.scale), (90.0, (2.0, 3.0)));
+        assert_eq!(em.translate.0.px, 2.0);
+        let b = style_of(&doc, &s, "b");
+        assert!((b.rotate - 90.0).abs() < 1e-3 && (b.scale.0 - 1.0).abs() < 1e-3, "{:?}", (b.rotate, b.scale));
+        let i = style_of(&doc, &s, "i");
+        assert_eq!((i.rotate, i.scale), (10.0, (1.5, 1.5)));
     }
 
     #[test]

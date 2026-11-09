@@ -167,6 +167,9 @@ pub enum Decl {
     AnimationFill(Vec<(bool, bool)>),
     /// `transform` / `translate`: just the translation (x, y).
     Translate(LenSpec, LenSpec),
+    /// Degrees.
+    Rotate(f32),
+    Scale(f32, f32),
     Masked(bool),
     MaskUrl(Option<Arc<str>>),
     MaskSize(BgSizeSpec),
@@ -632,9 +635,24 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 out.push(D::BoxShadow((!layers.is_empty()).then(|| layers.into())));
             }
         }
+        "rotate" => {
+            // `rotate: 45deg` (axis forms like `rotate: x 45deg` aren't 2D).
+            let deg = if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() { 0.0 } else { parse_angle(p)? };
+            out.push(D::Rotate(deg));
+        }
+        "scale" => {
+            let (x, y) = if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
+                (1.0, 1.0)
+            } else {
+                let x = parse_factor(p)?;
+                (x, p.try_parse(parse_factor).unwrap_or(x))
+            };
+            out.push(D::Scale(x, y));
+        }
         "transform" | "translate" => {
-            // Only translations: rotations and scales are ignored.
+            // Translations, rotations and scales (skews and 3D are ignored).
             let (mut x, mut y) = (Vec::new(), Vec::new());
+            let (mut rotate, mut scale) = (0.0f32, (1.0f32, 1.0f32));
             if name == "translate" {
                 if let Ok(v) = parse_len(p) {
                     x.push(v);
@@ -648,21 +666,57 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 let Token::Function(f) = token else { continue };
                 let f = f.to_ascii_lowercase();
                 p.parse_nested_block(|p| {
-                    let first = parse_len(p);
-                    let second = p.try_parse(|p| {
-                        p.expect_comma()?;
-                        parse_len(p)
-                    });
-                    while p.next().is_ok() {}
                     match f.as_str() {
-                        "translate" | "translate3d" => {
-                            x.extend(first.ok());
-                            y.extend(second.ok());
+                        "rotate" | "rotatez" => rotate += parse_angle(p).unwrap_or(0.0),
+                        "scale" | "scalex" | "scaley" | "scale3d" => {
+                            let a = parse_factor(p).unwrap_or(1.0);
+                            let b = p.try_parse(|p| {
+                                p.expect_comma()?;
+                                parse_factor(p)
+                            });
+                            match f.as_str() {
+                                "scalex" => scale.0 *= a,
+                                "scaley" => scale.1 *= a,
+                                _ => {
+                                    scale.0 *= a;
+                                    scale.1 *= b.unwrap_or(a);
+                                }
+                            }
                         }
-                        "translatex" => x.extend(first.ok()),
-                        "translatey" => y.extend(first.ok()),
-                        _ => {}
+                        "matrix" => {
+                            let mut m = [0.0f32; 6];
+                            for (i, v) in m.iter_mut().enumerate() {
+                                if i > 0 {
+                                    p.expect_comma()?;
+                                }
+                                *v = p.expect_number()?;
+                            }
+                            let [a, b, c, d, e, f] = m;
+                            let sx = (a * a + b * b).sqrt();
+                            rotate += b.atan2(a).to_degrees();
+                            scale.0 *= sx;
+                            scale.1 *= if sx > 0.0 { (a * d - b * c) / sx } else { 0.0 };
+                            x.push(LenSpec::px(e));
+                            y.push(LenSpec::px(f));
+                        }
+                        _ => {
+                            let first = parse_len(p);
+                            let second = p.try_parse(|p| {
+                                p.expect_comma()?;
+                                parse_len(p)
+                            });
+                            match f.as_str() {
+                                "translate" | "translate3d" => {
+                                    x.extend(first.ok());
+                                    y.extend(second.ok());
+                                }
+                                "translatex" => x.extend(first.ok()),
+                                "translatey" => y.extend(first.ok()),
+                                _ => {}
+                            }
+                        }
                     }
+                    while p.next().is_ok() {}
                     Ok(())
                 })?;
             }
@@ -672,6 +726,10 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 _ => LenSpec::Lin(v.iter().filter_map(|l| match l { LenSpec::Lin(l) => Some(*l), _ => None }).fold(Lin::default(), |a, b| a + b)),
             };
             out.push(D::Translate(sum(x), sum(y)));
+            if name == "transform" {
+                out.push(D::Rotate(rotate));
+                out.push(D::Scale(scale.0, scale.1));
+            }
         }
         "opacity" => {
             let v = match p.next()?.clone() {
@@ -1679,6 +1737,30 @@ pub(crate) fn unit_lin(value: f32, unit: &str) -> Option<Lin> {
         _ => return None,
     }
     Some(l)
+}
+
+/// An angle in degrees (`45deg`, `0.5turn`, `1rad`, `100grad`, `0`).
+fn parse_angle<'i>(p: &mut Parser<'i>) -> PResult<'i, f32> {
+    match p.next()?.clone() {
+        Token::Dimension { value, unit, .. } => Ok(match unit.to_ascii_lowercase().as_str() {
+            "deg" => value,
+            "rad" => value.to_degrees(),
+            "turn" => value * 360.0,
+            "grad" => value * 0.9,
+            _ => return err(p),
+        }),
+        Token::Number { value: 0.0, .. } => Ok(0.0),
+        _ => err(p),
+    }
+}
+
+/// A scale factor: `1.5` or `150%`.
+fn parse_factor<'i>(p: &mut Parser<'i>) -> PResult<'i, f32> {
+    match p.next()?.clone() {
+        Token::Number { value, .. } => Ok(value),
+        Token::Percentage { unit_value, .. } => Ok(unit_value),
+        _ => err(p),
+    }
 }
 
 pub(crate) fn parse_len<'i>(p: &mut Parser<'i>) -> PResult<'i, LenSpec> {

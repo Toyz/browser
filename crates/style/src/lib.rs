@@ -86,6 +86,10 @@ pub struct ComputedStyle {
     pub shadows: Option<Arc<[Shadow]>>,
     /// `transform: translate(x, y)`: drawn this far from where it's laid out.
     pub translate: (Offset, Offset),
+    /// `transform: rotate()` / `rotate`: degrees, clockwise, about the center.
+    pub rotate: f32,
+    /// `transform: scale()` / `scale`: (x, y), about the center.
+    pub scale: (f32, f32),
     /// `mask-image` is set: the background is a stencil (usually an icon).
     pub masked: bool,
     /// The mask image's (absolute) URL, if it's one we can fetch.
@@ -170,6 +174,8 @@ impl ComputedStyle {
             overflow: Overflow::Visible,
             opacity: 1.0,
             translate: (Offset { px: 0.0, pct: 0.0 }, Offset { px: 0.0, pct: 0.0 }),
+            rotate: 0.0,
+            scale: (1.0, 1.0),
             shadows: None,
             transitions: None,
             animations: None,

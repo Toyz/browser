@@ -479,9 +479,25 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
 }
 
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
-    let s = &*block.style;
+    // A rotated box rotates the icons inside it (all GPUI can turn).
+    transform::within(block.style.rotate, || render_block_inner(block, cx, margin, in_flow))
+}
+
+fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    // A rotated/scaled box with nothing in it (arrows, notches, spinners)
+    // is drawn as a transformed shape instead of a GPUI box.
+    let shape = transform::box_shape(block, cx);
+    let stripped;
+    let s = match &shape {
+        Some((plain, _)) => {
+            stripped = plain.clone();
+            &stripped
+        }
+        None => &*block.style,
+    };
     let fill = block.kind != BlockKind::Table && fills_with_auto_margins(s, in_flow);
     let base = apply_box(div(), s, margin, cx)
+        .when_some(shape.map(|(_, layers)| layers), |d, layers| d.child(layers))
         .text_color(cx.palette.color(s.color))
         .when(fill, |d| d.w_full())
         .when(s.min_width.is_auto(), |d| d.min_w(px(block.min_content)));
@@ -618,7 +634,9 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     }
 
     let content = match state {
-        Some(ImageState::Ready { image, padded, width, height }) => crate::images::picture(&image, &padded, width, height),
+        Some(ImageState::Ready { image, padded, width, height }) => {
+            transform::image(i, cx).unwrap_or_else(|| crate::images::picture(&image, &padded, width, height))
+        }
         Some(ImageState::Failed) | None if natural_width.is_none() => match &i.alt {
             Some(alt) => div()
                 .text_sm()
@@ -696,7 +714,14 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
         let color = cx.palette.color(s.mask_color()?);
         let path = crate::images::svg_asset_path(&image);
         let (d, size) = layer(s.mask_size, s.mask_position);
-        let icon = sized(div(), size, (w, h)).child(svg().path(path).size_full().text_color(color));
+        let xf = transform::Xf::of_box(s);
+        let icon = sized(div(), size, (w, h)).child(
+            svg()
+                .path(path)
+                .size_full()
+                .text_color(color)
+                .when(!xf.is_identity(), |d| d.with_transformation(xf.gpui())),
+        );
         return Some(d.child(icon).into_any_element());
     }
     let (image, w, h) = lookup(s.background_url.as_deref()?)?;
@@ -980,5 +1005,207 @@ impl Element for ClippedDeferred {
         _window: &mut Window,
         _cx: &mut App,
     ) {
+    }
+}
+
+/// CSS rotations and scales. GPUI can transform only monochrome SVGs, so
+/// that's what transformed things become: mask icons, single-color inline
+/// SVGs, and empty decorated boxes (drawn as SVG shapes). Text and photos
+/// stay as they are.
+pub(crate) mod transform {
+    use std::cell::Cell;
+
+    use gpui_kit::*;
+    use style::{ComputedStyle, Length as CssLength, Side};
+
+    use crate::RenderCx;
+    use crate::boxes::{Block, BlockKind, ImageBox};
+
+    thread_local! {
+        /// Rotation of the boxes being rendered around this one (degrees).
+        static INHERITED: Cell<f32> = const { Cell::new(0.0) };
+    }
+
+    /// Render `f` inside a box rotated by `deg`.
+    pub(crate) fn within<R>(deg: f32, f: impl FnOnce() -> R) -> R {
+        if deg == 0.0 {
+            return f();
+        }
+        let outer = INHERITED.get();
+        INHERITED.set(outer + deg);
+        let out = f();
+        INHERITED.set(outer);
+        out
+    }
+
+    /// Run `f` with the surrounding rotation set to `deg` (for elements that
+    /// draw later than they're built).
+    pub(crate) fn at<R>(deg: f32, f: impl FnOnce() -> R) -> R {
+        let outer = INHERITED.replace(deg);
+        let out = f();
+        INHERITED.set(outer);
+        out
+    }
+
+    pub(crate) fn inherited() -> f32 {
+        INHERITED.get()
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(crate) struct Xf {
+        /// Degrees, clockwise.
+        pub rotate: f32,
+        pub scale: (f32, f32),
+    }
+
+    impl Xf {
+        /// What applies to drawing `s`'s own content: its transform plus
+        /// the rotations of the boxes around it.
+        pub(crate) fn of(s: &ComputedStyle) -> Xf {
+            Xf { rotate: s.rotate + inherited(), scale: s.scale }
+        }
+
+        /// For a box's own layers, drawn inside `within` its rotation
+        /// (which the surrounding rotation already includes).
+        pub(crate) fn of_box(s: &ComputedStyle) -> Xf {
+            Xf { rotate: inherited(), scale: s.scale }
+        }
+
+        pub(crate) fn is_identity(self) -> bool {
+            self.rotate.rem_euclid(360.0) == 0.0 && self.scale == (1.0, 1.0)
+        }
+
+        pub(crate) fn gpui(self) -> Transformation {
+            Transformation::rotate(radians(self.rotate.to_radians())).with_scaling(size(self.scale.0, self.scale.1))
+        }
+    }
+
+    /// A transformed single-color inline SVG, drawn as one (else `None`:
+    /// draw the picture as usual).
+    pub(crate) fn image(i: &ImageBox, cx: &RenderCx) -> Option<AnyElement> {
+        let xf = Xf::of(&i.style);
+        let mono = i.mono.as_ref().filter(|_| !xf.is_identity())?;
+        let color = cx.palette.color(mono.color.unwrap_or(i.style.color));
+        Some(svg().data(&mono.markup).size_full().text_color(color).with_transformation(xf.gpui()).into_any_element())
+    }
+
+    /// An empty box with a background or border and a transform: its style
+    /// without the decoration (so the box keeps its size and place), and the
+    /// decoration as transformed SVG layers covering its border box.
+    pub(crate) fn box_shape(block: &Block, cx: &RenderCx) -> Option<(ComputedStyle, AnyElement)> {
+        let s = &*block.style;
+        if !block.children.is_empty() || !matches!(block.kind, BlockKind::Normal) {
+            return None;
+        }
+        let xf = Xf::of_box(s);
+        if xf.is_identity() || s.masked || s.background_url.is_some() {
+            return None;
+        }
+        let bw = s.border_width;
+        let has_border = Side::ALL.iter().any(|&side| bw.get(side) > 0.0);
+        let fill = s.background.or(s.background_image);
+        if fill.is_none() && !has_border {
+            return None;
+        }
+        // The border box's size (only fixed sizes).
+        let (CssLength::Px(w), CssLength::Px(h)) = (s.width, s.height) else { return None };
+        let (w, h) = if s.border_box { (w, h) } else { (w + s.horizontal_edges(), h + s.vertical_edges()) };
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let radii: [(f32, f32); 4] = std::array::from_fn(|i| match s.border_radius[i] {
+            CssLength::Px(r) => (r, r),
+            CssLength::Percent(p) => (w * p / 100.0, h * p / 100.0),
+            _ => (0.0, 0.0),
+        });
+        let (t, r, b, l) = (bw.top, bw.right, bw.bottom, bw.left);
+        let outer = rounded_rect(0.0, 0.0, w, h, radii);
+        let mut layers: Vec<AnyElement> = Vec::new();
+        let layer = |body: String, color: style::Color| {
+            let markup = format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">{body}</svg>"#);
+            svg()
+                .data(markup.as_bytes())
+                .absolute()
+                .top(px(-t))
+                .left(px(-l))
+                .w(px(w))
+                .h(px(h))
+                .text_color(cx.palette.color(color))
+                .with_transformation(xf.gpui())
+                .into_any_element()
+        };
+        if let Some(fill) = fill {
+            layers.push(layer(format!(r#"<path d="{outer}"/>"#), fill));
+        }
+        if has_border {
+            // The ring between the outer and inner edges; each side's color
+            // owns the wedge from the box's center (how corners are split).
+            let inner_radii: [(f32, f32); 4] = [
+                ((radii[0].0 - l).max(0.0), (radii[0].1 - t).max(0.0)),
+                ((radii[1].0 - r).max(0.0), (radii[1].1 - t).max(0.0)),
+                ((radii[2].0 - r).max(0.0), (radii[2].1 - b).max(0.0)),
+                ((radii[3].0 - l).max(0.0), (radii[3].1 - b).max(0.0)),
+            ];
+            let inner = rounded_rect(l, t, (w - l - r).max(0.0), (h - t - b).max(0.0), inner_radii);
+            let (cx_, cy) = (w / 2.0, h / 2.0);
+            let wedge = |side: Side| match side {
+                Side::Top => format!("M0 0L{w} 0L{cx_} {cy}Z"),
+                Side::Right => format!("M{w} 0L{w} {h}L{cx_} {cy}Z"),
+                Side::Bottom => format!("M{w} {h}L0 {h}L{cx_} {cy}Z"),
+                Side::Left => format!("M0 {h}L0 0L{cx_} {cy}Z"),
+            };
+            let mut colors: Vec<(style::Color, Vec<Side>)> = Vec::new();
+            for side in Side::ALL {
+                if bw.get(side) <= 0.0 {
+                    continue;
+                }
+                let c = s.border_color.get(side);
+                match colors.iter_mut().find(|(k, _)| *k == c) {
+                    Some((_, sides)) => sides.push(side),
+                    None => colors.push((c, vec![side])),
+                }
+            }
+            for (i, (color, sides)) in colors.into_iter().enumerate() {
+                let clip: String = sides.iter().map(|&side| wedge(side)).collect();
+                layers.push(layer(
+                    format!(
+                        r#"<clipPath id="c{i}"><path d="{clip}"/></clipPath><path fill-rule="evenodd" clip-path="url(#c{i})" d="{outer}{inner}"/>"#
+                    ),
+                    color,
+                ));
+            }
+        }
+        let mut plain = s.clone();
+        plain.background = None;
+        plain.background_image = None;
+        for side in Side::ALL {
+            plain.border_color.set(side, style::Color::TRANSPARENT);
+        }
+        Some((plain, div().children(layers).into_any_element()))
+    }
+
+    /// An SVG path for a rectangle with elliptical corner radii (top-left,
+    /// top-right, bottom-right, bottom-left).
+    fn rounded_rect(x: f32, y: f32, w: f32, h: f32, radii: [(f32, f32); 4]) -> String {
+        // Corners that don't fit are scaled down together, like CSS.
+        let f = [w / (radii[0].0 + radii[1].0), w / (radii[3].0 + radii[2].0), h / (radii[0].1 + radii[3].1), h / (radii[1].1 + radii[2].1)]
+            .into_iter()
+            .filter(|f| f.is_finite())
+            .fold(1.0f32, f32::min);
+        let r = radii.map(|(a, b)| (a * f, b * f));
+        let ((a0, b0), (a1, b1), (a2, b2), (a3, b3)) = (r[0], r[1], r[2], r[3]);
+        format!(
+            "M{x0} {y}H{x1}A{a1} {b1} 0 0 1 {xr} {y1}V{y2}A{a2} {b2} 0 0 1 {x2} {yb}H{x3}A{a3} {b3} 0 0 1 {x} {y3}V{y0}A{a0} {b0} 0 0 1 {x0} {y}Z",
+            x0 = x + a0,
+            x1 = x + w - a1,
+            xr = x + w,
+            y1 = y + b1,
+            y2 = y + h - b2,
+            x2 = x + w - a2,
+            yb = y + h,
+            x3 = x + a3,
+            y3 = y + h - b3,
+            y0 = y + b0,
+        )
     }
 }

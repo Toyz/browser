@@ -102,6 +102,8 @@ pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
     s.opacity = mix_f(from.opacity, to.opacity, t);
     let mix_offset = |a: style::Offset, b: style::Offset| style::Offset { px: mix_f(a.px, b.px, t), pct: mix_f(a.pct, b.pct, t) };
     s.translate = (mix_offset(from.translate.0, to.translate.0), mix_offset(from.translate.1, to.translate.1));
+    s.rotate = mix_f(from.rotate, to.rotate, t);
+    s.scale = (mix_f(from.scale.0, to.scale.0, t), mix_f(from.scale.1, to.scale.1, t));
     s.shadows = mix_shadows(from, to, t);
     if t < 0.5 {
         s.underline = from.underline;
@@ -126,7 +128,7 @@ pub fn changed_properties(a: &ComputedStyle, b: &ComputedStyle) -> Vec<&'static 
     if a.opacity != b.opacity {
         out.push("opacity");
     }
-    if a.translate != b.translate {
+    if a.translate != b.translate || a.rotate != b.rotate || a.scale != b.scale {
         out.push("transform");
     }
     if a.shadows != b.shadows {

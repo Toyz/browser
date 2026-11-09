@@ -32,7 +32,7 @@ It is deeply cursed, and it renders Wikipedia.
 - **The browser:** Chrome-style tabs in the title bar with favicons; an omnibox with history suggestions, inline completion and DuckDuckGo search; instant back/forward with scroll position; a new-tab page of your most visited sites; dark mode that follows macOS
 - **HTML:** html5ever parsing into our own arena tree, quirks mode, `<meta http-equiv=refresh>`, `file://` pages and directory listings, `view-source:`
 - **CSS:** `<style>`, `<link>`, `@import`, `@media` (re-evaluated as you resize), `@supports`, `@layer`; selectors via Servo's `selectors` crate (`:is`, `:where`, `:not`, `:has`, `nth-child`...); the full cascade with `!important`, `style=""`, presentational attributes, custom properties and `var()`; `calc()`, `min()`, `max()`, `clamp()`, colors up to `oklch()`
-- **Layout:** flexbox, CSS grid (templates, areas, auto-placement), tables, floats (approximately), `position: relative/absolute/fixed`, `transform: translate()`, `::before`/`::after` (text or boxes), backgrounds, borders, radii, images with `srcset`, mask icons, inline SVG
+- **Layout:** flexbox, CSS grid (templates, areas, auto-placement), tables, floats (approximately), `position: relative/absolute/fixed`, `transform` (translate, and rotate/scale for icons and shapes), `::before`/`::after` (text or boxes), backgrounds, borders, radii, images with `srcset`, mask icons, inline SVG
 - **Interaction:** links, `:hover`, `:active`, `:focus`, `:target`, `:checked`, cursors
 - **Forms:** text fields, textareas, checkboxes, radios, selects, buttons, labels; GET and POST submission
 - **Dark mode:** `prefers-color-scheme`, `color-scheme`, `light-dark()`
@@ -40,7 +40,7 @@ It is deeply cursed, and it renders Wikipedia.
 
 ## What doesn't (yet)
 
-JavaScript. The plan is [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, because of course. Until then, sites that build themselves in JS (Google search, most web apps) stay blank or send their no-JS fallback. Also missing: rotated and scaled transforms, real gradients, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md).
+JavaScript. The plan is [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, because of course. Until then, sites that build themselves in JS (Google search, most web apps) stay blank or send their no-JS fallback. Also missing: real gradients, rotating text and photos, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md).
 
 ## Running it
 

@@ -37,6 +37,16 @@ pub struct ImageBox {
     pub alt: Option<SharedString>,
     pub link: Option<Arc<Url>>,
     pub anchors: Vec<String>,
+    /// An inline SVG drawn in a single color: its markup, so it can also be
+    /// drawn as a (rotatable) GPUI SVG.
+    pub mono: Option<Arc<MonoSvg>>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct MonoSvg {
+    pub markup: Arc<[u8]>,
+    /// `None`: the element's `color` (it was `currentColor`).
+    pub color: Option<Color>,
 }
 
 impl LayoutBox {
@@ -1209,6 +1219,7 @@ impl Builder<'_> {
             alt: alt.map(|a| SharedString::from(a.to_owned())),
             link: link.cloned(),
             anchors: Vec::new(),
+            mono: None,
         };
         if style.display.is_block_level() || style.float != Float::None {
             self.flush(c);
@@ -1237,6 +1248,8 @@ impl Builder<'_> {
             let viewbox = if element.attr("viewBox").is_none() { format!(r#" viewBox="0 0 {w} {h}""#) } else { String::new() };
             markup = format!(r#"<svg width="{w}" height="{h}"{viewbox}{rest}"#);
         }
+        let mono = mono_color(&markup, &color_hex(style.color))
+            .map(|color| Arc::new(MonoSvg { markup: markup.as_bytes().into(), color }));
         let encoded = percent_encoding::utf8_percent_encode(&markup, percent_encoding::NON_ALPHANUMERIC);
         let Ok(src) = Url::parse(&format!("data:image/svg+xml,{encoded}")) else { return };
         let number = |name: &str| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
@@ -1250,6 +1263,7 @@ impl Builder<'_> {
             alt: None,
             link: link.cloned(),
             anchors: Vec::new(),
+            mono,
         };
         if style.display.is_block_level() || style.float != Float::None {
             self.flush(c);
@@ -2019,6 +2033,72 @@ fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: 
         out.push_str(&fragment);
     }
     true
+}
+
+/// If an SVG paints in one color only: `Some(None)` when that's the
+/// current color, `Some(Some(c))` for another (hex or black/white).
+fn mono_color(markup: &str, current: &str) -> Option<Option<Color>> {
+    // Anything beyond plain shapes and colors keeps its full rendering.
+    for tag in ["<image", "<style", "Gradient", "<pattern", "<filter", "<mask", "<text"] {
+        if markup.contains(tag) {
+            return None;
+        }
+    }
+    let mut colors: Vec<String> = Vec::new();
+    let mut implicit_black = true;
+    for key in ["fill", "stroke", "stop-color", "color"] {
+        for sep in ["=\"", ":"] {
+            let needle = format!("{key}{sep}");
+            let mut at = 0;
+            while let Some(i) = markup[at..].find(&needle) {
+                let start = at + i + needle.len();
+                at = start;
+                // Only whole attribute / property names.
+                let before = markup[..at - needle.len()].chars().last();
+                if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-') {
+                    continue;
+                }
+                let value: String =
+                    markup[start..].chars().take_while(|&c| c != '"' && c != ';').collect::<String>().trim().to_ascii_lowercase();
+                if key == "fill" {
+                    implicit_black = false;
+                }
+                if value.is_empty() || value == "none" || value == "transparent" || value == "inherit" {
+                    continue;
+                }
+                if !colors.contains(&value) {
+                    colors.push(value);
+                }
+            }
+        }
+    }
+    if implicit_black && !colors.iter().any(|c| c == "#000000" || c == "black") {
+        colors.push("#000000".into());
+    }
+    match colors.as_slice() {
+        [one] if one.eq_ignore_ascii_case(current) => Some(None),
+        [one] => hex_color(one).map(Some),
+        _ => None,
+    }
+}
+
+fn hex_color(v: &str) -> Option<Color> {
+    let v = match v {
+        "black" => "#000000",
+        "white" => "#ffffff",
+        v => v,
+    };
+    let hex = v.strip_prefix('#')?;
+    let n = u32::from_str_radix(hex, 16).ok()?;
+    match hex.len() {
+        6 => Some(Color::Rgba((n << 8) | 0xff)),
+        3 => {
+            let (r, g, b) = ((n >> 8) & 0xf, (n >> 4) & 0xf, n & 0xf);
+            Some(Color::Rgba(((r * 17) << 24) | ((g * 17) << 16) | ((b * 17) << 8) | 0xff))
+        }
+        8 => Some(Color::Rgba(n)),
+        _ => None,
+    }
 }
 
 fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, out: &mut String) {
