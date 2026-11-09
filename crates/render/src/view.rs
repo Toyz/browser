@@ -260,7 +260,19 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
                     .when(!s.min_width.is_auto(), |d| d.min_w(len(s.outer_width(s.min_width))))
                     .when(!s.max_width.is_auto(), |d| d.max_w(len(s.outer_width(s.max_width))))
                     .when(fills_with_auto_margins(s, true), |d| d.w_full())
-                    .child(inner),
+                    .child(inner)
+                    // Scripts measuring the container get each slice (the
+                    // tab unions the slices it draws).
+                    .when_some(wrapper.node.filter(|&n| (cx.wants_bounds)(n)), |d, node| {
+                        let report = cx.on_bounds.clone();
+                        d.relative().child(
+                            canvas(move |bounds, window, cx| report(node, bounds, window, cx), |_, _, _, _| {})
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                        )
+                    }),
             )
             .into_any_element();
     }

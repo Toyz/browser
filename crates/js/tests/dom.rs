@@ -626,7 +626,13 @@ fn layout_reaches_scripts() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(text, "300x150 | 10,20 300 1024");
+    // Laid out after observe(): reported as the initial size, then again as a
+    // change from the 0x0 the script saw (pages often skip the first callback).
+    std::thread::sleep(Duration::from_millis(100));
+    while let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+        text = text_of(&d, "o");
+    }
+    assert_eq!(text, "300x150,300x150 | 10,20 300 1024");
 }
 
 #[test]

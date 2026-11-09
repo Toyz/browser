@@ -5,6 +5,7 @@
 //! [`Paragraph`] (flat text + styled spans + link ranges) that the view renders
 //! as a single GPUI `StyledText`, which gives us real line wrapping for free.
 
+use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -574,6 +575,12 @@ impl LayoutTree {
 
 /// Build the layout tree for a whole document.
 pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
+    build_keeping(doc, styler, &HashSet::new())
+}
+
+/// The same, keeping a box for each element in `keep` (ones scripts
+/// measure) even where layout could do without one.
+pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) -> LayoutTree {
     let mut builder = Builder {
         doc,
         styler,
@@ -589,7 +596,7 @@ pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
     let canvas = builder.canvas;
     let fixed = std::mem::take(&mut builder.fixed);
-    let mut tree = flatten(root);
+    let mut tree = flatten(root, keep);
     tree.canvas = canvas;
     for b in &fixed {
         collect_images(b, &mut tree.fixed_images);
@@ -624,7 +631,7 @@ pub fn build_plain_text(text: &str) -> LayoutTree {
     if let Some(p) = inline.finish(1, style) {
         block.children.push(LayoutBox::Paragraph(Arc::new(p)));
     }
-    flatten(block)
+    flatten(block, &HashSet::new())
 }
 
 struct Builder<'a> {
@@ -2821,8 +2828,9 @@ fn segment(text: &str, spans: &[Span]) -> Vec<Piece> {
 /// Hoist the children of splittable blocks into a flat list of top-level rows,
 /// collapsing vertical margins along the way (siblings *and* parent/child, which
 /// is roughly what CSS does for margins that touch).
-fn flatten(root: Block) -> LayoutTree {
+fn flatten(root: Block, keep: &HashSet<NodeId>) -> LayoutTree {
     let mut f = Flattener {
+        keep: keep.clone(),
         tree: LayoutTree::default(),
         pending_space: 0.,
         starting: Vec::new(),
@@ -2839,6 +2847,8 @@ fn flatten(root: Block) -> LayoutTree {
 }
 
 struct Flattener {
+    /// Elements that need a box of their own (scripts measure them).
+    keep: HashSet<NodeId>,
     tree: LayoutTree,
     pending_space: f32,
     /// Wrappers started since the last row: (depth, space above them).
@@ -2852,7 +2862,8 @@ impl Flattener {
         self.pending_anchors.append(&mut block.anchors);
         let s = block.style.clone();
         let px = |l: Length| l.px_or_zero();
-        let wrapped = block.needs_wrapper();
+        let kept = block.node.is_some_and(|n| self.keep.contains(&n));
+        let wrapped = block.needs_wrapper() || kept;
         let depth = self.wrappers.len();
         if wrapped {
             // Margins (collapsed with what's pending) go above the box; the
@@ -2885,9 +2896,10 @@ impl Flattener {
         for child in in_flow {
             self.visit(child, inner_left, inner_right);
         }
-        if !absolutes.is_empty() {
+        if !absolutes.is_empty() || kept {
             if first_row == self.tree.rows.len() {
-                // No in-flow content: an empty row to hang them on.
+                // No in-flow content: an empty row to hang them on (or for a
+                // measured box to be drawn at all).
                 let edges = self.edges();
                 self.tree.rows.push(Row {
                     edges,

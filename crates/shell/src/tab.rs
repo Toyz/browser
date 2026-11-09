@@ -114,6 +114,10 @@ pub struct Tab {
     /// page's viewport) and the viewport's size, gathered while painting,
     /// and what the script thread was last told.
     measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
+    /// Bumped every frame: bounds reported twice in one frame (a container
+    /// split across rows) are unioned.
+    bounds_frame: Rc<std::cell::Cell<u64>>,
+    bounds_seen: Rc<std::cell::RefCell<HashMap<NodeId, u64>>>,
     layout_sent: HashMap<NodeId, [f32; 4]>,
     layout_viewport_sent: (f32, f32),
     layout_scheduled: Rc<std::cell::Cell<bool>>,
@@ -221,6 +225,8 @@ impl Tab {
             restyle_busy: false,
             restyle_queued: false,
             measured_bounds: Rc::default(),
+            bounds_frame: Rc::default(),
+            bounds_seen: Rc::default(),
             layout_sent: HashMap::new(),
             layout_viewport_sent: (0.0, 0.0),
             layout_scheduled: Rc::default(),
@@ -1053,10 +1059,14 @@ impl Tab {
             let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
             let signature = styles.signature(&env);
             let Ok(old) = this.update(cx, |this, _| this.page.as_ref().map(|p| p.layout.clone())) else { return };
+            // Elements scripts measure keep a box of their own.
+            let Ok(keep) = this.update(cx, |this, _| {
+                this.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.read().map(|m| m.clone()).unwrap_or_default()).unwrap_or_default()
+            }) else { return };
             let (layout, changed) = loader::deep({
                 let state = state.clone();
                 move || {
-                    let mut layout = render::build(&doc, &styles.styler_with_state(env, state));
+                    let mut layout = render::build_keeping(&doc, &styles.styler_with_state(env, state), &keep);
                     let changed = old.map(|old| layout.reuse_unchanged(&old)).unwrap_or_default();
                     (layout, changed)
                 }
@@ -1135,7 +1145,13 @@ impl Tab {
                 return;
             }
             if job.wait > 0 {
-                cx.background_executor().timer(Duration::from_millis(job.wait)).await;
+                // Keep drawing meanwhile, as a window on screen would: scripts
+                // measuring the page hear about layout only from drawn frames.
+                let until = std::time::Instant::now() + Duration::from_millis(job.wait);
+                while std::time::Instant::now() < until {
+                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
             }
             // Wait (a while) for images, then let the list lay out and measure.
             wait_for_images(cx).await;
@@ -1410,13 +1426,23 @@ impl Tab {
             },
             on_bounds: {
                 let (store, scheduled, tab) = (self.measured_bounds.clone(), self.layout_scheduled.clone(), cx.entity().downgrade());
+                let (frame, seen) = (self.bounds_frame.clone(), self.bounds_seen.clone());
                 Rc::new(move |node, bounds, window, cx| {
-                    let rect = [
+                    let mut rect = [
                         f32::from(bounds.origin.x),
                         f32::from(bounds.origin.y) - crate::CHROME_HEIGHT,
                         f32::from(bounds.size.width),
                         f32::from(bounds.size.height),
                     ];
+                    // Another slice of the same box this frame: the union.
+                    let now = frame.get();
+                    if seen.borrow_mut().insert(node, now) == Some(now)
+                        && let Some(&[x, y, w, h]) = store.borrow().0.get(&node)
+                    {
+                        let (x0, y0) = (x.min(rect[0]), y.min(rect[1]));
+                        let (x1, y1) = ((x + w).max(rect[0] + rect[2]), (y + h).max(rect[1] + rect[3]));
+                        rect = [x0, y0, x1 - x0, y1 - y0];
+                    }
                     let viewport = window.viewport_size();
                     let viewport = (f32::from(viewport.width), f32::from(viewport.height) - crate::CHROME_HEIGHT);
                     let mut store = store.borrow_mut();
@@ -1916,6 +1942,7 @@ impl Tab {
 
 impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.bounds_frame.set(self.bounds_frame.get() + 1);
         self.animation_frame(window);
         self.apply_row_hint(window);
         let theme = cx.theme();

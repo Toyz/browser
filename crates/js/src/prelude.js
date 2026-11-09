@@ -1916,12 +1916,14 @@
   }
   const resizeObservers = new Set();
   class ResizeObserver {
-    constructor(cb) { this._cb = cb; this._targets = new Map(); }
+    constructor(cb) { this._cb = cb; this._targets = new Map(); this._late = new Set(); }
     observe(el) {
       if (!el) return;
       this._targets.set(el, null);
       resizeObservers.add(this);
       if (measure(el)) setTimeout(deliverResizes, 0);
+      // Not laid out yet: scripts saw it as 0x0 so far.
+      else this._late.add(el);
     }
     unobserve(el) { this._targets.delete(el); }
     disconnect() { this._targets.clear(); resizeObservers.delete(this); }
@@ -1939,6 +1941,13 @@
         entries.push({ target: el, contentRect: domRect(0, 0, r[2], r[3]), borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size });
       }
       if (entries.length) { try { ro._cb(entries, ro); } catch (e) { reportError(e); } }
+      // A size that arrived after observe() also counts as a change from the
+      // 0x0 scripts saw (the first callback is often taken as the initial one).
+      let again = false;
+      for (const e of entries) {
+        if (ro._late.delete(e.target)) { ro._targets.set(e.target, null); again = true; }
+      }
+      if (again) setTimeout(deliverResizes, 16);
     }
   }
   function layout(flat, vw, vh) {
