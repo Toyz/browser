@@ -20,7 +20,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use page::NodeId;
 use render::{FontBook, ImageState, ImageStore, LayoutTree, Palette, RenderCx};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use style::ElementState;
 use url::Url;
 
@@ -53,10 +53,9 @@ impl LoadedPage {
     }
 }
 
-/// Fetch a subresource (stylesheet) as text, or `None` on any failure.
+/// Fetch a subresource (stylesheet) as text, or `None` on any failure. Cached.
 fn fetch_text(url: &Url) -> Option<String> {
-    let response = net::fetch(url).ok()?;
-    (200..300).contains(&response.status).then_some(response.body)
+    net::fetch_text_cached(url)
 }
 
 /// Fetch → parse → style → build boxes. Runs on a background thread.
@@ -117,6 +116,11 @@ struct Browser {
     url_bar: Entity<InputState>,
     history: Vec<Url>,
     history_ix: usize,
+    /// Pages we navigated away from, kept so back/forward is instant
+    /// (history index → page and where it was scrolled to).
+    page_cache: HashMap<usize, (LoadedPage, ListOffset)>,
+    /// History index of the page on screen (it stays up while the next loads).
+    page_ix: usize,
     page: Option<LoadedPage>,
     error: Option<String>,
     list_state: ListState,
@@ -124,6 +128,8 @@ struct Browser {
     loading: Option<Task<()>>,
     images: ImageStore,
     images_pending: usize,
+    /// Bumped per finished image (invalidates cached inline layouts).
+    images_generation: u64,
     _image_task: Option<Task<()>>,
     _restyle: Option<Task<()>>,
     /// Elements whose blocks report the pointer inside them.
@@ -163,13 +169,17 @@ impl Browser {
             url_bar,
             history: Vec::new(),
             history_ix: 0,
+            page_cache: HashMap::new(),
+            page_ix: 0,
             page: None,
             error: None,
-            list_state: ListState::new(0, ListAlignment::Top, px(1000.)),
+            // Measure well beyond the viewport so fast scrolling stays smooth.
+            list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
             hovered_link: None,
             loading: None,
             images: ImageStore::default(),
             images_pending: 0,
+            images_generation: 0,
             _image_task: None,
             _restyle: None,
             hover_blocks: HashSet::new(),
@@ -186,6 +196,7 @@ impl Browser {
     fn navigate(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
         if !self.history.is_empty() {
             self.history.truncate(self.history_ix + 1);
+            self.page_cache.retain(|&ix, _| ix <= self.history_ix);
         }
         self.history.push(url.clone());
         self.history_ix = self.history.len() - 1;
@@ -194,16 +205,59 @@ impl Browser {
 
     fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_ix > 0 {
-            self.history_ix -= 1;
-            self.show(self.history[self.history_ix].clone(), false, window, cx);
+            self.go_to_history(self.history_ix - 1, window, cx);
         }
     }
 
     fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.history_ix + 1 < self.history.len() {
-            self.history_ix += 1;
-            self.show(self.history[self.history_ix].clone(), false, window, cx);
+            self.go_to_history(self.history_ix + 1, window, cx);
         }
+    }
+
+    /// Back/forward: restore the page from memory if we still have it.
+    fn go_to_history(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.history[ix].clone();
+        let same_page = self.page.as_ref().is_some_and(|p| same_document(&p.url, &url));
+        if same_page {
+            self.history_ix = ix;
+            self.show(url, false, window, cx);
+            return;
+        }
+        self.history_ix = ix;
+        let Some((page, scroll)) = self.page_cache.remove(&ix) else {
+            self.show(url, false, window, cx);
+            return;
+        };
+        self.stash_page();
+        self.page_ix = ix;
+        self.loading = None;
+        self.error = None;
+        self.set_url_bar(page.url.as_str(), window, cx);
+        window.set_window_title(page.title.as_deref().unwrap_or(page.url.as_str()));
+        self.list_state.reset(page.layout.rows.len());
+        self.list_state.scroll_to(scroll);
+        self.page = Some(page);
+        self.hover_blocks.clear();
+        self.hover_inline = None;
+        self.element_state = Arc::default();
+        self.images.borrow_mut().clear();
+        self.load_images(cx);
+        // The window may have been resized since.
+        self.viewport_changed(window, cx);
+        cx.notify();
+    }
+
+    /// Keep the current page (and scroll position) for back/forward, and
+    /// forget pages too far away in history.
+    fn stash_page(&mut self) {
+        const KEEP: usize = 8;
+        if let Some(page) = self.page.take() {
+            let scroll = self.list_state.logical_scroll_top();
+            self.page_cache.insert(self.page_ix, (page, scroll));
+        }
+        let here = self.history_ix;
+        self.page_cache.retain(|&ix, _| ix.abs_diff(here) <= KEEP);
     }
 
     fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -227,6 +281,7 @@ impl Browser {
             if let Some(page) = &mut self.page {
                 page.url = url.clone();
             }
+            self.page_ix = self.history_ix;
             self.scroll_to_fragment(url.fragment());
             // `:target` moved.
             self.interaction_changed(window, cx);
@@ -258,6 +313,11 @@ impl Browser {
                         window.set_window_title(page.title.as_deref().unwrap_or(page.url.as_str()));
                         this.list_state.reset(page.layout.rows.len());
                         let fragment = page.url.fragment().map(str::to_owned);
+                        // Keep the page we're leaving for back/forward (not on reload).
+                        if this.page_ix != this.history_ix {
+                            this.stash_page();
+                        }
+                        this.page_ix = this.history_ix;
                         this.page = Some(page);
                         this.hover_blocks.clear();
                         this.hover_inline = None;
@@ -347,6 +407,7 @@ impl Browser {
                         .unwrap_or_default();
                     this.images.borrow_mut().insert(url, state);
                     this.images_pending = this.images_pending.saturating_sub(1);
+                    this.images_generation += 1;
                     for row in rows {
                         this.list_state.remeasure_items(row..row + 1);
                     }
@@ -416,10 +477,17 @@ impl Browser {
             let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
             let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
             let signature = styles.signature(&env);
+            let Ok(old) = this.update(cx, |this, _| this.page.as_ref().map(|p| p.layout.clone())) else { return };
             let layout = cx
                 .background_spawn({
                     let state = state.clone();
-                    async move { render::build(&doc, &styles.styler_with_state(env, state)) }
+                    async move {
+                        let mut layout = render::build(&doc, &styles.styler_with_state(env, state));
+                        if let Some(old) = old {
+                            layout.reuse_unchanged(&old);
+                        }
+                        layout
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -429,8 +497,12 @@ impl Browser {
                 page.signature = signature;
                 this.element_state = state;
                 if same_shape {
-                    // Usually just colors/decorations changed: keep everything, re-measure.
-                    this.list_state.remeasure();
+                    // Usually just colors/decorations changed. Re-measure only
+                    // what's on screen: forgetting every row's height makes the
+                    // next scroll jump past rows the list hasn't measured.
+                    let top = this.list_state.logical_scroll_top().item_ix;
+                    let rows = page.layout.rows.len();
+                    this.list_state.remeasure_items(top..(top + 40).min(rows));
                 } else {
                     // Keep roughly the same place in the page.
                     let top = this.list_state.logical_scroll_top();
@@ -498,6 +570,31 @@ impl Browser {
                 .ok();
                 cx.background_executor().timer(Duration::from_millis(500)).await;
             }
+            if let Some(frames) = job.bench {
+                // Scroll in small steps, timing each full frame (layout + paint).
+                let mut times = Vec::with_capacity(frames);
+                let rows = this.update(cx, |this, _| this.page.as_ref().map_or(0, |p| p.layout.rows.len())).unwrap_or(0);
+                for f in 0..frames {
+                    // Step through the whole page (a row at a time, deterministic).
+                    this.update(cx, |this, cx| {
+                        // One row per frame: about what a fast trackpad scroll reveals.
+                        let item_ix = f.min(rows.saturating_sub(1));
+                        this.list_state.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) });
+                        cx.notify();
+                    })
+                    .ok();
+                    let t = std::time::Instant::now();
+                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    times.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let avg = times.iter().sum::<f64>() / times.len() as f64;
+                let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
+                println!(
+                    "bench: {frames} frames, avg {avg:.2}ms, p95 {p95:.2}ms, max {:.2}ms",
+                    times.last().unwrap()
+                );
+            }
             for page in 0..job.pages {
                 let step = if page == 0 { job.scroll } else { page_step };
                 // Scroll in small steps, drawing in between: the list measures rows
@@ -562,6 +659,7 @@ impl Browser {
         RenderCx {
             palette: self.palette.clone(),
             images: self.images.clone(),
+            images_generation: self.images_generation,
             track_hover,
             on_block_hover: Rc::new(move |node, hovered, window, cx| {
                 block_hover
@@ -723,6 +821,7 @@ impl Browser {
 impl Render for Browser {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let accent = theme.primary;
         let palette = &self.palette;
         // The page's own background (from <html>/<body>), else the default canvas.
         let canvas = self
@@ -790,6 +889,22 @@ impl Render for Browser {
                         }),
                     )
                     .child(self.render_content(cx))
+                    .when(self.loading.is_some(), |d| {
+                        // Indeterminate progress: a bar sweeping across the top.
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .h(px(2.))
+                                .w(relative(0.3))
+                                .bg(accent)
+                                .with_animation(
+                                    "loading-bar",
+                                    Animation::new(Duration::from_millis(900)).repeat(),
+                                    |bar, t| bar.left(relative(t * 1.3 - 0.3)),
+                                ),
+                        )
+                    })
                     .children(status),
             )
     }

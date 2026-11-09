@@ -128,7 +128,7 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 **Done when:** it looks and feels like a real browser window, not an app with a URL field.
 
 ### Phase 4 — JS "works-ish"
-- [ ] Embed QuickJS via `rquickjs`; run `<script>` tags in order, `defer`/`async`
+- [ ] Embed **[Boa](https://github.com/boa-dev/boa)** (a JS engine written in pure Rust — so even the JavaScript is Rust); run `<script>` tags in order, `defer`/`async`
 - [ ] `console`, `setTimeout/setInterval`, `requestAnimationFrame`, microtasks, an event loop driven by the GPUI executor
 - [ ] DOM read API: `document`, `getElementById`, `querySelector(All)`, `textContent`, `getAttribute`, `children`, `parentNode`
 - [ ] DOM write API (the framework subset): `createElement`, `createTextNode`, `appendChild`, `insertBefore`, `removeChild`, `setAttribute`, `classList`, `style.*`, `innerHTML` (setter reuses the `html` crate)
@@ -143,13 +143,15 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [ ] Layout queries (`getBoundingClientRect`, `offsetWidth`, `scrollTop`): force a layout pass on demand and read results back from GPUI
 - [ ] `MutationObserver`, `IntersectionObserver` (lazy-loading images use it)
 - [ ] Cookies and login flows
-- [ ] Performance: incremental restyle, virtualized rendering for long pages
+- [x] Performance pass 1 (measured with `--bench`): engine/render crates optimized in dev builds; inline layouts + shaped text cached across frames in element state; shaped lines behind `Rc`; restyles reuse unchanged rows (keeping caches); hover restyles re-measure only visible rows; absolute children no longer block row splitting; in-memory subresource cache; back/forward page cache with scroll restore; loading bar. Wikipedia scroll: 39ms → ~1.3ms/frame.
+- [ ] Performance: incremental restyle (only affected subtrees), splitting single-column grids / flex columns into rows, web fonts off the critical path
 
 ---
 
 ## Dev tools
 
-- `cargo run --example dump -- <url> [rows]` — layout rows + timings. `TREE=1` prints big blocks' structure; `WRAPPERS=1` prints row wrappers.
+- `cargo run --example dump -- <url> [<url>...] [rows]` — layout rows + timings (several URLs share the subresource cache). `TREE=1` prints big blocks' structure; `WRAPPERS=1` row wrappers; `FIND=text` a paragraph's styles.
+- `--bench FRAMES` (screenshot mode) — steps a row per frame, prints avg/p95/max frame time.
 - `cargo run --features screenshot -- <url> --screenshot out.png [--pages N] [--row N] [--scroll PX] [--size WxH]` — renders offscreen via GPUI's `render_to_image` (no screen-recording permission), saves PNGs, quits. Prefer `--row` (from `dump`) over `--scroll`: pixel scrolling skips rows the list hasn't measured. `--resize WxH` resizes after load (tests live restyling). `--mouse X,Y` hovers a point before capturing (tests `:hover`). `BROWSER_DEBUG=1` logs image loads.
 - Sites that rate-limit (HN): mirror locally (`curl` the HTML/CSS/images into a folder, `python3 -m http.server`) and test against `http://127.0.0.1:<port>/`.
 - Reference rendering: `"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --headless=new --window-size=1100,1600 --screenshot=ref.png <url>`. Note Edge runs JS (Wikipedia renders its `client-js` layout); we're `client-nojs`.
@@ -160,5 +162,5 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - **Inline layout limits.** The `StyledText` trick breaks for inline boxes (inline images, `inline-block`, inline padding and borders). Decide later whether to accept this or write a small inline layout pass.
 - **Block flow ≠ flex column.** Margin collapsing and floats don't map onto it. Floats are probably ignored at first (moved to their own line instead).
 - **Layout reads from JS.** GPUI does layout during its frame, but JS wants answers synchronously. Needs investigation in Phase 5.
-- **Security.** Untrusted JS runs in our process. QuickJS has no file system or network access unless we give it some, but cap memory and CPU time per page and never expose host APIs carelessly.
+- **Security.** Untrusted JS runs in our process. Boa has no file system or network access unless we give it some, but cap memory and CPU time per page and never expose host APIs carelessly.
 - **Build vs reuse.** Don't adopt `blitz-dom`: it owns layout and painting, which defeats the point. The only real choice is styling: our own small cascade (lighter, and we control which properties exist) vs. Stylo (complete, but heavy and built around Servo's DOM traits). Start with our own and revisit if CSS coverage becomes the bottleneck.

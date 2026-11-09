@@ -128,6 +128,9 @@ pub type InlineHover = Rc<dyn Fn(usize, Option<page::NodeId>, &mut Window, &mut 
 pub struct RenderCx {
     pub palette: Palette,
     pub images: ImageStore,
+    /// Bumped whenever an image finishes loading (cached inline layouts with
+    /// images in them must be redone: their sizes may have changed).
+    pub images_generation: u64,
     pub on_link_click: LinkClick,
     pub on_link_hover: LinkHover,
     /// Report hover per element (only when the page has `:hover`-style rules).
@@ -203,6 +206,7 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
+        .children(row.absolutes.iter().map(|b| deferred(render_box(b, cx, b.margin(), false)).into_any_element()))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.

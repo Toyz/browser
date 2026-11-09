@@ -112,7 +112,15 @@ struct FlowState {
     /// Inline-block content flows, by object index, with their content width.
     nested: HashMap<u32, (Rc<RefCell<FlowState>>, Pixels)>,
     block_sizes: BlockSizes,
+    /// Shaped text runs from painting, keyed by (wrap width, run start byte).
+    /// Text shaping is the expensive part of a frame; lines don't change
+    /// between frames unless the layout does.
+    shaped: HashMap<(Option<Pixels>, usize), Rc<ShapedLine>>,
 }
+
+/// An inline layout kept across frames (in GPUI element state): valid while
+/// it's for the same paragraph and no image has loaded since.
+type FlowCache = (Arc<Paragraph>, u64, Rc<RefCell<FlowState>>);
 
 /// CSS line-height around a glyph box: half the leading above, half below.
 fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
@@ -202,6 +210,42 @@ impl FlowState {
         let strut = ts.layout_line(" ", px(block.font_size), &[text_run(1, &strut_style, &cx.palette)], None);
         self.strut = extent_for(&strut_style, strut.ascent, strut.descent);
 
+        // Shape each span once; a piece's width is the distance between its
+        // glyph positions. (Shaping word by word was most of a frame's cost.)
+        let mut span_starts = Vec::with_capacity(para.spans.len());
+        let mut offset = 0;
+        for span in &para.spans {
+            span_starts.push(offset);
+            offset += span.len;
+        }
+        let mut shaped_spans: HashMap<u32, (Arc<LineLayout>, Vec<(usize, Pixels)>)> = HashMap::new();
+        let mut span_layout = |span_ix: u32| {
+            shaped_spans
+                .entry(span_ix)
+                .or_insert_with(|| {
+                    let start = span_starts[span_ix as usize];
+                    let span = &para.spans[span_ix as usize];
+                    // Newlines can't be shaped; a space keeps every byte offset.
+                    let text = para.text[start..start + span.len].replace('\n', " ");
+                    let layout = ts.layout_line(&text, px(span.style.font_size), &[text_run(text.len(), &span.style, &cx.palette)], None);
+                    let mut xs: Vec<(usize, Pixels)> = layout
+                        .runs
+                        .iter()
+                        .flat_map(|run| run.glyphs.iter().map(|g| (g.index, g.position.x)))
+                        .collect();
+                    xs.sort_by_key(|&(i, _)| i);
+                    (layout, xs)
+                })
+                .clone()
+        };
+        let x_at = |layout: &LineLayout, xs: &[(usize, Pixels)], index: usize| -> Pixels {
+            match xs.binary_search_by_key(&index, |&(i, _)| i) {
+                Ok(i) => xs[i].1,
+                Err(i) if i < xs.len() => xs[i].1,
+                Err(_) => layout.width,
+            }
+        };
+
         let mut out = Vec::with_capacity(para.pieces.len());
         for piece in &para.pieces {
             let style = &para.spans[piece.span as usize].style;
@@ -227,14 +271,13 @@ impl FlowState {
                     }
                 },
                 kind => {
-                    let text = &para.text[piece.range.clone()];
-                    let size = px(style.font_size);
-                    let layout = if kind == PieceKind::Newline {
-                        ts.layout_line(" ", size, &[text_run(1, style, &cx.palette)], None)
+                    let (layout, xs) = span_layout(piece.span);
+                    let start = span_starts[piece.span as usize];
+                    let width = if kind == PieceKind::Newline {
+                        px(0.)
                     } else {
-                        ts.layout_line(text, size, &[text_run(text.len(), style, &cx.palette)], None)
+                        x_at(&layout, &xs, piece.range.end - start) - x_at(&layout, &xs, piece.range.start - start)
                     };
-                    let width = if kind == PieceKind::Newline { px(0.) } else { layout.width };
                     Measured {
                         width,
                         extent: extent_for(style, layout.ascent, layout.descent),
@@ -676,8 +719,17 @@ fn paint_flow(
             let stop = para.pieces[items[last - 1].0].range.end;
             let text: SharedString = para.text[start..stop].to_owned().into();
             let style = &para.spans[piece.span as usize].style;
-            let run = text_run(text.len(), style, palette);
-            let shaped = ts.shape_line(text, px(style.font_size), &[run], None);
+            let shaped = state
+                .borrow_mut()
+                .shaped
+                .entry((wrap, start))
+                .or_insert_with(|| {
+                    let run = text_run(text.len(), style, palette);
+                    // Behind an Rc: a ShapedLine is big (inline decoration runs),
+                    // and copying it per run per frame showed up in profiles.
+                    Rc::new(ts.shape_line(text, px(style.font_size), &[run], None))
+                })
+                .clone();
             let m = measured[ix];
             let origin = point(dx + x, baseline - px(style.baseline_shift) - m.ascent);
             shaped.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
@@ -731,6 +783,19 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
+        // Reuse last frame's layout for this paragraph if it's still valid.
+        if let Some(id) = id {
+            let para = self.para.clone();
+            let generation = if para.objects.is_empty() { 0 } else { self.cx.images_generation };
+            self.state = window.with_element_state(id, |cache: Option<FlowCache>, _| {
+                let state = match cache {
+                    Some((p, g, state)) if Arc::ptr_eq(&p, &para) && g == generation => state,
+                    _ => Rc::default(),
+                };
+                (state.clone(), (para, generation, state))
+            });
+        }
+
         // Block subtrees, as absolutely positioned children: GPUI lays them out
         // (shrink-to-fit, flex, everything) without affecting our size.
         self.blocks.clear();
@@ -816,6 +881,12 @@ impl Element for InlineFlow {
             }
         }
         if changed {
+            // Re-break lines with the real sizes next frame.
+            let mut state = self.state.borrow_mut();
+            state.measured = None;
+            state.lines = None;
+            state.shaped.clear();
+            drop(state);
             window.request_animation_frame();
         }
         let hover = self.cx.track_hover.then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));

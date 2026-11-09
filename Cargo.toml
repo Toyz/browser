@@ -33,3 +33,7 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.page]
 opt-level = 2
+[profile.dev.package.render]
+opt-level = 2
+[profile.dev.package.net]
+opt-level = 2

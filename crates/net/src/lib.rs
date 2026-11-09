@@ -87,12 +87,68 @@ pub fn fetch(url: &Url) -> Result<Response> {
     })
 }
 
-/// Fetch a subresource as raw bytes (images etc). Supports `data:` URLs.
-/// Fails on non-2xx responses.
+/// In-memory cache for subresources (stylesheets, images): navigating around
+/// one site shouldn't re-download the same CSS and logos every time.
+mod cache {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    const MAX_BYTES: usize = 96 * 1024 * 1024;
+
+    #[derive(Default)]
+    struct Cache {
+        entries: HashMap<String, Arc<Vec<u8>>>,
+        order: VecDeque<String>,
+        bytes: usize,
+    }
+
+    fn cache() -> &'static Mutex<Cache> {
+        static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+        CACHE.get_or_init(Default::default)
+    }
+
+    pub fn get(url: &str) -> Option<Arc<Vec<u8>>> {
+        cache().lock().unwrap().entries.get(url).cloned()
+    }
+
+    pub fn put(url: &str, body: Arc<Vec<u8>>) {
+        let mut c = cache().lock().unwrap();
+        if body.len() > MAX_BYTES / 8 || c.entries.contains_key(url) {
+            return;
+        }
+        c.bytes += body.len();
+        c.entries.insert(url.to_owned(), body);
+        c.order.push_back(url.to_owned());
+        while c.bytes > MAX_BYTES {
+            let Some(oldest) = c.order.pop_front() else { break };
+            if let Some(evicted) = c.entries.remove(&oldest) {
+                c.bytes -= evicted.len();
+            }
+        }
+    }
+}
+
+/// Fetch a subresource as text (stylesheets), through the cache. `None` on failure.
+pub fn fetch_text_cached(url: &Url) -> Option<String> {
+    let bytes = fetch_bytes(url).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Fetch a subresource as raw bytes (images etc), through the cache.
+/// Supports `data:` URLs. Fails on non-2xx responses.
 pub fn fetch_bytes(url: &Url) -> Result<Vec<u8>> {
     if url.scheme() == "data" {
         return decode_data_url(url.as_str());
     }
+    if let Some(hit) = cache::get(url.as_str()) {
+        return Ok((*hit).clone());
+    }
+    let body = fetch_bytes_uncached(url)?;
+    cache::put(url.as_str(), std::sync::Arc::new(body.clone()));
+    Ok(body)
+}
+
+fn fetch_bytes_uncached(url: &Url) -> Result<Vec<u8>> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("unsupported scheme: {}", url.scheme());
     }

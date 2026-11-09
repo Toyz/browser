@@ -41,7 +41,7 @@ It is cursed. It also kind of works.
 
 ## What doesn't (yet)
 
-JavaScript. Forms. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. Dark mode. Tabs (the plan is a Chrome-style tab strip in the window frame). See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt QuickJS onto a DOM that was never meant to exist.
+JavaScript. Forms. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. Dark mode. Tabs (the plan is a Chrome-style tab strip in the window frame). See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt [Boa](https://github.com/boa-dev/boa) (a JavaScript engine written in Rust, because of course) onto a DOM that was never meant to exist.
 
 ## Running it
 

@@ -66,10 +66,20 @@ fn find(b: &LayoutBox, needle: &str) {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(1);
-    let url = net::parse_input(&args.next().expect("usage: dump <url> [max_rows]"))?;
-    let max_rows: usize = args.next().and_then(|n| n.parse().ok()).unwrap_or(25);
+    // `dump <url> [<url>...] [max_rows]`: several URLs load in one process,
+    // which shows the effect of the subresource cache on later pages.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let max_rows: usize = args.last().and_then(|n| n.parse().ok()).unwrap_or(25);
+    let urls: Vec<_> = args.iter().filter(|a| a.parse::<usize>().is_err()).collect();
+    assert!(!urls.is_empty(), "usage: dump <url> [<url>...] [max_rows]");
+    for url in urls {
+        dump(&net::parse_input(url)?, max_rows)?;
+    }
+    Ok(())
+}
 
+fn dump(url: &url::Url, max_rows: usize) -> anyhow::Result<()> {
+    let url = url.clone();
     let t = Instant::now();
     let response = net::fetch(&url)?;
     let fetched = t.elapsed();
@@ -77,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     let doc = html::parse(&response.body, response.url.clone());
     let parsed = t.elapsed();
     let t = Instant::now();
-    let fetch = |u: &url::Url| net::fetch(u).ok().filter(|r| (200..300).contains(&r.status)).map(|r| r.body);
+    let fetch = |u: &url::Url| net::fetch_text_cached(u);
     let styler = style::StyleData::for_document(&doc, &fetch).styler(style::MediaEnv::default());
     let styled = t.elapsed();
     let t = Instant::now();

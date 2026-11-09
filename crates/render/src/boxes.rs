@@ -16,7 +16,7 @@ use style::{
 };
 use url::Url;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LayoutBox {
     Block(Block),
     Paragraph(Arc<Paragraph>),
@@ -24,7 +24,7 @@ pub enum LayoutBox {
 }
 
 /// A replaced `<img>`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImageBox {
     pub id: usize,
     pub style: Arc<ComputedStyle>,
@@ -69,7 +69,7 @@ pub enum BlockKind {
     TableCell,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     /// Unique within the page; used for GPUI element ids (scroll state etc).
     pub id: usize,
@@ -116,8 +116,6 @@ impl Block {
             && s.max_height.is_auto()
             && s.overflow == Overflow::Visible
             && s.opacity >= 1.0
-            // Absolutely positioned children are placed relative to this box.
-            && !self.children.iter().any(|c| matches!(c, LayoutBox::Block(b) if b.style.position == style::Position::Absolute))
     }
 
     /// When split, does it need a wrapper layer around each slice (vs. a plain indent)?
@@ -190,7 +188,7 @@ pub enum PieceKind {
     Object(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Piece {
     pub range: Range<usize>,
     /// Index into [`Paragraph::spans`].
@@ -201,7 +199,7 @@ pub struct Piece {
 }
 
 /// Something atomic sitting in a line of text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum InlineObject {
     Image(ImageBox),
     /// An `inline-block` whose content is itself inline (buttons, badges, nav
@@ -212,7 +210,7 @@ pub enum InlineObject {
     BlockBox(Arc<Block>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AtomicBox {
     pub style: Arc<ComputedStyle>,
     pub content: Option<Arc<Paragraph>>,
@@ -235,7 +233,7 @@ impl InlineObject {
 
 /// An inline element with a visible box (background and/or border), drawn
 /// behind its text: `<code>` chips, `<mark>`, buttons...
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InlineBox {
     pub range: Range<usize>,
     pub background: Option<Color>,
@@ -246,20 +244,20 @@ pub struct InlineBox {
     pub pad_bottom: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     /// Byte length; spans tile the paragraph text in order.
     pub len: usize,
     pub style: InlineStyle,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Link {
     pub range: Range<usize>,
     pub url: Arc<Url>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Paragraph {
     /// Unique within the page; used as the GPUI element id.
     pub id: usize,
@@ -302,7 +300,7 @@ impl Paragraph {
 }
 
 /// A container that's been split across rows; each row re-creates it around its slice.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Wrapper {
     pub indent_left: f32,
     pub indent_right: f32,
@@ -310,7 +308,7 @@ pub struct Wrapper {
 }
 
 /// A top-level, independently laid-out piece of the page.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     /// Containers this row is nested in, outermost first.
     pub wrappers: Arc<[Wrapper]>,
@@ -320,6 +318,9 @@ pub struct Row {
     pub indent_left: f32,
     pub indent_right: f32,
     pub content: LayoutBox,
+    /// Absolutely positioned children of a split container, placed relative
+    /// to this (the container's first) row.
+    pub absolutes: Vec<LayoutBox>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -341,6 +342,17 @@ pub struct LayoutTree {
 }
 
 impl LayoutTree {
+    /// Keep `old`'s rows wherever this tree's are identical. Restyles (hover,
+    /// resize) mostly change little; reusing the old rows keeps their
+    /// paragraphs' `Arc`s, and with them the renderer's cached inline layouts.
+    pub fn reuse_unchanged(&mut self, old: &LayoutTree) {
+        for (new, old) in self.rows.iter_mut().zip(&old.rows) {
+            if new == old {
+                *new = old.clone();
+            }
+        }
+    }
+
     pub fn row_for_anchor(&self, fragment: &str) -> Option<usize> {
         self.anchors
             .iter()
@@ -1650,8 +1662,40 @@ impl Flattener {
                 indent_right + px(s.margin.right) + px(s.padding.right) + s.border_width.right,
             )
         };
-        for child in block.children {
+        // Absolutely positioned children ride along with the first row.
+        let (absolutes, in_flow): (Vec<_>, Vec<_>) = block
+            .children
+            .into_iter()
+            .partition(|c| matches!(c, LayoutBox::Block(b) if b.style.position == style::Position::Absolute));
+        let first_row = self.tree.rows.len();
+        for child in in_flow {
             self.visit(child, inner_left, inner_right);
+        }
+        if !absolutes.is_empty() {
+            if first_row == self.tree.rows.len() {
+                // No in-flow content: an empty row to hang them on.
+                self.tree.rows.push(Row {
+                    wrappers: self.wrappers.clone(),
+                    space_before: 0.0,
+                    indent_left: inner_left,
+                    indent_right: inner_right,
+                    content: LayoutBox::Paragraph(Arc::new(Paragraph {
+                        id: usize::MAX - first_row,
+                        style: s.clone(),
+                        text: SharedString::default(),
+                        spans: Vec::new(),
+                        links: Arc::from([]),
+                        anchors: Vec::new(),
+                        pieces: Vec::new(),
+                        boxes: Vec::new(),
+                        objects: Vec::new(),
+                        min_content: 0.0,
+                        max_content: 0.0,
+                    })),
+                    absolutes: Vec::new(),
+                });
+            }
+            self.tree.rows[first_row].absolutes.extend(absolutes);
         }
         self.wrappers = saved_wrappers;
         self.pending_space = self.pending_space.max(px(s.margin.bottom)) + px(s.padding.bottom);
@@ -1691,6 +1735,7 @@ impl Flattener {
                     indent_left,
                     indent_right,
                     content,
+                    absolutes: Vec::new(),
                 });
                 self.pending_space = margin.bottom.px_or_zero();
             }
@@ -2088,6 +2133,31 @@ mod tests {
         assert!(markup.contains(r##"fill="#ff0000""##), "{markup}");
         assert!(markup.contains("<path"), "{markup}");
         assert_eq!(tree.images.len(), 1);
+    }
+
+    #[test]
+    fn restyles_reuse_unchanged_rows() {
+        let html = "<p>one</p><p class=x>two</p><p>three</p>";
+        let old = layout_css(html, ".x { color: red }");
+        let mut new = layout_css(html, ".x { color: blue }");
+        new.reuse_unchanged(&old);
+        let para = |t: &LayoutTree, i: usize| match &t.rows[i].content {
+            LayoutBox::Paragraph(p) => p.clone(),
+            _ => panic!(),
+        };
+        assert!(Arc::ptr_eq(&para(&new, 0), &para(&old, 0)), "unchanged row reused");
+        assert!(!Arc::ptr_eq(&para(&new, 1), &para(&old, 1)), "changed row is new");
+        assert!(Arc::ptr_eq(&para(&new, 2), &para(&old, 2)));
+    }
+
+    #[test]
+    fn absolute_children_dont_block_splitting() {
+        let tree = layout_css(
+            r#"<div class="body"><span class="tag">i</span><p>one</p><p>two</p></div>"#,
+            ".body { position: relative } .tag { position: absolute; top: 0; right: 0 }",
+        );
+        assert_eq!(texts(&LayoutTree { rows: tree.rows.clone(), ..Default::default() }), vec!["one", "two"]);
+        assert_eq!(tree.rows[0].absolutes.len(), 1, "the absolute box rides on the first row");
     }
 
     #[test]
