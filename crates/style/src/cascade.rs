@@ -31,7 +31,7 @@ table {
 ";
 
 /// Limits so a hostile page can't make us fetch forever.
-const MAX_EXTERNAL_SHEETS: usize = 32;
+const MAX_EXTERNAL_SHEETS: usize = 128;
 const MAX_IMPORT_DEPTH: usize = 3;
 
 /// A stylesheet referenced by the document, in document order.
