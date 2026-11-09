@@ -153,15 +153,17 @@ impl TreeSink for Sink {
     }
 }
 
-/// Parse `html` as the contents of a `<context>` element (`innerHTML`): a
-/// document whose root's first child holds the parsed nodes.
-pub fn parse_fragment(html: &str, context: &str, url: Url) -> Document {
+/// Parse `html` as the contents of a `<context>` element (`innerHTML`; an
+/// SVG element's with `svg`): a document whose root's first child holds the
+/// parsed nodes.
+pub fn parse_fragment(html: &str, context: &str, svg: bool, url: Url) -> Document {
     let mut opts = ParseOpts::default();
     opts.tree_builder.scripting_enabled = true;
     let sink = Sink {
         doc: RefCell::new(Document::new(url)),
     };
-    let name = QualName::new(None, html5ever::ns!(html), html5ever::LocalName::from(context));
+    let ns = if svg { html5ever::ns!(svg) } else { html5ever::ns!(html) };
+    let name = QualName::new(None, ns, html5ever::LocalName::from(context));
     parse_html_fragment(sink, opts, name, Vec::new(), true).one(html)
 }
 

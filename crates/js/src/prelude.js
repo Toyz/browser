@@ -178,6 +178,29 @@
     });
     NativeDate.parse = parse;
   }
+  // Boa prints classes as `function X() { [native code] }`; frameworks tell
+  // classes from factories by the source starting with `class`. Calling a
+  // class without `new` throws before running anything, so that tells.
+  {
+    const toString = Function.prototype.toString;
+    const classes = new WeakMap();
+    const isClass = (f) => {
+      let known = classes.get(f);
+      if (known === undefined) {
+        try { Reflect.apply(f, undefined, []); known = false; } catch (e) { known = e instanceof TypeError && /class constructor/.test(e.message); }
+        classes.set(f, known);
+      }
+      return known;
+    };
+    Object.defineProperty(Function.prototype, "toString", {
+      configurable: true, writable: true,
+      value: function () {
+        const text = toString.call(this);
+        if (typeof this === "function" && this.prototype && text.endsWith("{ [native code] }") && isClass(this)) return "class " + (this.name || "") + " { [native code] }";
+        return text;
+      },
+    });
+  }
   legacy(Object.prototype, "__defineGetter__", function (k, fn) { Object.defineProperty(this, k, { get: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__defineSetter__", function (k, fn) { Object.defineProperty(this, k, { set: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__lookupGetter__", function (k) { const d = Object.getOwnPropertyDescriptor(this, k); return d && d.get; });
@@ -272,6 +295,7 @@
   function parentForEvents(n) {
     if (n === window) return null;
     if (n === document) return window;
+    if (n instanceof ShadowRoot) return n.host;
     return n.parentNode;
   }
   function invoke(node, ev, phase, capture) {
@@ -324,11 +348,12 @@
     } else if (type === 3) proto = Text.prototype;
     else if (type === 8) proto = Comment.prototype;
     else if (type === 9) proto = Document.prototype;
-    else if (type === 11) proto = DocumentFragment.prototype;
+    else if (type === 11) proto = N.shadowHost(id) !== null ? ShadowRoot.prototype : DocumentFragment.prototype;
     else proto = Node.prototype;
     w = Object.create(proto);
     Object.defineProperty(w, "__id", { value: id });
     wrappers.set(id, w);
+    if (type === 1 && registry.size && registry.has(N.tag(id))) upgrade(w);
     return w;
   }
   const ids = (list) => list.map(wrap);
@@ -353,7 +378,7 @@
     get nextSibling() { return sibling(this, 1, false); }
     get previousSibling() { return sibling(this, -1, false); }
     get ownerDocument() { return document; }
-    get isConnected() { for (let n = this; n; n = n.parentNode) if (n === document) return true; return false; }
+    get isConnected() { return N.connected(this.__id); }
     get textContent() { return N.text(this.__id); }
     set textContent(v) { N.setText(this.__id, v === null || v === undefined ? "" : String(v)); }
     get nodeValue() { return this.nodeType === 1 ? null : N.text(this.__id); }
@@ -504,7 +529,7 @@
   class Element extends Node {
     get tagName() { return N.tag(this.__id).toUpperCase(); }
     get localName() { return N.tag(this.__id); }
-    get namespaceURI() { return "http://www.w3.org/1999/xhtml"; }
+    get namespaceURI() { return N.namespace(this.__id); }
     getAttribute(name) { return N.getAttr(this.__id, String(name)); }
     setAttribute(name, value) { N.setAttr(this.__id, String(name), String(value)); }
     removeAttribute(name) { N.removeAttr(this.__id, String(name)); }
@@ -531,7 +556,7 @@
     get innerHTML() { return N.innerHTML(this.__id); }
     set innerHTML(html) {
       for (const c of N.children(this.__id)) N.remove(c);
-      N.insert(this.__id, N.parseHTML(this.localName, String(html)), null);
+      N.insert(this.__id, N.parseHTML(this.localName, String(html), N.namespace(this.__id)), null);
     }
     get outerHTML() { return N.outerHTML(this.__id); }
     set outerHTML(html) {
@@ -556,7 +581,16 @@
     focus() {}
     blur() {}
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
-    attachShadow() { return this; }
+    attachShadow(init) {
+      if (this._shadow) throw new DOMException("Shadow root cannot be created on a host which already hosts a shadow tree.", "NotSupportedError");
+      const root = wrap(N.attachShadow(this.__id));
+      root._mode = (init && init.mode) || "open";
+      this._shadow = root;
+      shadowRoots.add(root);
+      return root;
+    }
+    get shadowRoot() { return this._shadow && this._shadow._mode === "open" ? this._shadow : null; }
+    attachInternals() { return { setFormValue() {}, setValidity() {}, checkValidity() { return true; }, states: new Set(), form: null, labels: [], validity: { valid: true } }; }
     animate() { return { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} }; }
     get clientWidth() { return 0; }
     get clientHeight() { return 0; }
@@ -603,6 +637,22 @@
   }
 
   class HTMLElement extends Element {
+    // `new MyElement()` / `createElement` for a defined tag, or an upgrade
+    // of an element that already exists (then: that element).
+    constructor() {
+      super();
+      if (upgrading) {
+        const el = upgrading;
+        upgrading = null;
+        return el;
+      }
+      const tag = tagOf.get(new.target);
+      if (!tag) throw new TypeError("Illegal constructor");
+      const id = N.createElement(tag);
+      Object.defineProperty(this, "__id", { value: id });
+      wrappers.set(id, this);
+      upgraded.add(this);
+    }
     get style() { return this._style || (this._style = styleFor(this)); }
     set style(v) { this.setAttribute("style", String(v)); }
     get dataset() {
@@ -621,7 +671,7 @@
     get outerText() { return this.textContent; }
   }
   reflect(HTMLElement, [["title", "title"], ["lang", "lang"], ["dir", "dir"], ["hidden", "hidden", "bool"], ["tabIndex", "tabindex", "num"], ["accessKey", "accesskey"], ["contentEditable", "contenteditable"], ["draggable", "draggable", "bool"]]);
-  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mousedown", "mouseup", "scroll", "resize", "abort", "loadstart", "loadend", "progress", "timeout", "readystatechange", "message", "popstate", "hashchange", "visibilitychange"]) {
+  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mousedown", "mouseup", "scroll", "resize", "abort", "loadstart", "loadend", "progress", "timeout", "readystatechange", "message", "open", "close", "popstate", "hashchange", "visibilitychange"]) {
     for (const target of [HTMLElement.prototype, EventTarget.prototype]) {
       Object.defineProperty(target, "on" + ev, {
         configurable: true,
@@ -736,6 +786,209 @@
   }
   mixin(DocumentFragment, ParentMixin);
 
+  // ---- shadow DOM and custom elements -----------------------------------
+
+  const shadowRoots = new Set();
+  class ShadowRoot extends DocumentFragment {
+    get host() { return wrap(N.shadowHost(this.__id)); }
+    get mode() { return this._mode || "open"; }
+    get innerHTML() { return N.innerHTML(this.__id); }
+    set innerHTML(html) {
+      for (const c of N.children(this.__id)) N.remove(c);
+      N.insert(this.__id, N.parseHTML("div", String(html)), null);
+    }
+    get adoptedStyleSheets() { return this._sheets || (this._sheets = []); }
+    set adoptedStyleSheets(v) { this._sheets = Array.from(v); N.touch(); }
+    get activeElement() { return null; }
+    get delegatesFocus() { return false; }
+    get clonable() { return false; }
+    getSelection() { return document.getSelection(); }
+    elementFromPoint() { return null; }
+    elementsFromPoint() { return []; }
+  }
+
+  // Constructed stylesheets (adoptedStyleSheets): just their text.
+  class CSSStyleSheet {
+    constructor() { this._text = ""; this.disabled = false; this.media = []; }
+    replaceSync(text) { this._text = String(text); this._scoped = null; N.touch(); }
+    replace(text) { this.replaceSync(text); return Promise.resolve(this); }
+    get cssRules() { return splitTop(this._text, "}").filter((r) => r.trim()).map((r) => ({ cssText: r.trim() + "}" })); }
+    get rules() { return this.cssRules; }
+    insertRule(rule, index) { this._text = index === 0 ? rule + "\n" + this._text : this._text + "\n" + rule; this._scoped = null; N.touch(); return index || 0; }
+    deleteRule() {}
+  }
+
+  // Shadow styles, scoped to their host: `:host` is the host, everything
+  // else is inside it, `::slotted(x)` is `x` (slots hold their nodes once
+  // the tree is flattened for rendering).
+  function splitTop(text, sep) {
+    const out = [];
+    let depth = 0, start = 0, quote = null;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
+      if (c === '"' || c === "'") quote = c;
+      else if (c === "(" || c === "[") depth++;
+      else if (c === ")" || c === "]") depth--;
+      else if (c === sep && depth === 0) { out.push(text.slice(start, sep === "}" ? i : i)); start = i + 1; }
+    }
+    out.push(text.slice(start));
+    return out;
+  }
+  function parenArg(sel, at) {
+    let depth = 0;
+    for (let i = at; i < sel.length; i++) {
+      if (sel[i] === "(") depth++;
+      else if (sel[i] === ")" && --depth === 0) return [sel.slice(at + 1, i), sel.slice(i + 1)];
+    }
+    return [sel.slice(at + 1), ""];
+  }
+  function scopeSelector(sel, scope) {
+    sel = sel.trim().replace(/::slotted\(([^)]*)\)/g, " $1");
+    if (sel.startsWith(":host-context(")) { const [arg, rest] = parenArg(sel, ":host-context".length); return arg + " " + scope + rest; }
+    if (sel.startsWith(":host(")) { const [arg, rest] = parenArg(sel, ":host".length); return scope + arg + rest; }
+    if (sel.startsWith(":host")) return scope + sel.slice(5);
+    return scope + " " + sel;
+  }
+  function scopeCss(css, scope) {
+    css = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    let out = "", i = 0;
+    while (i < css.length) {
+      let j = i, depth = 0, quote = null;
+      // The prelude: up to `{` (a block) or `;` (an at-statement).
+      for (; j < css.length; j++) {
+        const c = css[j];
+        if (quote) { if (c === quote) quote = null; continue; }
+        if (c === '"' || c === "'") quote = c;
+        else if (c === "(") depth++;
+        else if (c === ")") depth--;
+        else if ((c === "{" || c === ";") && depth === 0) break;
+      }
+      const prelude = css.slice(i, j).trim();
+      if (j >= css.length) break;
+      if (css[j] === ";") { out += prelude + ";"; i = j + 1; continue; }
+      let k = j + 1;
+      for (let d = 1; k < css.length && d > 0; k++) {
+        if (css[k] === "{") d++;
+        else if (css[k] === "}") d--;
+      }
+      const body = css.slice(j + 1, k - 1);
+      if (/^@(media|supports|container|layer|scope|document)/i.test(prelude)) out += prelude + "{" + scopeCss(body, scope) + "}";
+      else if (prelude.startsWith("@")) out += prelude + "{" + body + "}";
+      else if (prelude) out += splitTop(prelude, ",").map((s) => scopeSelector(s, scope)).join(", ") + "{" + body + "}";
+      i = k;
+    }
+    return out;
+  }
+  function scopedSheet(sheet, scope) {
+    const cache = sheet._scoped || (sheet._scoped = new Map());
+    let css = cache.get(scope);
+    if (css === undefined) { css = scopeCss(sheet._text, scope); cache.set(scope, css); }
+    return css;
+  }
+  let documentSheets = [];
+
+  const registry = new Map();
+  const tagOf = new Map();
+  const upgraded = new WeakSet();
+  const definedWaiters = new Map();
+  let upgrading = null;
+  const callback = (el, name, ...args) => {
+    if (typeof el[name] === "function") { try { el[name](...args); } catch (e) { reportError(e); } }
+  };
+  function upgrade(el) {
+    if (upgraded.has(el)) return;
+    const def = registry.get(N.tag(el.__id));
+    if (!def) return;
+    upgraded.add(el);
+    Object.setPrototypeOf(el, def.ctor.prototype);
+    upgrading = el;
+    try { Reflect.construct(def.ctor, []); } catch (e) { reportError(e); } finally { upgrading = null; }
+    for (const name of def.observed) {
+      const v = N.getAttr(el.__id, name);
+      if (v !== null) callback(el, "attributeChangedCallback", name, null, v);
+    }
+    if (N.connected(el.__id)) callback(el, "connectedCallback");
+  }
+  // Custom elements in a subtree that just joined (or left) the document,
+  // through their shadow trees too.
+  function forEachCustom(id, fn) {
+    const all = N.nodeType(id) === 1 ? [id, ...N.query(id, "*", true)] : N.query(id, "*", true);
+    for (const n of all) {
+      if (registry.has(N.tag(n))) fn(n);
+      const w = wrappers.get(n);
+      if (w && w._shadow) for (const c of N.children(w._shadow.__id)) forEachCustom(c, fn);
+    }
+  }
+  function connected(id) {
+    forEachCustom(id, (n) => {
+      const known = wrappers.get(n);
+      if (known && upgraded.has(known)) callback(known, "connectedCallback");
+      else upgrade(wrap(n));
+    });
+  }
+  function disconnected(id) {
+    forEachCustom(id, (n) => { const w = wrappers.get(n); if (w && upgraded.has(w)) callback(w, "disconnectedCallback"); });
+  }
+  {
+    const insert = N.insert, remove = N.remove, setAttr = N.setAttr, removeAttr = N.removeAttr;
+    N.insert = (p, c, b) => {
+      if (!registry.size) return insert(p, c, b);
+      const moving = N.nodeType(c) === 11 && N.shadowHost(c) === null ? N.children(c) : [c];
+      const before = moving.map((m) => N.connected(m));
+      insert(p, c, b);
+      if (!N.connected(p)) return;
+      moving.forEach((m, i) => { if (!before[i]) connected(m); });
+    };
+    N.remove = (id) => {
+      const was = registry.size && N.connected(id);
+      remove(id);
+      if (was) disconnected(id);
+    };
+    const observed = (id, name) => {
+      const w = wrappers.get(id);
+      if (!w || !upgraded.has(w)) return null;
+      const def = registry.get(N.tag(id));
+      return def && def.observed.includes(name) ? w : null;
+    };
+    N.setAttr = (id, name, value) => {
+      const w = registry.size ? observed(id, String(name).toLowerCase()) : null;
+      const old = w ? N.getAttr(id, name) : null;
+      setAttr(id, name, value);
+      if (w) callback(w, "attributeChangedCallback", String(name).toLowerCase(), old, String(value));
+    };
+    N.removeAttr = (id, name) => {
+      const w = registry.size ? observed(id, String(name).toLowerCase()) : null;
+      const old = w ? N.getAttr(id, name) : null;
+      removeAttr(id, name);
+      if (w && old !== null) callback(w, "attributeChangedCallback", String(name).toLowerCase(), old, null);
+    };
+  }
+  const customElements = {
+    define(name, ctor) {
+      const tag = String(name).toLowerCase();
+      if (registry.has(tag)) throw new DOMException("the name \"" + tag + "\" has already been used with this registry", "NotSupportedError");
+      registry.set(tag, { ctor, observed: Array.from(ctor.observedAttributes || [], String) });
+      tagOf.set(ctor, tag);
+      // Upgrade the ones already there, in the document and shadow trees.
+      const found = N.query(N.root(), tag, true);
+      for (const r of shadowRoots) found.push(...N.query(r.__id, tag, true));
+      for (const id of found) upgrade(wrap(id));
+      const waiter = definedWaiters.get(tag);
+      if (waiter) { waiter.resolve(ctor); definedWaiters.delete(tag); }
+    },
+    get(name) { const d = registry.get(String(name).toLowerCase()); return d ? d.ctor : undefined; },
+    getName(ctor) { return tagOf.get(ctor) || null; },
+    whenDefined(name) {
+      const tag = String(name).toLowerCase();
+      if (registry.has(tag)) return Promise.resolve(registry.get(tag).ctor);
+      let w = definedWaiters.get(tag);
+      if (!w) { let resolve; const promise = new Promise((r) => { resolve = r; }); w = { promise, resolve }; definedWaiters.set(tag, w); }
+      return w.promise;
+    },
+    upgrade(root) { if (root && root.__id !== undefined) forEachCustom(root.__id, (n) => upgrade(wrap(n))); },
+  };
+
   let readyState = "loading";
   let currentScript = null;
   const cookies = Object.create(null);
@@ -750,6 +1003,8 @@
       t.textContent = v;
     }
     get readyState() { return readyState; }
+    get adoptedStyleSheets() { return documentSheets; }
+    set adoptedStyleSheets(v) { documentSheets = Array.from(v); N.touch(); }
     get currentScript() { return currentScript; }
     get URL() { return N.url(); }
     get documentURI() { return N.url(); }
@@ -787,8 +1042,16 @@
     }
     getElementById(id) { return this.querySelector("#" + cssEscape(id)); }
     getElementsByName(name) { return this.querySelectorAll("[name=\"" + String(name).replace(/"/g, "\\\"") + "\"]"); }
-    createElement(tag) { return wrap(N.createElement(String(tag))); }
-    createElementNS(_, tag) { return wrap(N.createElement(String(tag))); }
+    createElement(tag) {
+      const def = registry.get(String(tag).toLowerCase());
+      if (def) return new def.ctor();
+      return wrap(N.createElement(String(tag)));
+    }
+    createElementNS(ns, tag) {
+      const local = String(tag).replace(/^[^:]*:/, "");
+      if (ns === "http://www.w3.org/1999/xhtml") return this.createElement(local);
+      return wrap(N.createElement(local, ns));
+    }
     createTextNode(text) { return wrap(N.createText(String(text))); }
     createComment(text) { return wrap(N.createComment(String(text))); }
     createDocumentFragment() { return wrap(N.createFragment()); }
@@ -969,7 +1232,7 @@
   const consoleImpl = {};
   const fmt = (args) => args.map((a) => {
     if (typeof a === "string") return a;
-    if (a instanceof Error) return a.stack || String(a);
+    if (a instanceof Error) return String(a) + (a.stack ? "\n" + a.stack : "");
     if (isNode(a)) return "<" + (a.localName || a.nodeName) + ">";
     try { return JSON.stringify(a); } catch (_) { return String(a); }
   }).join(" ");
@@ -1030,12 +1293,102 @@
     atob: (s) => base64Decode(String(s)), btoa: (s) => base64Encode(String(s)),
     reportError,
     isSecureContext: true,
-    crypto: {
-      getRandomValues(arr) { for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256); return arr; },
-      randomUUID() { return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) => (c ^ Math.floor(Math.random() * 16) >> c / 4).toString(16)); },
-    },
-    customElements: { define() {}, get() { return undefined; }, whenDefined() { return Promise.resolve(); } },
+    customElements, ShadowRoot, CSSStyleSheet,
   });
+
+  // ---- crypto ---------------------------------------------------------
+  // Real randomness and real algorithms (ring), bytes as latin1 strings.
+  const bytesOf = (data) => {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    throw new TypeError("expected an ArrayBuffer or a view of one");
+  };
+  const toLatin1 = (data) => latin1Of(bytesOf(data));
+  const latin1Of = (bytes) => { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; };
+  const bufferOf = (text) => { const b = new Uint8Array(text.length); for (let i = 0; i < text.length; i++) b[i] = text.charCodeAt(i); return b.buffer; };
+  const algName = (a) => (typeof a === "string" ? a : a && a.name || "").toUpperCase();
+  const hashName = (h) => algName(h).replace("-", "") || "SHA256";
+  class CryptoKey {
+    constructor(type, algorithm, extractable, usages, data) { this.type = type; this.algorithm = algorithm; this.extractable = extractable; this.usages = usages; Object.defineProperty(this, "_data", { value: data }); }
+  }
+  const notSupported = (what) => Promise.reject(new DOMException(what + " isn't supported", "NotSupportedError"));
+  const subtle = {
+    digest(alg, data) { try { return Promise.resolve(bufferOf(N.digest(algName(alg), toLatin1(data)))); } catch (e) { return Promise.reject(e); } },
+    generateKey(alg, extractable, usages) {
+      const name = algName(alg);
+      if (name === "ED25519") {
+        const [pkcs8, pub] = N.ed25519Generate();
+        const algorithm = { name: "Ed25519" };
+        return Promise.resolve({
+          privateKey: new CryptoKey("private", algorithm, extractable, usages.filter((u) => u === "sign"), pkcs8),
+          publicKey: new CryptoKey("public", algorithm, true, usages.filter((u) => u === "verify"), pub),
+        });
+      }
+      if (name === "HMAC") {
+        const length = alg.length || ({ SHA1: 512, SHA256: 512, SHA384: 1024, SHA512: 1024 }[hashName(alg.hash)] || 512);
+        return Promise.resolve(new CryptoKey("secret", { name: "HMAC", hash: { name: algName(alg.hash) }, length }, extractable, usages, N.randomBytes(length / 8)));
+      }
+      return notSupported(name);
+    },
+    importKey(format, keyData, alg, extractable, usages) {
+      const name = algName(alg);
+      try {
+        if (format === "jwk") return notSupported("jwk keys");
+        const raw = toLatin1(keyData);
+        if (name === "HMAC") return Promise.resolve(new CryptoKey("secret", { name: "HMAC", hash: { name: algName(alg.hash) }, length: raw.length * 8 }, extractable, usages, raw));
+        if (name === "ED25519") {
+          if (format === "raw" || format === "spki") return Promise.resolve(new CryptoKey("public", { name: "Ed25519" }, true, usages, format === "spki" ? raw.slice(-32) : raw));
+          if (format === "pkcs8") { N.ed25519Public(raw); return Promise.resolve(new CryptoKey("private", { name: "Ed25519" }, extractable, usages, raw)); }
+        }
+      } catch (e) { return Promise.reject(e); }
+      return notSupported(name + " " + format + " keys");
+    },
+    exportKey(format, key) {
+      if (!key.extractable) return Promise.reject(new DOMException("key is not extractable", "InvalidAccessError"));
+      if (key.algorithm.name === "Ed25519" && key.type === "private" && format === "raw") return Promise.resolve(bufferOf(N.ed25519Public(key._data)));
+      if (format === "raw" || format === "pkcs8") return Promise.resolve(bufferOf(key._data));
+      return notSupported(format + " export");
+    },
+    sign(alg, key, data) {
+      try {
+        const name = algName(alg);
+        if (name === "ED25519") return Promise.resolve(bufferOf(N.ed25519Sign(key._data, toLatin1(data))));
+        if (name === "HMAC") return Promise.resolve(bufferOf(N.hmac(hashName(key.algorithm.hash), key._data, toLatin1(data))));
+        return notSupported(name);
+      } catch (e) { return Promise.reject(e); }
+    },
+    verify(alg, key, signature, data) {
+      try {
+        const name = algName(alg);
+        if (name === "ED25519") return Promise.resolve(N.ed25519Verify(key._data, toLatin1(data), toLatin1(signature)));
+        if (name === "HMAC") return Promise.resolve(N.hmac(hashName(key.algorithm.hash), key._data, toLatin1(data)) === toLatin1(signature));
+        return notSupported(name);
+      } catch (e) { return Promise.reject(e); }
+    },
+    encrypt() { return notSupported("encrypt"); },
+    decrypt() { return notSupported("decrypt"); },
+    deriveKey() { return notSupported("deriveKey"); },
+    deriveBits() { return notSupported("deriveBits"); },
+    wrapKey() { return notSupported("wrapKey"); },
+    unwrapKey() { return notSupported("unwrapKey"); },
+  };
+  const cryptoImpl = {
+    subtle,
+    getRandomValues(arr) {
+      const bytes = N.randomBytes(arr.byteLength);
+      const view = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+      for (let i = 0; i < view.length; i++) view[i] = bytes.charCodeAt(i);
+      return arr;
+    },
+    randomUUID() {
+      const b = N.randomBytes(16).split("").map((c) => c.charCodeAt(0));
+      b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+      const h = b.map((x) => x.toString(16).padStart(2, "0")).join("");
+      return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+    },
+  };
+
+  Object.assign(window, { crypto: cryptoImpl, CryptoKey });
 
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   function base64Encode(s) {
@@ -1343,7 +1696,65 @@
   }
   Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
 
+  const sockets = new Map();
+  let nextSocket = 1;
+  const latin1 = (bytes) => { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; };
+  class MessageEvent extends Event {
+    constructor(type, init) { super(type, init); init = init || {}; this.data = init.data; this.origin = init.origin || ""; this.lastEventId = ""; this.source = null; this.ports = []; }
+  }
+  class CloseEvent extends Event {
+    constructor(type, init) { super(type, init); init = init || {}; this.code = init.code || 0; this.reason = init.reason || ""; this.wasClean = !!init.wasClean; }
+  }
+  class WebSocket extends EventTarget {
+    constructor(url, protocols) {
+      super();
+      this._id = nextSocket++;
+      this.readyState = 0;
+      this.protocol = "";
+      this.extensions = "";
+      this.bufferedAmount = 0;
+      this.binaryType = "blob";
+      const list = protocols === undefined ? [] : [].concat(protocols).map(String);
+      this.url = N.wsOpen(this._id, String(url), list);
+      sockets.set(this._id, this);
+    }
+    send(data) {
+      if (this.readyState === 0) throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", "InvalidStateError");
+      if (this.readyState !== 1) return;
+      if (typeof data === "string") N.wsSend(this._id, data, false);
+      else if (data instanceof Blob) N.wsSend(this._id, latin1(new TextEncoder().encode(data._text)), true);
+      else if (data instanceof ArrayBuffer) N.wsSend(this._id, latin1(new Uint8Array(data)), true);
+      else if (ArrayBuffer.isView(data)) N.wsSend(this._id, latin1(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), true);
+      else N.wsSend(this._id, String(data), false);
+    }
+    close(code, reason) {
+      if (this.readyState >= 2) return;
+      this.readyState = 2;
+      N.wsClose(this._id, code === undefined ? 1000 : code, reason === undefined ? "" : String(reason));
+    }
+  }
+  Object.assign(WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+  Object.assign(WebSocket.prototype, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+  function socketEvent(id, kind, data, code, reason, clean) {
+    const ws = sockets.get(id);
+    if (!ws) return;
+    if (kind === "open") { ws.readyState = 1; ws.protocol = data; ws.dispatchEvent(new Event("open")); }
+    else if (kind === "text") ws.dispatchEvent(new MessageEvent("message", { data }));
+    else if (kind === "binary") {
+      const bytes = new Uint8Array(data.length);
+      for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i);
+      const payload = ws.binaryType === "arraybuffer" ? bytes.buffer : new Blob([new TextDecoder().decode(bytes)]);
+      ws.dispatchEvent(new MessageEvent("message", { data: payload }));
+    } else if (kind === "error") ws.dispatchEvent(new Event("error"));
+    else if (kind === "close") {
+      ws.readyState = 3;
+      sockets.delete(id);
+      ws.dispatchEvent(new CloseEvent("close", { code, reason, wasClean: clean }));
+    }
+  }
+
   Object.assign(window, {
+    WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
     fetch, Headers, Request, Response, XMLHttpRequest, FormData, Blob, File, TextEncoder, TextDecoder,
     AbortController, AbortSignal, DOMException,
     __fetchDone(...args) {
@@ -1358,6 +1769,21 @@
 
   Object.assign(window, {
     __setCurrentScript(id) { currentScript = wrap(id); },
+    // [[host id, scoped css], ...] for the tab's flattened DOM.
+    __shadowStyles() {
+      const out = [];
+      for (const root of shadowRoots) {
+        const host = N.shadowHost(root.__id);
+        if (host === null || !N.connected(host)) continue;
+        const scope = '[data-feather-host="' + host + '"]';
+        let css = "";
+        for (const sheet of root.adoptedStyleSheets) if (sheet && !sheet.disabled) css += scopedSheet(sheet, scope) + "\n";
+        for (const c of N.children(root.__id)) if (N.tag(c) === "style") css += scopeCss(N.text(c), scope) + "\n";
+        out.push([host, css]);
+      }
+      if (documentSheets.length) out.push([null, documentSheets.map((s) => s._text).join("\n")]);
+      return out;
+    },
     __setReadyState(s) { readyState = s; document.dispatchEvent(new Event("readystatechange")); },
     __fireDocument(type) { document.dispatchEvent(new Event(type, { bubbles: true })); },
     __fireWindow(type) { window.dispatchEvent(new Event(type)); },

@@ -19,6 +19,54 @@ use url::Url;
 use crate::{FromJs, Options, ToJs, until};
 
 const PRELUDE: &str = include_str!("prelude.js");
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// Boa's host hooks: the real local time zone, and promise rejections
+/// nobody handled (logged after each task when debugging).
+#[derive(Default)]
+struct Hooks {
+    /// (promise, why), until a handler shows up.
+    rejected: RefCell<Vec<(u64, String)>>,
+}
+
+fn promise_key(p: &JsObject<boa_engine::builtins::promise::Promise>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    p.hash(&mut h);
+    h.finish()
+}
+
+impl boa_engine::context::HostHooks for Hooks {
+    fn local_timezone_offset_seconds(&self, unix_time_seconds: i64) -> i32 {
+        use chrono::{Offset, TimeZone};
+        chrono::Local.timestamp_opt(unix_time_seconds, 0).single().map_or(0, |t| t.offset().fix().local_minus_utc())
+    }
+
+    fn promise_rejection_tracker(
+        &self,
+        promise: &JsObject<boa_engine::builtins::promise::Promise>,
+        operation: boa_engine::builtins::promise::OperationType,
+        cx: &mut Context,
+    ) {
+        use boa_engine::builtins::promise::{OperationType, PromiseState};
+        let key = promise_key(promise);
+        match operation {
+            OperationType::Reject => {
+                let state = boa_engine::object::builtins::JsPromise::from_object(promise.clone().upcast()).map(|p| p.state());
+                if let Ok(PromiseState::Rejected(reason)) = state {
+                    let stack = reason.as_object().and_then(|o| o.get(js_string!("stack"), cx).ok()).and_then(|s| s.as_string());
+                    let message = reason.to_string(cx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+                    let why = match stack {
+                        Some(stack) if !stack.is_empty() => format!("{message}\n{}", stack.to_std_string_escaped()),
+                        _ => message,
+                    };
+                    self.rejected.borrow_mut().push((key, why));
+                }
+            }
+            OperationType::Handle => self.rejected.borrow_mut().retain(|(k, _)| *k != key),
+        }
+    }
+}
 
 /// How often (at most) a busy page sends the tab a new DOM.
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(80);
@@ -33,10 +81,19 @@ pub fn node_from_number(n: f64) -> NodeId {
 
 /// A `<script>` we'd run: classic JavaScript (modules aren't supported).
 pub(crate) fn runnable(e: &ElementData) -> bool {
-    match e.attr("type").map(|t| t.trim().to_ascii_lowercase()) {
-        None => true,
-        Some(t) => t.is_empty() || matches!(t.as_str(), "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "application/x-javascript"),
+    // Browsers with modules skip the fallbacks for those without.
+    if e.attr("nomodule").is_some() {
+        return false;
     }
+    is_module(e)
+        || match e.attr("type").map(|t| t.trim().to_ascii_lowercase()) {
+            None => true,
+            Some(t) => t.is_empty() || matches!(t.as_str(), "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "application/x-javascript"),
+        }
+}
+
+pub(crate) fn is_module(e: &ElementData) -> bool {
+    e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
 }
 
 pub(crate) struct Dom {
@@ -55,10 +112,15 @@ pub(crate) struct Dom {
     debug: bool,
     dark: bool,
     started: Instant,
+    /// Shadow roots by host (and back).
+    shadows: HashMap<NodeId, NodeId>,
+    hosts: HashMap<NodeId, NodeId>,
     /// Where finished requests report back.
     fetch_tx: mpsc::Sender<ToJs>,
     /// Requests in flight.
     fetches: usize,
+    /// Open WebSockets: where their outgoing frames go.
+    sockets: HashMap<u32, mpsc::Sender<crate::websocket::Outgoing>>,
 }
 
 type Shared = Rc<RefCell<Dom>>;
@@ -72,6 +134,8 @@ pub(crate) struct Runtime {
     updates: async_channel::Sender<FromJs>,
     listening: Arc<RwLock<HashSet<NodeId>>>,
     opts: Options,
+    modules: Rc<crate::modules::WebModules>,
+    hooks: Rc<Hooks>,
     last_sent: Instant,
     flush_at: Option<Instant>,
 }
@@ -88,6 +152,9 @@ impl Runtime {
         let dom = Rc::new(RefCell::new(Dom {
             fetch_tx,
             fetches: 0,
+            sockets: HashMap::new(),
+            shadows: HashMap::new(),
+            hosts: HashMap::new(),
             doc,
             dirty: false,
             timers: Vec::new(),
@@ -100,7 +167,9 @@ impl Runtime {
             dark: opts.dark,
             started: Instant::now(),
         }));
-        let mut cx = Context::default();
+        let modules = Rc::new(crate::modules::WebModules::new(opts.fetch_text.clone(), dom.borrow().doc.url.clone(), opts.debug));
+        let hooks = Rc::new(Hooks::default());
+        let mut cx = Context::builder().module_loader(modules.clone()).host_hooks(hooks.clone()).build().expect("a JS context");
         // Runaway loops end with an exception instead of a stuck thread.
         cx.runtime_limits_mut().set_loop_iteration_limit(200_000_000);
         cx.runtime_limits_mut().set_recursion_limit(2048);
@@ -108,7 +177,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, updates, listening, opts, last_sent: Instant::now(), flush_at: None };
+        let mut rt = Runtime { cx, dom, rx, updates, listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -158,7 +227,26 @@ impl Runtime {
         }
     }
 
-    /// The script's source: inline text, or fetched.
+    /// Run a module (it may import others, and await).
+    fn exec_module(&mut self, code: &str, url: &Url) {
+        self.call_global("__setCurrentScript", &[JsValue::null()]);
+        let module = match self.modules.parse(code, url, &mut self.cx) {
+            Ok(m) => m,
+            Err(e) => return self.log_error(url.as_str(), e),
+        };
+        let promise = module.load_link_evaluate(&mut self.cx);
+        self.cx.run_jobs().ok();
+        if let boa_engine::builtins::promise::PromiseState::Rejected(e) = promise.state() {
+            let text = e.as_object().and_then(|o| o.get(js_string!("stack"), &mut self.cx).ok()).and_then(|s| s.as_string());
+            let message = e.to_string(&mut self.cx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+            match text {
+                Some(stack) => self.log_error(url.as_str(), format!("{message}\n{}", stack.to_std_string_escaped())),
+                None => self.log_error(url.as_str(), message),
+            }
+        }
+    }
+
+    /// The script's source: inline text, or fetched (and its URL).
     fn script_source(&self, node: NodeId) -> Option<(String, String)> {
         let dom = self.dom.borrow();
         let e = dom.doc.element(node)?;
@@ -180,9 +268,15 @@ impl Runtime {
         if !self.dom.borrow_mut().ran.insert(node) {
             return;
         }
+        let module = self.dom.borrow().doc.element(node).is_some_and(is_module);
         if let Some((code, what)) = self.script_source(node) {
             let t = Instant::now();
-            self.exec(Some(node), &code, &what);
+            if module {
+                let url = Url::parse(&what).unwrap_or_else(|_| self.dom.borrow().doc.url.clone());
+                self.exec_module(&code, &url);
+            } else {
+                self.exec(Some(node), &code, &what);
+            }
             if self.opts.debug {
                 eprintln!("js: ran {what} ({} bytes) in {:?}", code.len(), t.elapsed());
             }
@@ -197,7 +291,10 @@ impl Runtime {
                 .filter_map(|n| {
                     let e = doc.element(n).filter(|e| &**e.local_name() == "script" && runnable(e))?;
                     let external = e.attr("src").is_some();
-                    Some((n, external && e.attr("defer").is_some(), external && e.attr("async").is_some()))
+                    // Modules are deferred unless async.
+                    let module = is_module(e);
+                    let is_async = (external || module) && e.attr("async").is_some();
+                    Some((n, !is_async && (module || (external && e.attr("defer").is_some())), is_async))
                 })
                 .collect()
         };
@@ -267,13 +364,16 @@ impl Runtime {
         !due.is_empty()
     }
 
-    /// The DOM as it is now (for the first paint).
+    /// The DOM as it is now, as the page renders it: shadow trees flattened
+    /// into their hosts (for the first paint and the tab).
     pub fn snapshot_doc(&mut self) -> Document {
         self.refresh_listening();
+        let styles = if self.dom.borrow().shadows.is_empty() { None } else { Some(self.call_global("__shadowStyles", &[])) };
+        let styles = styles.map(|v| shadow_styles(v, &mut self.cx)).unwrap_or_default();
         let mut dom = self.dom.borrow_mut();
         dom.dirty = false;
         self.last_sent = Instant::now();
-        dom.doc.clone()
+        flatten(&dom, styles)
     }
 
     fn refresh_listening(&mut self) {
@@ -339,27 +439,61 @@ impl Runtime {
             };
             match self.rx.recv_timeout(until(deadline)) {
                 Ok(ToJs::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
-                Ok(ToJs::Click { node, reply }) => {
-                    let prevented = self.call_global("__dispatchClick", &[JsValue::from(node_to_number(node))]);
-                    if let Some(reply) = reply {
-                        reply.send(prevented.to_boolean()).ok();
-                    }
-                }
-                Ok(ToJs::FetchDone { id, result }) => self.fetch_done(id, result),
-                Ok(ToJs::Checked { node, checked }) => {
-                    self.call_global("__dispatchChecked", &[JsValue::from(node_to_number(node)), JsValue::from(checked)]);
-                }
-                Ok(ToJs::Submit { form, reply }) => {
-                    let prevented = self.call_global("__dispatchSubmit", &[JsValue::from(node_to_number(form))]);
-                    reply.send(prevented.to_boolean()).ok();
-                }
-                Ok(ToJs::Input { node, value }) => {
-                    self.dom.borrow_mut().values.insert(node, value);
-                    self.call_global("__dispatchInput", &[JsValue::from(node_to_number(node))]);
-                }
+                Ok(msg) => self.handle(msg),
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    /// One message from the tab, the network or a socket.
+    fn handle(&mut self, msg: ToJs) {
+        match msg {
+            ToJs::Shutdown => {}
+            ToJs::Click { node, reply } => {
+                let prevented = self.call_global("__dispatchClick", &[JsValue::from(node_to_number(node))]);
+                if let Some(reply) = reply {
+                    reply.send(prevented.to_boolean()).ok();
+                }
+            }
+            ToJs::FetchDone { id, result } => self.fetch_done(id, result),
+            ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Checked { node, checked } => {
+                self.call_global("__dispatchChecked", &[JsValue::from(node_to_number(node)), JsValue::from(checked)]);
+            }
+            ToJs::Submit { form, reply } => {
+                let prevented = self.call_global("__dispatchSubmit", &[JsValue::from(node_to_number(form))]);
+                reply.send(prevented.to_boolean()).ok();
+            }
+            ToJs::Input { node, value } => {
+                self.dom.borrow_mut().values.insert(node, value);
+                self.call_global("__dispatchInput", &[JsValue::from(node_to_number(node))]);
+            }
+        }
+    }
+
+    /// `__socketEvent(id, kind, data, code, reason, clean)`.
+    fn socket_event(&mut self, id: u32, event: crate::websocket::SocketEvent) {
+        use crate::websocket::SocketEvent as E;
+        let latin1 = |b: &[u8]| -> String { b.iter().map(|&c| c as char).collect() };
+        let (kind, data, code, reason, clean) = match event {
+            E::Open { protocol } => ("open", protocol, 0, String::new(), true),
+            E::Text(t) => ("text", t, 0, String::new(), true),
+            E::Binary(b) => ("binary", latin1(&b), 0, String::new(), true),
+            E::Error(e) => {
+                if self.opts.debug {
+                    eprintln!("js: websocket {id}: {e}");
+                }
+                ("error", e, 0, String::new(), false)
+            }
+            E::Close { code, reason, clean } => {
+                self.dom.borrow_mut().sockets.remove(&id);
+                ("close", String::new(), code, reason, clean)
+            }
+        };
+        self.call_global(
+            "__socketEvent",
+            &[JsValue::from(id), js_str(kind), js_str(&data), JsValue::from(code), js_str(&reason), JsValue::from(clean)],
+        );
     }
 
     /// Hand a finished request to its promise (or XHR).
@@ -385,12 +519,19 @@ impl Runtime {
                 return;
             }
             match self.rx.recv_timeout(until(Some(wait))) {
-                Ok(ToJs::FetchDone { id, result }) => self.fetch_done(id, result),
-                Ok(ToJs::Click { reply: Some(reply), .. }) => {
-                    reply.send(false).ok();
-                }
-                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
+                Ok(ToJs::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
+                Ok(msg) => self.handle(msg),
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Say which promises were rejected with nobody listening.
+    fn report_rejections(&mut self) {
+        let rejected = std::mem::take(&mut *self.hooks.rejected.borrow_mut());
+        if self.opts.debug {
+            for (_, why) in rejected {
+                eprintln!("js: unhandled rejection: {why}");
             }
         }
     }
@@ -406,6 +547,7 @@ impl Runtime {
                 break;
             }
         }
+        self.report_rejections();
     }
 
     /// Do everything that's ready (timers due, inserted scripts, promise
@@ -420,6 +562,7 @@ impl Runtime {
                 break;
             }
         }
+        self.report_rejections();
         self.flush();
     }
 }
@@ -550,11 +693,21 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         drop(dom);
         Ok(JsArray::from_iter(names, cx).into())
     }));
-    add("createElement", 1, Box::new(|d, a, cx| {
-        let tag = arg_string(a, 0, cx)?.to_ascii_lowercase();
-        let mut dom = d.borrow_mut();
-        let id = dom.doc.create_element(page::html_name(&tag), Vec::new());
+    // createElement(tag, namespace?): SVG elements keep their case.
+    add("createElement", 2, Box::new(|d, a, cx| {
+        let tag = arg_string(a, 0, cx)?;
+        let svg = a.get_or_undefined(1).as_string().is_some_and(|ns| ns.to_std_string_escaped() == SVG_NS);
+        let name = if svg {
+            page::markup5ever::QualName::new(None, page::markup5ever::ns!(svg), tag.as_str().into())
+        } else {
+            page::html_name(&tag.to_ascii_lowercase())
+        };
+        let id = d.borrow_mut().doc.create_element(name, Vec::new());
         Ok(JsValue::from(node_to_number(id)))
+    }));
+    add("namespace", 1, Box::new(|d, a, _| {
+        let dom = d.borrow();
+        Ok(arg_node(&dom, a, 0).and_then(|n| dom.doc.element(n)).map_or(JsValue::null(), |e| js_str(&e.name.ns)))
     }));
     add("createText", 1, Box::new(|d, a, cx| {
         let text = arg_string(a, 0, cx)?;
@@ -652,7 +805,8 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let tag = arg_string(a, 0, cx)?;
         let html = arg_string(a, 1, cx)?;
         let mut dom = d.borrow_mut();
-        let parsed = html::parse_fragment(&html, if tag.is_empty() { "div" } else { &tag }, dom.doc.url.clone());
+        let svg = a.get_or_undefined(2).as_string().is_some_and(|ns| ns.to_std_string_escaped() == SVG_NS);
+        let parsed = html::parse_fragment(&html, if tag.is_empty() { "div" } else { &tag }, svg, dom.doc.url.clone());
         let frag = dom.doc.create(NodeData::Fragment);
         // The fragment parser puts the nodes under an <html> element.
         let holder = parsed.children(parsed.root()).first().copied();
@@ -750,6 +904,43 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         });
         Ok(js_str(tz.as_deref().unwrap_or("UTC")))
     }));
+    // attachShadow(host) → the new shadow root (a fragment we know about).
+    add("attachShadow", 1, Box::new(|d, a, _| {
+        let mut dom = d.borrow_mut();
+        let Some(host) = arg_node(&dom, a, 0) else { return Ok(JsValue::null()) };
+        if let Some(&root) = dom.shadows.get(&host) {
+            return Ok(JsValue::from(node_to_number(root)));
+        }
+        let root = dom.doc.create(NodeData::Fragment);
+        dom.shadows.insert(host, root);
+        dom.hosts.insert(root, host);
+        dom.dirty = true;
+        Ok(JsValue::from(node_to_number(root)))
+    }));
+    // In the document (through shadow hosts)?
+    add("connected", 1, Box::new(|d, a, _| {
+        let dom = d.borrow();
+        let Some(mut n) = arg_node(&dom, a, 0) else { return Ok(JsValue::from(false)) };
+        loop {
+            if n == dom.doc.root() {
+                return Ok(JsValue::from(true));
+            }
+            match dom.doc.parent(n).or_else(|| dom.hosts.get(&n).copied()) {
+                Some(p) => n = p,
+                None => return Ok(JsValue::from(false)),
+            }
+        }
+    }));
+    add("shadowHost", 1, Box::new(|d, a, _| {
+        let dom = d.borrow();
+        Ok(id_value(arg_node(&dom, a, 0).and_then(|n| dom.hosts.get(&n).copied())))
+    }));
+    // Something only scripts can see changed how the page looks (a
+    // constructed stylesheet): send a new DOM.
+    add("touch", 0, Box::new(|d, _, _| {
+        d.borrow_mut().dirty = true;
+        Ok(JsValue::undefined())
+    }));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));
     add("now", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().started.elapsed().as_secs_f64() * 1000.0))));
@@ -802,6 +993,118 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             })
             .ok();
         Ok(JsValue::undefined())
+    }));
+    // wsOpen(id, url, [protocols]): connect in the background.
+    add("wsOpen", 3, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let href = arg_string(a, 1, cx)?;
+        let mut protocols = Vec::new();
+        if let Some(list) = a.get_or_undefined(2).as_object().and_then(|o| JsArray::from_object(o).ok()) {
+            for i in 0..list.length(cx)? {
+                protocols.push(list.get(i, cx)?.to_string(cx)?.to_std_string_escaped());
+            }
+        }
+        let mut dom = d.borrow_mut();
+        let url = dom.doc.resolve_url(&href).map(|mut u| {
+            // http(s): URLs mean ws(s):.
+            let scheme = match u.scheme() {
+                "http" => Some("ws"),
+                "https" => Some("wss"),
+                _ => None,
+            };
+            if let Some(s) = scheme {
+                let _ = u.set_scheme(s);
+            }
+            u
+        });
+        let Some(url) = url.filter(|u| matches!(u.scheme(), "ws" | "wss")) else {
+            return Err(boa_engine::JsNativeError::syntax().with_message(format!("The URL '{href}' is invalid.")).into());
+        };
+        let origin = dom.doc.url.origin().ascii_serialization();
+        let tx = crate::websocket::open(id, url.to_string(), protocols, origin, dom.fetch_tx.clone());
+        dom.sockets.insert(id, tx);
+        Ok(js_str(url.as_str()))
+    }));
+    // wsSend(id, data, binary): binary data comes as a latin1 string.
+    add("wsSend", 3, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let data = arg_string(a, 1, cx)?;
+        let binary = a.get_or_undefined(2).to_boolean();
+        let dom = d.borrow();
+        if let Some(tx) = dom.sockets.get(&id) {
+            let msg = if binary {
+                crate::websocket::Outgoing::Binary(data.chars().map(|c| c as u32 as u8).collect())
+            } else {
+                crate::websocket::Outgoing::Text(data)
+            };
+            tx.send(msg).ok();
+        }
+        Ok(JsValue::undefined())
+    }));
+    add("wsClose", 3, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let code = a.get_or_undefined(1).as_number().unwrap_or(1000.0) as u16;
+        let reason = arg_string(a, 2, cx)?;
+        if let Some(tx) = d.borrow().sockets.get(&id) {
+            tx.send(crate::websocket::Outgoing::Close(code, reason)).ok();
+        }
+        Ok(JsValue::undefined())
+    }));
+    // ---- crypto (bytes travel as latin1 strings) ----
+    add("randomBytes", 1, Box::new(|_, a, _| {
+        use ring::rand::SecureRandom;
+        let n = a.get_or_undefined(0).as_number().unwrap_or(0.0).clamp(0.0, 65536.0) as usize;
+        let mut buf = vec![0u8; n];
+        ring::rand::SystemRandom::new().fill(&mut buf).ok();
+        Ok(js_str(&latin1(&buf)))
+    }));
+    add("digest", 2, Box::new(|_, a, cx| {
+        let alg = arg_string(a, 0, cx)?.to_ascii_uppercase().replace('-', "");
+        let data = bytes_arg(a, 1, cx)?;
+        let alg = match alg.as_str() {
+            "SHA1" => &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+            "SHA256" => &ring::digest::SHA256,
+            "SHA384" => &ring::digest::SHA384,
+            "SHA512" => &ring::digest::SHA512,
+            _ => return Err(boa_engine::JsNativeError::typ().with_message(format!("unsupported digest {alg}")).into()),
+        };
+        Ok(js_str(&latin1(ring::digest::digest(alg, &data).as_ref())))
+    }));
+    // hmac(hash, key, data) → signature
+    add("hmac", 3, Box::new(|_, a, cx| {
+        let alg = match arg_string(a, 0, cx)?.to_ascii_uppercase().replace('-', "").as_str() {
+            "SHA1" => ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+            "SHA384" => ring::hmac::HMAC_SHA384,
+            "SHA512" => ring::hmac::HMAC_SHA512,
+            _ => ring::hmac::HMAC_SHA256,
+        };
+        let key = ring::hmac::Key::new(alg, &bytes_arg(a, 1, cx)?);
+        Ok(js_str(&latin1(ring::hmac::sign(&key, &bytes_arg(a, 2, cx)?).as_ref())))
+    }));
+    // ed25519Generate() → [pkcs8, public key]
+    add("ed25519Generate", 0, Box::new(|_, _, cx| {
+        use ring::signature::KeyPair;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| boa_engine::JsNativeError::error().with_message("key generation failed"))?;
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| boa_engine::JsNativeError::error().with_message("bad key"))?;
+        Ok(JsArray::from_iter([js_str(&latin1(pkcs8.as_ref())), js_str(&latin1(pair.public_key().as_ref()))], cx).into())
+    }));
+    // ed25519Public(pkcs8) → public key
+    add("ed25519Public", 1, Box::new(|_, a, cx| {
+        use ring::signature::KeyPair;
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes_arg(a, 0, cx)?)
+            .map_err(|_| boa_engine::JsNativeError::typ().with_message("invalid Ed25519 private key"))?;
+        Ok(js_str(&latin1(pair.public_key().as_ref())))
+    }));
+    add("ed25519Sign", 2, Box::new(|_, a, cx| {
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes_arg(a, 0, cx)?)
+            .map_err(|_| boa_engine::JsNativeError::typ().with_message("invalid Ed25519 private key"))?;
+        Ok(js_str(&latin1(pair.sign(&bytes_arg(a, 1, cx)?).as_ref())))
+    }));
+    // ed25519Verify(public key, data, signature) → bool
+    add("ed25519Verify", 3, Box::new(|_, a, cx| {
+        let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, bytes_arg(a, 0, cx)?);
+        Ok(JsValue::from(key.verify(&bytes_arg(a, 1, cx)?, &bytes_arg(a, 2, cx)?).is_ok()))
     }));
     // The same, blocking (synchronous XMLHttpRequest): the response arguments.
     add("fetchSync", 7, Box::new(|d, a, cx| {
@@ -968,4 +1271,87 @@ fn escape(s: &str, attr: bool, out: &mut String) {
             c => out.push(c),
         }
     }
+}
+
+/// `__shadowStyles()`'s answer: [[host id | null, css], ...] (null: the
+/// document's own adopted sheets).
+fn shadow_styles(v: JsValue, cx: &mut Context) -> Vec<(Option<NodeId>, String)> {
+    let mut out = Vec::new();
+    let Some(arr) = v.as_object().and_then(|o| JsArray::from_object(o).ok()) else { return out };
+    let len = arr.length(cx).unwrap_or(0);
+    for i in 0..len {
+        let Some(pair) = arr.get(i, cx).ok().and_then(|p| p.as_object()) else { continue };
+        let host = pair.get(0, cx).ok().and_then(|h| h.as_number()).map(node_from_number);
+        let css = pair.get(1, cx).ok().and_then(|c| c.as_string()).map(|c| c.to_std_string_escaped()).unwrap_or_default();
+        out.push((host, css));
+    }
+    out
+}
+
+/// A copy of the DOM as it renders: each shadow host's children are its
+/// shadow root's, `<slot>`s hold the light children assigned to them, and
+/// the shadow trees' (scoped) styles are `<style>` elements in their hosts.
+/// Node ids are the real ones, so clicks and hovers land on real nodes.
+fn flatten(dom: &Dom, styles: Vec<(Option<NodeId>, String)>) -> Document {
+    let mut copy = dom.doc.clone();
+    if dom.shadows.is_empty() {
+        return copy;
+    }
+    let src = &dom.doc;
+    let is_tag = |n: NodeId, t: &str| src.element(n).is_some_and(|e| &*e.name.local == t);
+    for (&host, &root) in &dom.shadows {
+        if src.get(host).is_none() {
+            continue;
+        }
+        // Light children by the slot they ask for ("" = the default slot).
+        let mut assigned: HashMap<String, Vec<NodeId>> = HashMap::new();
+        for &c in src.children(host) {
+            let name = src.element(c).and_then(|e| e.attr("slot")).unwrap_or("").to_owned();
+            assigned.entry(name).or_default().push(c);
+        }
+        // Slots in this shadow tree (not in shadow trees nested in it).
+        let mut stack: Vec<NodeId> = src.children(root).to_vec();
+        while let Some(n) = stack.pop() {
+            if is_tag(n, "slot") {
+                let name = src.element(n).and_then(|e| e.attr("name")).unwrap_or("").to_owned();
+                if let Some(nodes) = assigned.remove(&name) {
+                    copy.set_children(n, nodes);
+                }
+                continue;
+            }
+            stack.extend(src.children(n).iter().copied());
+        }
+        // The shadow tree's own <style>s are replaced by scoped copies.
+        let kids: Vec<NodeId> = src.children(root).iter().copied().filter(|&c| !is_tag(c, "style")).collect();
+        copy.set_children(host, kids);
+        if let Some(e) = copy.element_mut(host) {
+            set_attr(e, "data-feather-host", format!("{}", node_to_number(host)));
+        }
+    }
+    // Scoped shadow styles at the top of their hosts; the document's
+    // adopted sheets in <head>.
+    let head = copy.descendants(copy.root()).find(|&n| copy.element(n).is_some_and(|e| &*e.name.local == "head"));
+    for (host, css) in styles {
+        if css.trim().is_empty() {
+            continue;
+        }
+        let style = copy.create_element(page::html_name("style"), Vec::new());
+        let text = copy.create_text(css);
+        copy.append(style, text);
+        if let Some(parent) = host.or(head) {
+            let mut kids = copy.children(parent).to_vec();
+            kids.insert(0, style);
+            copy.set_children(parent, kids);
+        }
+    }
+    copy
+}
+
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// A latin1-string argument as bytes.
+fn bytes_arg(a: &[JsValue], i: usize, cx: &mut Context) -> JsResult<Vec<u8>> {
+    Ok(arg_string(a, i, cx)?.chars().map(|c| c as u32 as u8).collect())
 }

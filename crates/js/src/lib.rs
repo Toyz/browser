@@ -14,6 +14,8 @@
 
 pub mod cors;
 mod dom;
+mod modules;
+pub mod websocket;
 
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -50,6 +52,8 @@ pub enum ToJs {
     Checked { node: NodeId, checked: bool },
     /// A form is being submitted: answers whether a handler cancelled it.
     Submit { form: NodeId, reply: mpsc::Sender<bool> },
+    /// Something happened on one of the page's WebSockets.
+    Socket { id: u32, event: websocket::SocketEvent },
     /// A request a script made finished (from its network thread).
     FetchDone { id: u32, result: Result<cors::ScriptResponse, String> },
     Shutdown,

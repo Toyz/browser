@@ -250,6 +250,21 @@ impl Document {
         copy
     }
 
+    /// Give `parent` exactly these children (each now says `parent` is its
+    /// parent; whatever listed them before still does). For rendering a
+    /// flattened copy of the document (shadow trees, slots), not for
+    /// editing one.
+    pub fn set_children(&mut self, parent: NodeId, children: Vec<NodeId>) {
+        for &c in &children {
+            if let Some(n) = self.nodes.get_mut(c) {
+                n.parent = Some(parent);
+            }
+        }
+        if let Some(p) = self.nodes.get_mut(parent) {
+            p.children = children;
+        }
+    }
+
     /// Mutable access to a node's data (text content, attributes).
     pub fn data_mut(&mut self, id: NodeId) -> Option<&mut NodeData> {
         self.nodes.get_mut(id).map(|n| &mut n.data)
