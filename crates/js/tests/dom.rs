@@ -548,3 +548,18 @@ fn declarative_shadow_roots_render_and_reach_scripts() {
     let rendered = text_of(&doc, "h").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(rendered.starts_with("[data-feather-host=") && rendered.ends_with("p{ color: red } shadow light"), "{rendered}");
 }
+
+#[test]
+fn cssom_rules_render() {
+    let doc = run(r##"<head><style id="s"></style></head><body><p id="o"></p><script>
+        const sheet = document.getElementById("s").sheet;
+        sheet.insertRule(".a { color: red }", 0);
+        sheet.insertRule("@media (min-width: 1px) { .b { color: blue } }", sheet.cssRules.length);
+        sheet.insertRule(".c { color: green }", 1);
+        sheet.deleteRule(1);
+        document.getElementById("o").textContent = sheet.cssRules.length + " " + sheet.cssRules[0].selectorText + " " + document.styleSheets.length;
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "2 .a 1");
+    let css = text_of(&doc, "s");
+    assert!(css.contains(".a { color: red }") && css.contains("@media (min-width: 1px) { .b { color: blue } }") && !css.contains(".c"), "{css}");
+}

@@ -389,10 +389,20 @@ impl Runtime {
         self.refresh_listening();
         let styles = if self.dom.borrow().shadows.is_empty() { None } else { Some(self.call_global("__shadowStyles", &[])) };
         let styles = styles.map(|v| shadow_styles(v, &mut self.cx)).unwrap_or_default();
+        let cssom = self.call_global("__cssomStyles", &[]);
+        let cssom: Vec<(NodeId, String)> = shadow_styles(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
         let mut dom = self.dom.borrow_mut();
         dom.dirty = false;
         self.last_sent = Instant::now();
-        flatten(&dom, styles)
+        let mut doc = flatten(&dom, styles);
+        // <style> elements scripts filled through the CSSOM (CSS-in-JS).
+        for (style, css) in cssom {
+            if doc.get(style).is_some() {
+                let text = doc.create_text(css);
+                doc.set_children(style, vec![text]);
+            }
+        }
+        doc
     }
 
     fn refresh_listening(&mut self) {

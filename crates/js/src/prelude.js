@@ -823,7 +823,15 @@
   class HTMLLinkElement extends HTMLElement {}
   reflect(HTMLLinkElement, [["href", "href", "url"], ["rel", "rel"], ["as", "as"], ["media", "media"], ["type", "type"]]);
   class HTMLStyleElement extends HTMLElement {
-    get sheet() { return { cssRules: [], insertRule() { return 0; }, deleteRule() {} }; }
+    // Its stylesheet: the element's text until scripts edit the rules,
+    // then those (until the text itself changes again).
+    get sheet() {
+      let sheet = this._sheet;
+      if (!sheet) { sheet = this._sheet = new CSSStyleSheet(); sheet.ownerNode = this; }
+      const text = this.textContent;
+      if (!sheet._cssom || sheet._source !== text) { sheet._cssom = false; sheet._text = text; }
+      return sheet;
+    }
   }
 
   // Form fields: `value` lives in the tab's widget (the page tells us as
@@ -931,15 +939,68 @@
   }
 
   // Constructed stylesheets (adoptedStyleSheets): just their text.
-  class CSSStyleSheet {
-    constructor() { this._text = ""; this.disabled = false; this.media = []; }
-    replaceSync(text) { this._text = String(text); this._scoped = null; N.touch(); }
-    replace(text) { this.replaceSync(text); return Promise.resolve(this); }
-    get cssRules() { return splitTop(this._text, "}").filter((r) => r.trim()).map((r) => ({ cssText: r.trim() + "}" })); }
-    get rules() { return this.cssRules; }
-    insertRule(rule, index) { this._text = index === 0 ? rule + "\n" + this._text : this._text + "\n" + rule; this._scoped = null; N.touch(); return index || 0; }
-    deleteRule() {}
+  // Top-level rules of a stylesheet's text (braces nest: @media blocks).
+  function splitRules(text) {
+    const out = [];
+    let depth = 0, start = 0, quote = null;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
+      if (c === "/" && text[i + 1] === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? text.length : end + 1; continue; }
+      if (c === '"' || c === "'") quote = c;
+      else if (c === "{") depth++;
+      else if (c === "}" && depth > 0 && --depth === 0) { out.push(text.slice(start, i + 1).trim()); start = i + 1; }
+      else if (c === ";" && depth === 0) { const r = text.slice(start, i + 1).trim(); if (r.startsWith("@")) out.push(r); start = i + 1; }
+    }
+    return out.filter((r) => r && !r.startsWith("/*"));
   }
+  class CSSRule {
+    constructor(text, sheet) {
+      this.cssText = text;
+      this.parentStyleSheet = sheet;
+      const brace = text.indexOf("{");
+      this.selectorText = brace > 0 ? text.slice(0, brace).trim() : "";
+      this.type = text.startsWith("@media") ? 4 : text.startsWith("@font-face") ? 5 : text.startsWith("@keyframes") ? 7 : text.startsWith("@import") ? 3 : 1;
+      if (this.type === 4) this.conditionText = this.selectorText.slice(6).trim();
+      if (this.type === 1) {
+        const body = brace > 0 ? text.slice(brace + 1, text.lastIndexOf("}")) : "";
+        this.style = { cssText: body.trim(), getPropertyValue: (n) => { const m = new RegExp("(?:^|;)\\s*" + n + "\\s*:\\s*([^;]*)").exec(body); return m ? m[1].trim() : ""; } };
+      }
+    }
+  }
+  // Stylesheets as rule lists: constructed ones (adoptedStyleSheets) and
+  // <style> elements' (CSS-in-JS libraries insertRule into those).
+  class CSSStyleSheet {
+    constructor() { this._rules = []; this.disabled = false; this.media = []; this.ownerNode = null; }
+    get _text() { return this._rules.join("\n"); }
+    set _text(v) { this._rules = splitRules(String(v)); }
+    replaceSync(text) { this._text = String(text); this._changed(); }
+    replace(text) { this.replaceSync(text); return Promise.resolve(this); }
+    get cssRules() { return this._rules.map((r) => new CSSRule(r, this)); }
+    get rules() { return this.cssRules; }
+    get type() { return "text/css"; }
+    insertRule(rule, index) {
+      index = index === undefined ? 0 : Number(index);
+      if (!(index >= 0 && index <= this._rules.length)) throw new DOMException("Index out of range", "IndexSizeError");
+      this._rules.splice(index, 0, String(rule).trim());
+      this._changed();
+      return index;
+    }
+    deleteRule(index) {
+      index = Number(index);
+      if (!(index >= 0 && index < this._rules.length)) throw new DOMException("Index out of range", "IndexSizeError");
+      this._rules.splice(index, 1);
+      this._changed();
+    }
+    addRule(selector, style, index) { this.insertRule(selector + "{" + (style || "") + "}", index === undefined ? this._rules.length : index); return -1; }
+    removeRule(index) { this.deleteRule(index || 0); }
+    _changed() {
+      this._scoped = null;
+      if (this.ownerNode) { this._cssom = true; this._source = this.ownerNode.textContent; cssomStyles.add(this.ownerNode); }
+      N.touch();
+    }
+  }
+  const cssomStyles = new Set();
 
   // Shadow styles, scoped to their host: `:host` is the host, everything
   // else is inside it, `::slotted(x)` is `x` (slots hold their nodes once
@@ -1125,6 +1186,7 @@
       t.textContent = v;
     }
     get readyState() { return readyState; }
+    get styleSheets() { return Array.from(this.querySelectorAll("style")).map((el) => el.sheet); }
     get adoptedStyleSheets() { return documentSheets; }
     set adoptedStyleSheets(v) { documentSheets = Array.from(v); N.touch(); }
     get currentScript() { return currentScript; }
@@ -2163,6 +2225,17 @@
         out.push([host, css]);
       }
       if (documentSheets.length) out.push([null, documentSheets.map((s) => s._text).join("\n")]);
+      return out;
+    },
+    // [[<style> id, css], ...]: <style> elements whose rules scripts
+    // changed through the CSSOM (what they render instead of their text).
+    __cssomStyles() {
+      const out = [];
+      for (const el of cssomStyles) {
+        const sheet = el._sheet;
+        if (!sheet || !sheet._cssom || sheet._source !== el.textContent || !N.connected(el.__id)) continue;
+        out.push([el.__id, sheet._text]);
+      }
       return out;
     },
     __setReadyState(s) { readyState = s; document.dispatchEvent(new Event("readystatechange")); },

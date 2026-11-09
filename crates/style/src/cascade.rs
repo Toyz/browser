@@ -1476,6 +1476,17 @@ fn presentational_hints(e: &page::ElementData) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn is_with_complex_selectors() {
+        let (doc, s) = styled(
+            r##"<div class="toc"><a href="#x">x</a><b aria-current="true">y</b></div><i>z</i>"##,
+            "[aria-current=true]:is(.toc a) { color: red } :is(.toc b)[aria-current=true] { color: blue } :is(.toc i) { color: green }",
+        );
+        assert_ne!(style_of(&doc, &s, "a").color, Color::Rgba(0xff0000ff), "no aria-current");
+        assert_eq!(style_of(&doc, &s, "b").color, Color::Rgba(0x0000ffff));
+        assert_ne!(style_of(&doc, &s, "i").color, Color::Rgba(0x008000ff), "not inside .toc");
+    }
+
     fn styled(html_src: &str, css: &str) -> (Document, Styler) {
         let doc = html::parse(html_src, Url::parse("https://example.com/").unwrap());
         let sheet = parse_stylesheet(css);
