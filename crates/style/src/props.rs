@@ -137,6 +137,10 @@ pub enum Decl {
     FlexShrink(f32),
     FlexBasis(LenSpec),
     GridColumns(GridCols),
+    /// Explicit tracks (`None`: equal columns or none).
+    GridTracks(Option<Arc<[TrackSpec]>>),
+    GridAreas(Option<GridAreas>),
+    GridArea(Option<Arc<str>>),
     GridColumn(Option<GridSpan>),
     Overflow(Overflow),
     Opacity(f32),
@@ -545,7 +549,40 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         "flex" => parse_flex(p, out)?,
 
         // ---- grid ----
-        "grid-template-columns" => out.push(D::GridColumns(parse_grid_columns(p)?)),
+        "grid-template-columns" => parse_template_columns(p, out)?,
+        "grid-template-areas" => out.push(D::GridAreas(parse_areas(p))),
+        "grid-template" => {
+            // `<rows> / <columns>`, or `"a b" "c d" / <columns>`.
+            if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
+                out.push(D::GridColumns(GridCols::None));
+                out.push(D::GridTracks(None));
+                out.push(D::GridAreas(None));
+            } else {
+                let mut areas: Vec<Arc<[Arc<str>]>> = Vec::new();
+                let mut slash = false;
+                while !p.is_exhausted() {
+                    match p.next()?.clone() {
+                        Token::Delim('/') => {
+                            slash = true;
+                            break;
+                        }
+                        Token::QuotedString(row) => areas.push(area_row(&row)),
+                        _ => {}
+                    }
+                }
+                if slash {
+                    parse_template_columns(p, out)?;
+                }
+                if !areas.is_empty() {
+                    out.push(D::GridAreas(Some(areas.into())));
+                }
+            }
+        }
+        "grid-area" => {
+            let name = p.try_parse(|p| p.expect_ident_cloned()).ok().filter(|n| !n.eq_ignore_ascii_case("auto"));
+            while p.next().is_ok() {}
+            out.push(D::GridArea(name.map(|n| Arc::from(&*n))));
+        }
         "grid-column" | "grid-column-end" => {
             let mut span = None;
             let mut values = Vec::new();
@@ -723,6 +760,98 @@ fn parse_flex<'i>(p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     };
     out.extend([Decl::FlexGrow(grow), Decl::FlexShrink(shrink), Decl::FlexBasis(basis)]);
     Ok(())
+}
+
+/// `grid-template-columns`: the column count (for equal columns) and, if
+/// the tracks differ, the tracks themselves.
+fn parse_template_columns<'i>(p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    let start = p.state();
+    let tracks = parse_tracks(p).ok().flatten();
+    p.reset(&start);
+    out.push(Decl::GridColumns(parse_grid_columns(p)?));
+    let uniform = tracks.as_ref().is_some_and(|t| t.windows(2).all(|w| w[0] == w[1]));
+    out.push(Decl::GridTracks(if uniform { None } else { tracks.map(Into::into) }));
+    Ok(())
+}
+
+/// Explicit tracks; `None` for anything we can't list (`auto-fill`).
+fn parse_tracks<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Vec<TrackSpec>>> {
+    fn track<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<TrackSpec>> {
+        Ok(Some(match p.next()?.clone() {
+            Token::SquareBracketBlock => return Ok(None),
+            Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("fr") => TrackSpec::Fr(value),
+            Token::Dimension { value, unit, .. } => match unit_lin(value, &unit) {
+                Some(l) => TrackSpec::Len(LenSpec::Lin(l)),
+                None => TrackSpec::Auto,
+            },
+            Token::Number { value, .. } if value == 0.0 => TrackSpec::Len(LenSpec::px(0.0)),
+            Token::Function(f) if f.eq_ignore_ascii_case("minmax") => p.parse_nested_block(|p| {
+                while !p.is_exhausted() && !matches!(p.next()?, Token::Comma) {}
+                Ok(match p.next()?.clone() {
+                    Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("fr") => TrackSpec::Fr(value),
+                    Token::Dimension { value, unit, .. } => match unit_lin(value, &unit) {
+                        Some(l) => TrackSpec::Max(LenSpec::Lin(l)),
+                        None => TrackSpec::Auto,
+                    },
+                    _ => TrackSpec::Auto,
+                })
+            })?,
+            Token::Function(_) => {
+                p.parse_nested_block(|p| {
+                    while p.next().is_ok() {}
+                    Ok(())
+                })?;
+                TrackSpec::Auto
+            }
+            _ => TrackSpec::Auto,
+        }))
+    }
+    let mut out = Vec::new();
+    while !p.is_exhausted() {
+        let state = p.state();
+        if let Ok(Token::Function(f)) = p.next().cloned()
+            && f.eq_ignore_ascii_case("repeat")
+        {
+            let repeated = p.parse_nested_block(|p| {
+                let n = match p.next()?.clone() {
+                    Token::Number { int_value: Some(n), .. } => n.clamp(1, 64) as usize,
+                    _ => return Ok(None), // auto-fill / auto-fit
+                };
+                p.expect_comma()?;
+                let mut inner = Vec::new();
+                while !p.is_exhausted() {
+                    if let Some(t) = track(p)? {
+                        inner.push(t);
+                    }
+                }
+                Ok(Some((n, inner)))
+            })?;
+            let Some((n, inner)) = repeated else { return Ok(None) };
+            for _ in 0..n {
+                out.extend(inner.iter().cloned());
+            }
+            continue;
+        }
+        p.reset(&state);
+        if let Some(t) = track(p)? {
+            out.push(t);
+        }
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+fn area_row(row: &str) -> Arc<[Arc<str>]> {
+    row.split_whitespace().map(Arc::from).collect::<Vec<_>>().into()
+}
+
+fn parse_areas(p: &mut Parser) -> Option<GridAreas> {
+    let mut rows = Vec::new();
+    while let Ok(token) = p.next() {
+        if let Token::QuotedString(row) = token {
+            rows.push(area_row(row));
+        }
+    }
+    (!rows.is_empty()).then(|| rows.into())
 }
 
 fn parse_grid_columns<'i>(p: &mut Parser<'i>) -> PResult<'i, GridCols> {
@@ -1610,12 +1739,35 @@ mod tests {
 
     #[test]
     fn grid_columns() {
-        assert_eq!(parse("grid-template-columns", "1fr 2fr [end] 100px"), vec![Decl::GridColumns(GridCols::Count(3))]);
-        assert_eq!(parse("grid-template-columns", "repeat(4, minmax(0, 1fr))"), vec![Decl::GridColumns(GridCols::Count(4))]);
+        assert_eq!(
+            parse("grid-template-columns", "1fr 2fr [end] 100px"),
+            vec![
+                Decl::GridColumns(GridCols::Count(3)),
+                Decl::GridTracks(Some(vec![TrackSpec::Fr(1.0), TrackSpec::Fr(2.0), TrackSpec::Len(LenSpec::px(100.0))].into())),
+            ]
+        );
+        // Equal columns don't need tracks.
+        assert_eq!(
+            parse("grid-template-columns", "repeat(4, minmax(0, 1fr))"),
+            vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridTracks(None)]
+        );
         assert_eq!(
             parse("grid-template-columns", "repeat(auto-fill, minmax(200px, 1fr))"),
-            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0)))]
+            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0))), Decl::GridTracks(None)]
         );
+    }
+
+    #[test]
+    fn grid_templates() {
+        let d = parse("grid-template", "min-content 1fr / 12.25rem minmax(0,1fr)");
+        assert!(d.contains(&Decl::GridTracks(Some(
+            vec![TrackSpec::Len(LenSpec::Lin(Lin { rem: 12.25, ..Default::default() })), TrackSpec::Fr(1.0)].into()
+        ))));
+        let areas = parse("grid-template-areas", "'a a' 'b c'");
+        let Decl::GridAreas(Some(rows)) = &areas[0] else { panic!("{areas:?}") };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(&*rows[1][1], "c");
+        assert_eq!(parse("grid-area", "pageContent"), vec![Decl::GridArea(Some("pageContent".into()))]);
     }
 
     #[test]

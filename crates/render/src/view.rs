@@ -341,7 +341,7 @@ pub fn render_fixed(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
     render_box(b, cx, b.margin(), false)
 }
 
-fn is_out_of_flow(b: &LayoutBox) -> bool {
+pub(crate) fn is_out_of_flow(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed))
 }
 

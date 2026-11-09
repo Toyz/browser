@@ -1,5 +1,6 @@
 //! Value types: specified (as parsed, possibly relative) and computed.
 
+use std::sync::Arc;
 /// A computed length, as the renderer sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
@@ -384,6 +385,31 @@ pub enum Overflow {
     Hidden,
     Scroll,
 }
+
+/// One column of an explicit `grid-template-columns`, resolved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Track {
+    /// A fixed width, px.
+    Px(f32),
+    /// A share of the free space.
+    Fr(f32),
+    /// `minmax(<min>, <length>)`: flexible, but no wider than this, px.
+    Max(f32),
+    /// `auto`, `min-content`, percentages...: sized by its content.
+    Auto,
+}
+
+/// A track as specified (lengths may still be em/rem-relative).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackSpec {
+    Len(LenSpec),
+    Fr(f32),
+    Max(LenSpec),
+    Auto,
+}
+
+/// `grid-template-areas`: rows of area names (`.` is an empty cell).
+pub type GridAreas = Arc<[Arc<[Arc<str>]>]>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridSpan {

@@ -65,6 +65,11 @@ pub struct ComputedStyle {
     pub flex_basis: Length,
     pub grid_columns: Option<u16>,
     pub grid_column: Option<GridSpan>,
+    /// Explicit column tracks, when they aren't all equal (`12rem 1fr`).
+    pub grid_tracks: Option<Arc<[Track]>>,
+    pub grid_areas: Option<GridAreas>,
+    /// `grid-area: <name>` on a grid item.
+    pub grid_area: Option<Arc<str>>,
     pub overflow: Overflow,
     pub opacity: f32,
     /// `mask-image` is set: the background is a stencil (usually an icon).
@@ -141,6 +146,9 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             grid_columns: None,
             grid_column: None,
+            grid_tracks: None,
+            grid_areas: None,
+            grid_area: None,
             overflow: Overflow::Visible,
             opacity: 1.0,
             masked: false,

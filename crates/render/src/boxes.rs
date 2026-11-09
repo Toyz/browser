@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use gpui_kit::SharedString;
 use page::{Document, NodeData, NodeId};
-use style::{Align, FlexDirection, Justify, 
+use style::{Align, FlexDirection, GridSpan, Justify, Track, 
     Color, ComputedStyle, ContentItem, Float, Pseudo, Display, Edges, FontFamily, Length, LineHeight, ListStyle, Overflow,
     Styler, TextTransform, WhiteSpace,
 };
@@ -703,6 +703,261 @@ impl Builder<'_> {
         out
     }
 
+    /// A grid with a real template (`12rem minmax(0, 1fr)`, named areas):
+    /// GPUI's grids only do equal columns, so place the items on the
+    /// template ourselves and rebuild it from blocks and flex rows, one band
+    /// per run of grid rows that items span together.
+    ///
+    /// A band where one item in a flexible column holds most of the page
+    /// (Wikipedia's article next to its contents sidebar) stays a plain
+    /// block that the flattener can split into rows, so long pages still
+    /// virtualize; the other columns hang beside it as absolutely positioned
+    /// boxes. Any other band becomes a flex row of track-sized cells.
+    fn template_grid(&mut self, style: &ComputedStyle, children: Vec<LayoutBox>) -> Vec<LayoutBox> {
+        let areas = style.grid_areas.clone();
+        let mut tracks: Vec<Track> = style.grid_tracks.as_deref().map(<[Track]>::to_vec).unwrap_or_default();
+        let area_cols = areas.as_ref().map_or(0, |a| a.iter().map(|r| r.len()).max().unwrap_or(0));
+        while tracks.len() < area_cols.max(1) {
+            tracks.push(Track::Fr(1.0));
+        }
+        let ncols = tracks.len();
+        let gap = style.column_gap.px_or_zero();
+        let row_gap = style.row_gap.px_or_zero();
+
+        // Where each named area is: (row, rows, col, cols).
+        let rect = |name: &str| -> Option<(usize, usize, usize, usize)> {
+            let areas = areas.as_ref()?;
+            let (mut r0, mut r1, mut c0, mut c1) = (usize::MAX, 0, usize::MAX, 0);
+            for (r, row) in areas.iter().enumerate() {
+                for (c, cell) in row.iter().enumerate() {
+                    if &**cell == name {
+                        (r0, r1, c0, c1) = (r0.min(r), r1.max(r + 1), c0.min(c), c1.max(c + 1));
+                    }
+                }
+            }
+            (r0 != usize::MAX).then(|| (r0, r1 - r0, c0, c1 - c0))
+        };
+
+        // Place items: named areas first, the rest row by row in free cells.
+        struct Placed {
+            item: LayoutBox,
+            row: usize,
+            rows: usize,
+            col: usize,
+            cols: usize,
+        }
+        let mut placed: Vec<Placed> = Vec::new();
+        let mut absolutes = Vec::new();
+        let mut auto = Vec::new();
+        for child in children {
+            if crate::view::is_out_of_flow(&child) {
+                absolutes.push(child);
+                continue;
+            }
+            let named = match &child {
+                LayoutBox::Block(b) => b.style.grid_area.as_deref().and_then(rect),
+                _ => None,
+            };
+            match named {
+                Some((row, rows, col, cols)) => placed.push(Placed { item: child, row, rows, col, cols }),
+                None => auto.push(child),
+            }
+        }
+        let mut taken: std::collections::HashSet<(usize, usize)> = placed
+            .iter()
+            .flat_map(|p| (p.row..p.row + p.rows).flat_map(move |r| (p.col..p.col + p.cols).map(move |c| (r, c))))
+            .collect();
+        let (mut r, mut c) = (0, 0);
+        for child in auto {
+            let span = match &child {
+                LayoutBox::Block(b) => match b.style.grid_column {
+                    Some(GridSpan::Span(n)) => (n as usize).min(ncols),
+                    Some(GridSpan::Full) => ncols,
+                    None => 1,
+                },
+                _ => 1,
+            };
+            loop {
+                if c + span > ncols {
+                    (r, c) = (r + 1, 0);
+                }
+                if (c..c + span).all(|cc| !taken.contains(&(r, cc))) {
+                    break;
+                }
+                c += 1;
+            }
+            for cc in c..c + span {
+                taken.insert((r, cc));
+            }
+            placed.push(Placed { item: child, row: r, rows: 1, col: c, cols: span });
+            c += span;
+        }
+        placed.sort_by_key(|p| (p.row, p.col));
+
+        // Bands: runs of rows that spanning items tie together.
+        let mut bands: Vec<Vec<Placed>> = Vec::new();
+        let mut band_end = 0;
+        for p in placed {
+            if bands.is_empty() || p.row >= band_end {
+                bands.push(Vec::new());
+                band_end = p.row + p.rows;
+            }
+            band_end = band_end.max(p.row + p.rows);
+            bands.last_mut().expect("just pushed").push(p);
+        }
+
+        let width_of = |col: usize, cols: usize| -> f32 {
+            tracks[col..col + cols].iter().map(|t| match t { Track::Px(v) => *v, _ => 0.0 }).sum::<f32>()
+                + gap * cols.saturating_sub(1) as f32
+        };
+        let flexible = |col: usize, cols: usize| tracks[col..col + cols].iter().any(|t| matches!(t, Track::Fr(_) | Track::Max(_)));
+        let size = |b: &LayoutBox| -> usize {
+            fn count(b: &LayoutBox) -> usize {
+                match b {
+                    LayoutBox::Block(b) => 1 + b.children.iter().map(count).sum::<usize>(),
+                    _ => 1,
+                }
+            }
+            count(b)
+        };
+
+        let mut out = Vec::new();
+        for (bi, band) in bands.into_iter().enumerate() {
+            // Columns of this band: items grouped by the columns they cover.
+            let mut groups: Vec<((usize, usize), Vec<LayoutBox>)> = Vec::new();
+            for p in band {
+                match groups.iter_mut().find(|(k, _)| *k == (p.col, p.cols)) {
+                    Some((_, items)) => items.push(p.item),
+                    None => groups.push(((p.col, p.cols), vec![p.item])),
+                }
+            }
+            groups.sort_by_key(|((c, _), _)| *c);
+            let mut band_style = ComputedStyle::anonymous(style);
+            band_style.display = style::Display::Block;
+            if bi > 0 {
+                band_style.margin.top = Length::Px(row_gap);
+            }
+
+            // One group across everything: its items just stack.
+            if groups.len() == 1 && groups[0].0 == (0, ncols) {
+                let items = groups.pop().expect("one group").1;
+                out.push(LayoutBox::Block(self.synthetic_block(band_style, BlockKind::Normal, items)));
+                continue;
+            }
+
+            // Sidebar layout: one big item in a flexible column, the rest in
+            // fixed or content-sized ones.
+            let main = groups
+                .iter()
+                .enumerate()
+                .filter(|(_, ((c, n), _))| flexible(*c, *n))
+                .max_by_key(|(_, (_, items))| items.iter().map(size).sum::<usize>())
+                .map(|(i, _)| i);
+            let main_size = main.map_or(0, |i| groups[i].1.iter().map(size).sum::<usize>());
+            let others_fixed = groups
+                .iter()
+                .enumerate()
+                .all(|(i, ((c, n), _))| Some(i) == main || !flexible(*c, *n));
+            if let Some(main) = main
+                && main_size > 80
+                && others_fixed
+            {
+                let ((mc, mn), _) = groups[main];
+                let side_width = |c: usize, n: usize, items: &[LayoutBox]| -> f32 {
+                    if tracks[c..c + n].iter().all(|t| matches!(t, Track::Px(_))) {
+                        width_of(c, n)
+                    } else {
+                        // Content-sized: estimate from the content.
+                        items.iter().map(|b| match b {
+                            LayoutBox::Block(b) => b.max_content,
+                            LayoutBox::Paragraph(p) => p.max_content,
+                            LayoutBox::Image(_) => 0.0,
+                        }).fold(0.0, f32::max).min(320.0)
+                    }
+                };
+                let mut left = 0.0;
+                let mut right = 0.0;
+                let mut sides = Vec::new();
+                let mut main_items = Vec::new();
+                for (i, ((c, n), items)) in groups.into_iter().enumerate() {
+                    if i == main {
+                        main_items = items;
+                        continue;
+                    }
+                    let w = side_width(c, n, &items);
+                    if w <= 0.0 {
+                        continue;
+                    }
+                    let on_left = c < mc;
+                    let mut st = ComputedStyle::anonymous(style);
+                    st.display = style::Display::Block;
+                    st.position = style::Position::Absolute;
+                    st.width = Length::Px(w);
+                    st.inset.top = Length::Px(0.0);
+                    if on_left {
+                        st.inset.left = Length::Px(left);
+                        left += w + gap;
+                    } else {
+                        st.inset.right = Length::Px(right);
+                        right += w + gap;
+                    }
+                    sides.push(LayoutBox::Block(self.synthetic_block(st, BlockKind::Normal, items)));
+                }
+                band_style.padding.left = Length::Px(left);
+                band_style.padding.right = Length::Px(right);
+                if let [Track::Max(max)] = tracks[mc..mc + mn] {
+                    band_style.max_width = Length::Px(max + left + right);
+                }
+                main_items.extend(sides);
+                out.push(LayoutBox::Block(self.synthetic_block(band_style, BlockKind::Normal, main_items)));
+                continue;
+            }
+
+            // A flex row of cells sized like their tracks (empty fixed tracks
+            // still take their room, so columns line up across bands).
+            let mut cells = Vec::new();
+            let mut col = 0;
+            let push_cell = |this: &mut Self, c: usize, n: usize, items: Vec<LayoutBox>, cells: &mut Vec<LayoutBox>| {
+                let mut st = ComputedStyle::anonymous(style);
+                st.display = style::Display::Block;
+                let grow: f32 = tracks[c..c + n].iter().map(|t| match t { Track::Fr(f) => *f, Track::Max(_) => 1.0, _ => 0.0 }).sum();
+                if grow > 0.0 {
+                    st.flex_grow = grow;
+                    st.flex_basis = Length::Px(width_of(c, n));
+                    st.min_width = Length::Px(0.0);
+                    if let [Track::Max(max)] = tracks[c..c + n] {
+                        st.max_width = Length::Px(max);
+                    }
+                } else if tracks[c..c + n].iter().all(|t| matches!(t, Track::Px(_))) {
+                    st.width = Length::Px(width_of(c, n));
+                    st.flex_shrink = 0.0;
+                } else {
+                    st.flex_shrink = 0.0;
+                }
+                let mut cell = this.synthetic_block(st, BlockKind::Normal, items);
+                if grow > 0.0 {
+                    cell.min_content = 0.0;
+                }
+                cells.push(LayoutBox::Block(cell));
+            };
+            for ((c, n), items) in groups {
+                if c > col && (col..c).any(|cc| matches!(tracks[cc], Track::Px(_))) {
+                    push_cell(self, col, c - col, Vec::new(), &mut cells);
+                }
+                push_cell(self, c, n, items, &mut cells);
+                col = c + n;
+            }
+            let mut row = band_style;
+            row.display = style::Display::Flex;
+            row.flex_direction = style::FlexDirection::Row;
+            row.column_gap = Length::Px(gap);
+            row.align_items = style.align_items.or(Some(style::Align::Stretch));
+            out.push(LayoutBox::Block(self.synthetic_block(row, BlockKind::Flex, cells)));
+        }
+        out.extend(absolutes);
+        out
+    }
+
     fn synthetic_block(&mut self, style: ComputedStyle, kind: BlockKind, children: Vec<LayoutBox>) -> Block {
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         Block {
@@ -829,6 +1084,14 @@ impl Builder<'_> {
                 }
             }
         }
+        // Grids with explicit tracks or named areas (sidebar layouts) become
+        // plain blocks of bands; see `template_grid`.
+        let kind = if kind == BlockKind::Grid && (style.grid_areas.is_some() || style.grid_tracks.is_some()) {
+            children = self.template_grid(&style, children);
+            BlockKind::Normal
+        } else {
+            kind
+        };
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         let element = self.doc.element(id);
         let tag_is_heading =
@@ -1878,6 +2141,36 @@ impl Flattener {
                     absolutes: Vec::new(),
                 });
             }
+            // Their insets are from this block's padding box; the row draws
+            // them from its own edge (or, inside a wrapper, its padding).
+            let (mut dl, mut dr) = if wrapped {
+                (-px(s.padding.left), -px(s.padding.right))
+            } else {
+                (indent_left + px(s.margin.left) + s.border_width.left, indent_right + px(s.margin.right) + s.border_width.right)
+            };
+            // ...and that row may sit inside wrappers of its own, which move
+            // its edge in.
+            let row = &self.tree.rows[first_row];
+            for w in row.wrappers.iter().skip(self.wrappers.len()) {
+                let ws = &w.style;
+                dl -= w.indent_left + px(ws.margin.left) + ws.border_width.left + px(ws.padding.left);
+                dr -= w.indent_right + px(ws.margin.right) + ws.border_width.right + px(ws.padding.right);
+            }
+            let absolutes = absolutes.into_iter().map(|mut b| {
+                if let LayoutBox::Block(block) = &mut b {
+                    let inset = block.style.inset;
+                    if matches!(inset.left, Length::Px(_)) || matches!(inset.right, Length::Px(_)) {
+                        let st = Arc::make_mut(&mut block.style);
+                        if let Length::Px(v) = st.inset.left {
+                            st.inset.left = Length::Px(v + dl);
+                        }
+                        if let Length::Px(v) = st.inset.right {
+                            st.inset.right = Length::Px(v + dr);
+                        }
+                    }
+                }
+                b
+            });
             self.tree.rows[first_row].absolutes.extend(absolutes);
         }
         self.wrappers = saved_wrappers;

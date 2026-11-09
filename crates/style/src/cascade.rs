@@ -644,6 +644,29 @@ impl Styler {
                 s.grid_columns = Some(((self.env.width - 32.0) / min).floor().clamp(1.0, 12.0) as u16);
             }
             Decl::GridColumn(v) => s.grid_column = *v,
+            Decl::GridTracks(None) => s.grid_tracks = None,
+            Decl::GridTracks(Some(specs)) => {
+                let tracks: Vec<Track> = specs
+                    .iter()
+                    .map(|t| match t {
+                        TrackSpec::Len(l) => match len(l) {
+                            Length::Px(v) => Track::Px(v),
+                            _ => Track::Auto,
+                        },
+                        TrackSpec::Fr(f) => Track::Fr(*f),
+                        TrackSpec::Max(l) => match len(l) {
+                            Length::Px(v) => Track::Max(v),
+                            _ => Track::Fr(1.0),
+                        },
+                        TrackSpec::Auto => Track::Auto,
+                    })
+                    .collect();
+                // The column count follows the tracks.
+                s.grid_columns = Some(tracks.len().clamp(1, 64) as u16);
+                s.grid_tracks = Some(tracks.into());
+            }
+            Decl::GridAreas(v) => s.grid_areas = v.clone(),
+            Decl::GridArea(v) => s.grid_area = v.clone(),
             Decl::Overflow(v) => s.overflow = *v,
             Decl::Opacity(v) => s.opacity = *v,
             Decl::Masked(v) => s.masked = *v,
