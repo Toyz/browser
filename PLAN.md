@@ -94,7 +94,9 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] Real fonts: `font-family` lists resolve to the first *installed* family (Verdana on HN, Georgia on Wikipedia)
 - [x] Min-content width estimates (GPUI measures text min-width as the whole line), so flex items/cells shrink like CSS
 - [x] `calc()` in media queries; CSS block semantics for auto-margin boxes
-- [ ] Interactive states: `:hover`, `:active`, `:focus(-within/-visible)`, `:checked`, `:target`. Today they parse but never match (styles are computed once at load). Plan: keep the `Document` + `Styler` alive per page; note which elements have state-dependent rules; on hover/focus changes, restyle just that element's subtree and rebuild only its top-level row (rows are independent). Then `transition` (interpolate colors/opacity/transforms over frames).
+- [x] Interactive states: `:hover` (blocks report via GPUI hover, inline elements via the inline engine's hit-testing; the chain includes flattened ancestors), `:active`, `:target`, `:focus*` matching (nothing focusable yet). Restyles run in the background only when the page has state rules. CSS `cursor`.
+- [ ] Faster state restyles: today a hover change re-runs style + layout for the whole page (~35ms on Wikipedia). Restyle only the affected subtree / rows.
+- [ ] `transition` (interpolate colors/opacity over frames)
 - [ ] Dark mode (`prefers-color-scheme: dark` + a dark canvas)
 - [x] Re-style on window resize: rules keep their `@media` conditions; pages keep `Document` + `StyleData`; when a condition flips, restyle + re-layout in the background (debounced) and swap, keeping scroll position. (Viewport units only update on breakpoint changes for now.)
 - [ ] CSS nesting, `::before/::after` content (Wikipedia's "[edit]" brackets), fonts from `@font-face`
@@ -146,7 +148,7 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 ## Dev tools
 
 - `cargo run --example dump -- <url> [rows]` — layout rows + timings. `TREE=1` prints big blocks' structure; `WRAPPERS=1` prints row wrappers.
-- `cargo run --features screenshot -- <url> --screenshot out.png [--pages N] [--row N] [--scroll PX] [--size WxH]` — renders offscreen via GPUI's `render_to_image` (no screen-recording permission), saves PNGs, quits. Prefer `--row` (from `dump`) over `--scroll`: pixel scrolling skips rows the list hasn't measured. `--resize WxH` resizes after load (tests live restyling). `BROWSER_DEBUG=1` logs image loads.
+- `cargo run --features screenshot -- <url> --screenshot out.png [--pages N] [--row N] [--scroll PX] [--size WxH]` — renders offscreen via GPUI's `render_to_image` (no screen-recording permission), saves PNGs, quits. Prefer `--row` (from `dump`) over `--scroll`: pixel scrolling skips rows the list hasn't measured. `--resize WxH` resizes after load (tests live restyling). `--mouse X,Y` hovers a point before capturing (tests `:hover`). `BROWSER_DEBUG=1` logs image loads.
 - Sites that rate-limit (HN): mirror locally (`curl` the HTML/CSS/images into a folder, `python3 -m http.server`) and test against `http://127.0.0.1:<port>/`.
 - Reference rendering: `"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" --headless=new --window-size=1100,1600 --screenshot=ref.png <url>`. Note Edge runs JS (Wikipedia renders its `client-js` layout); we're `client-nojs`.
 

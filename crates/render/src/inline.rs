@@ -278,11 +278,18 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     lines
 }
 
+/// Each laid-out piece's area and the element its text belongs to.
+type PieceAreas = Vec<(Bounds<Pixels>, Option<page::NodeId>)>;
+
 pub struct Prepainted {
     lines: Rc<Vec<Line>>,
     measured: Rc<Vec<Measured>>,
     objects: Vec<AnyElement>,
     links: Rc<Vec<(Hitbox, usize)>>,
+    /// For `:hover`: the whole paragraph, and each piece's area + element.
+    hover: Option<(Hitbox, Rc<PieceAreas>)>,
+    /// Pieces whose `cursor` isn't auto.
+    cursors: Vec<(Hitbox, CursorStyle)>,
 }
 
 /// Per-element interaction state, kept across frames.
@@ -290,6 +297,7 @@ pub struct Prepainted {
 struct LinkState {
     pressed: Rc<Cell<Option<usize>>>,
     hovered: Rc<Cell<Option<usize>>>,
+    hovered_node: Rc<Cell<Option<page::NodeId>>>,
 }
 
 impl IntoElement for InlineFlow {
@@ -374,6 +382,8 @@ impl Element for InlineFlow {
         let link_of = |byte: usize| para.links.iter().position(|l| l.range.contains(&byte));
         let mut objects = Vec::new();
         let mut links = Vec::new();
+        let mut piece_areas = Vec::new();
+        let mut cursors = Vec::new();
         let mut y = bounds.origin.y;
         for line in lines.iter() {
             let baseline = y + line.extent.above;
@@ -382,6 +392,14 @@ impl Element for InlineFlow {
             for &(ix, x) in &line.items {
                 let piece = &para.pieces[ix];
                 let m = measured[ix];
+                let area = Bounds::new(point(dx + x, y), size(m.width, line.extent.above + line.extent.below));
+                let span_style = &para.spans[piece.span as usize].style;
+                if self.cx.track_hover {
+                    piece_areas.push((area, span_style.node));
+                }
+                if let Some(c) = crate::view::cursor_style(span_style.cursor) {
+                    cursors.push((window.insert_hitbox(area, HitboxBehavior::Normal), c));
+                }
                 if let PieceKind::Object(oi) = piece.kind {
                     let image = &para.objects[oi as usize];
                     let w = m.width;
@@ -415,7 +433,11 @@ impl Element for InlineFlow {
             }
             y += line.extent.above + line.extent.below;
         }
-        Prepainted { lines, measured, objects, links: Rc::new(links) }
+        let hover = self
+            .cx
+            .track_hover
+            .then(|| (window.insert_hitbox(bounds, HitboxBehavior::Normal), Rc::new(piece_areas)));
+        Prepainted { lines, measured, objects, links: Rc::new(links), hover, cursors }
     }
 
     fn paint(
@@ -517,9 +539,9 @@ impl Element for InlineFlow {
             object.paint(window, cx);
         }
 
-        // 4. Links: cursor, click, hover.
-        if prepainted.links.is_empty() {
-            return;
+        // 4. Cursors, links (click/hover), and `:hover` reporting.
+        for (hitbox, cursor) in &prepainted.cursors {
+            window.set_cursor_style(*cursor, hitbox);
         }
         for (hitbox, _) in prepainted.links.iter() {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
@@ -529,6 +551,29 @@ impl Element for InlineFlow {
             let state = state.unwrap_or_default();
             (state.clone(), state)
         });
+        if let Some((hitbox, areas)) = prepainted.hover.clone() {
+            let state = state.clone();
+            let report = self.cx.on_inline_hover.clone();
+            let para_id = para.id;
+            window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                let node = if hitbox.is_hovered(window) {
+                    let mouse = window.mouse_position();
+                    areas.iter().find(|(b, _)| b.contains(&mouse)).and_then(|(_, n)| *n)
+                } else {
+                    None
+                };
+                if node != state.hovered_node.get() {
+                    state.hovered_node.set(node);
+                    report(para_id, node, window, cx);
+                }
+            });
+        }
+        if prepainted.links.is_empty() {
+            return;
+        }
         let hit = |links: &[(Hitbox, usize)], window: &Window| {
             links.iter().find(|(h, _)| h.is_hovered(window)).map(|(_, l)| *l)
         };

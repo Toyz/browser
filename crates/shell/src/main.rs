@@ -17,7 +17,10 @@ use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable 
 use gpui_kit::*;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
+use page::NodeId;
 use render::{FontBook, ImageState, ImageStore, LayoutTree, Palette, RenderCx};
+use std::collections::HashSet;
+use style::ElementState;
 use url::Url;
 
 actions!(browser, [Quit, Back, Forward, Reload, FocusAddressBar]);
@@ -37,6 +40,16 @@ struct LoadedPage {
     styles: Option<style::StyleData>,
     /// Which media conditions held when `layout` was built.
     signature: Vec<bool>,
+}
+
+impl LoadedPage {
+    /// The element `#fragment` points at, for `:target`.
+    fn target(&self) -> Option<NodeId> {
+        let fragment = self.url.fragment()?;
+        let doc = self.doc.as_ref()?;
+        doc.descendants(doc.root())
+            .find(|&id| doc.element(id).and_then(|e| e.attr("id")) == Some(fragment))
+    }
 }
 
 /// Fetch a subresource (stylesheet) as text, or `None` on any failure.
@@ -64,7 +77,13 @@ fn load(url: &Url, env: style::MediaEnv) -> anyhow::Result<LoadedPage> {
     }
     let doc = html::parse(&response.body, response.url.clone());
     let styles = style::StyleData::for_document(&doc, &fetch_text);
-    let layout = render::build(&doc, &styles.styler(env));
+    // `:target` from the requested URL's fragment.
+    let target = url.fragment().and_then(|f| {
+        doc.descendants(doc.root())
+            .find(|&id| doc.element(id).and_then(|e| e.attr("id")) == Some(f))
+    });
+    let state = Arc::new(ElementState { target, ..Default::default() });
+    let layout = render::build(&doc, &styles.styler_with_state(env, state));
     Ok(LoadedPage {
         url: response.url,
         title: doc.title(),
@@ -106,6 +125,13 @@ struct Browser {
     images_pending: usize,
     _image_task: Option<Task<()>>,
     _restyle: Option<Task<()>>,
+    /// Elements whose blocks report the pointer inside them.
+    hover_blocks: HashSet<NodeId>,
+    /// The inline element under the pointer, per paragraph.
+    hover_inline: Option<(usize, NodeId)>,
+    mouse_down: bool,
+    /// The interaction state the current layout was styled with.
+    element_state: Arc<ElementState>,
     /// Screenshot job from the command line, run once the first page loads.
     capture: Option<CaptureJob>,
     _capture_task: Option<Task<()>>,
@@ -145,6 +171,10 @@ impl Browser {
             images_pending: 0,
             _image_task: None,
             _restyle: None,
+            hover_blocks: HashSet::new(),
+            hover_inline: None,
+            mouse_down: false,
+            element_state: Arc::default(),
             capture: None,
             _capture_task: None,
             _subscriptions: vec![subscription, resize],
@@ -193,7 +223,12 @@ impl Browser {
             && same_document(&page.url, &url)
         {
             self.loading = None;
+            if let Some(page) = &mut self.page {
+                page.url = url.clone();
+            }
             self.scroll_to_fragment(url.fragment());
+            // `:target` moved.
+            self.interaction_changed(window, cx);
             cx.notify();
             return;
         }
@@ -223,6 +258,9 @@ impl Browser {
                         this.list_state.reset(page.layout.rows.len());
                         let fragment = page.url.fragment().map(str::to_owned);
                         this.page = Some(page);
+                        this.hover_blocks.clear();
+                        this.hover_inline = None;
+                        this.element_state = Arc::default();
                         this.images.borrow_mut().clear();
                         this.scroll_to_fragment(fragment.as_deref());
                         this.load_images(cx);
@@ -323,30 +361,83 @@ impl Browser {
     fn viewport_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let env = media_env(window);
         let Some(page) = &self.page else { return };
-        let (Some(doc), Some(styles)) = (page.doc.clone(), page.styles.clone()) else { return };
-        if styles.signature(&env) == page.signature {
-            return;
+        let Some(styles) = &page.styles else { return };
+        if styles.signature(&env) != page.signature {
+            self.restyle(Duration::from_millis(150), window, cx);
         }
+    }
+
+    /// The interaction state implied by what's under the pointer etc.
+    fn current_state(&self) -> ElementState {
+        let mut state = ElementState::default();
+        let Some(page) = &self.page else { return state };
+        let Some(doc) = &page.doc else { return state };
+        // :hover covers the element and all its ancestors, including ones whose
+        // boxes were flattened away (they have no GPUI element to report).
+        let deepest = self.hover_blocks.iter().copied().chain(self.hover_inline.map(|(_, n)| n));
+        for node in deepest {
+            let mut n = Some(node);
+            while let Some(id) = n {
+                if !state.hovered.insert(id) {
+                    break;
+                }
+                n = doc.parent(id);
+            }
+        }
+        if self.mouse_down {
+            state.active = state.hovered.clone();
+        }
+        state.target = page.target();
+        state
+    }
+
+    /// Hover/active state changed: restyle if the page has rules that care.
+    fn interaction_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let has_rules = self
+            .page
+            .as_ref()
+            .and_then(|p| p.styles.as_ref())
+            .is_some_and(|s| s.has_state_rules());
+        if has_rules && self.current_state() != *self.element_state {
+            self.restyle(Duration::from_millis(16), window, cx);
+        }
+    }
+
+    /// Re-run style + layout in the background with the current viewport and
+    /// interaction state, then swap it in, keeping the scroll position.
+    fn restyle(&mut self, delay: Duration, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = &self.page else { return };
+        let (Some(doc), Some(styles)) = (page.doc.clone(), page.styles.clone()) else { return };
         self._restyle = Some(cx.spawn_in(window, async move |this, cx| {
-            // Wait for the resize to settle.
-            cx.background_executor().timer(Duration::from_millis(150)).await;
+            cx.background_executor().timer(delay).await;
             let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
+            let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
             let signature = styles.signature(&env);
             let layout = cx
-                .background_spawn(async move { render::build(&doc, &styles.styler(env)) })
+                .background_spawn({
+                    let state = state.clone();
+                    async move { render::build(&doc, &styles.styler_with_state(env, state)) }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let Some(page) = &mut this.page else { return };
+                let same_shape = page.layout.rows.len() == layout.rows.len();
                 page.layout = Arc::new(layout);
                 page.signature = signature;
-                // Keep roughly the same place in the page.
-                let top = this.list_state.logical_scroll_top();
-                let rows = page.layout.rows.len();
-                this.list_state.reset(rows);
-                this.list_state.scroll_to(ListOffset {
-                    item_ix: top.item_ix.min(rows.saturating_sub(1)),
-                    offset_in_item: top.offset_in_item,
-                });
+                this.element_state = state;
+                if same_shape {
+                    // Usually just colors/decorations changed: keep everything, re-measure.
+                    this.list_state.remeasure();
+                } else {
+                    // Keep roughly the same place in the page.
+                    let top = this.list_state.logical_scroll_top();
+                    let rows = page.layout.rows.len();
+                    this.list_state.reset(rows);
+                    this.list_state.scroll_to(ListOffset {
+                        item_ix: top.item_ix.min(rows.saturating_sub(1)),
+                        offset_in_item: top.offset_in_item,
+                    });
+                }
                 this.load_images(cx);
                 cx.notify();
             })
@@ -388,6 +479,22 @@ impl Browser {
                 .ok();
             }
             cx.background_executor().timer(settle).await;
+            if let Some((x, y)) = job.mouse {
+                // Draw so hitboxes exist, then hover the point and let restyling run.
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent {
+                            position: point(px(x), px(y)),
+                            pressed_button: None,
+                            modifiers: Modifiers::default(),
+                        }),
+                        cx,
+                    );
+                })
+                .ok();
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+            }
             for page in 0..job.pages {
                 let step = if page == 0 { job.scroll } else { page_step };
                 // Scroll in small steps, drawing in between: the list measures rows
@@ -442,9 +549,50 @@ impl Browser {
     fn render_cx(&self, cx: &Context<Self>) -> RenderCx {
         let click = cx.entity().downgrade();
         let hover = click.clone();
+        let block_hover = click.clone();
+        let inline_hover = click.clone();
+        let track_hover = self
+            .page
+            .as_ref()
+            .and_then(|p| p.styles.as_ref())
+            .is_some_and(|s| s.has_state_rules());
         RenderCx {
             palette: self.palette.clone(),
             images: self.images.clone(),
+            track_hover,
+            on_block_hover: Rc::new(move |node, hovered, window, cx| {
+                block_hover
+                    .update(cx, |this, cx| {
+                        let changed = if hovered {
+                            this.hover_blocks.insert(node)
+                        } else {
+                            this.hover_blocks.remove(&node)
+                        };
+                        if changed {
+                            this.interaction_changed(window, cx);
+                        }
+                    })
+                    .ok();
+            }),
+            on_inline_hover: Rc::new(move |para, node, window, cx| {
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("inline hover: paragraph {para} → {node:?}");
+                }
+                inline_hover
+                    .update(cx, |this, cx| {
+                        let next = match node {
+                            Some(node) => Some((para, node)),
+                            // Leaving this paragraph only clears hover if it was this one's.
+                            None if this.hover_inline.is_some_and(|(p, _)| p == para) => None,
+                            None => return,
+                        };
+                        if this.hover_inline != next {
+                            this.hover_inline = next;
+                            this.interaction_changed(window, cx);
+                        }
+                    })
+                    .ok();
+            }),
             on_link_click: Rc::new(move |url, window, cx| {
                 let url = url.clone();
                 click
@@ -601,7 +749,18 @@ impl Render for Browser {
                     .bg(canvas)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.focus_handle.focus(window, cx)),
+                        cx.listener(|this, _, window, cx| {
+                            this.focus_handle.focus(window, cx);
+                            this.mouse_down = true;
+                            this.interaction_changed(window, cx);
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.mouse_down = false;
+                            this.interaction_changed(window, cx);
+                        }),
                     )
                     .child(self.render_content(cx))
                     .children(status),

@@ -118,6 +118,10 @@ impl Palette {
 
 pub type LinkClick = Rc<dyn Fn(&Url, &mut Window, &mut App)>;
 pub type LinkHover = Rc<dyn Fn(Option<&Url>, &mut Window, &mut App)>;
+/// A block's element started (true) or stopped (false) being under the pointer.
+pub type BlockHover = Rc<dyn Fn(page::NodeId, bool, &mut Window, &mut App)>;
+/// The inline element under the pointer within paragraph `id` changed.
+pub type InlineHover = Rc<dyn Fn(usize, Option<page::NodeId>, &mut Window, &mut App)>;
 
 /// Everything rendering needs besides the boxes themselves.
 #[derive(Clone)]
@@ -126,6 +130,26 @@ pub struct RenderCx {
     pub images: ImageStore,
     pub on_link_click: LinkClick,
     pub on_link_hover: LinkHover,
+    /// Report hover per element (only when the page has `:hover`-style rules).
+    pub track_hover: bool,
+    pub on_block_hover: BlockHover,
+    pub on_inline_hover: InlineHover,
+}
+
+pub(crate) fn cursor_style(c: style::Cursor) -> Option<CursorStyle> {
+    use style::Cursor as C;
+    Some(match c {
+        C::Auto => return None,
+        C::Pointer => CursorStyle::PointingHand,
+        C::Text => CursorStyle::IBeam,
+        C::NotAllowed => CursorStyle::OperationNotAllowed,
+        C::Grab => CursorStyle::OpenHand,
+        C::Grabbing => CursorStyle::ClosedHand,
+        C::Crosshair => CursorStyle::Crosshair,
+        C::Move => CursorStyle::OpenHand,
+        C::ResizeColumn => CursorStyle::ResizeLeftRight,
+        C::ResizeRow => CursorStyle::ResizeUpDown,
+    })
 }
 
 fn len(l: CssLength) -> Length {
@@ -187,8 +211,9 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             .w_full()
             .flex()
             .flex_col()
-            .ml(px(wrapper.indent_left))
-            .mr(px(wrapper.indent_right))
+            // Padding, not margin: margins would add to the full width and overflow.
+            .pl(px(wrapper.indent_left))
+            .pr(px(wrapper.indent_right))
             .child(
                 div()
                     .flex()
@@ -376,10 +401,22 @@ fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow:
         }
     };
 
-    if scrolls {
-        el.id(("scroll", block.id)).overflow_y_scroll().into_any_element()
-    } else {
-        el.into_any_element()
+    let el = match cursor_style(s.cursor) {
+        Some(c) => el.cursor(c),
+        None => el,
+    };
+    let hover = block.node.filter(|_| cx.track_hover);
+    if !scrolls && hover.is_none() {
+        return el.into_any_element();
+    }
+    let el = el.id(("block", block.id));
+    let el = if scrolls { el.overflow_y_scroll() } else { el };
+    match hover {
+        Some(node) => {
+            let report = cx.on_block_hover.clone();
+            el.on_hover(move |hovered, window, cx| report(node, *hovered, window, cx)).into_any_element()
+        }
+        None => el.into_any_element(),
     }
 }
 

@@ -181,11 +181,24 @@ impl<'i> selectors::Parser<'i> for SelectorParser {
     }
 }
 
+/// Interaction state that dynamic pseudo-classes match against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ElementState {
+    /// The element under the pointer and all its ancestors (`:hover`).
+    pub hovered: std::collections::HashSet<NodeId>,
+    /// Same, while the mouse button is held (`:active`).
+    pub active: std::collections::HashSet<NodeId>,
+    pub focused: Option<NodeId>,
+    /// The element the URL's `#fragment` points at (`:target`).
+    pub target: Option<NodeId>,
+}
+
 /// An element of our document, as `selectors` sees it.
 #[derive(Clone, Copy)]
 pub struct ElementRef<'a> {
     pub doc: &'a Document,
     pub id: NodeId,
+    pub state: &'a ElementState,
 }
 
 impl fmt::Debug for ElementRef<'_> {
@@ -195,8 +208,8 @@ impl fmt::Debug for ElementRef<'_> {
 }
 
 impl<'a> ElementRef<'a> {
-    pub fn new(doc: &'a Document, id: NodeId) -> Self {
-        Self { doc, id }
+    pub fn new(doc: &'a Document, id: NodeId, state: &'a ElementState) -> Self {
+        Self { doc, id, state }
     }
 
     fn data(&self) -> &'a page::ElementData {
@@ -204,7 +217,7 @@ impl<'a> ElementRef<'a> {
     }
 
     fn element_at(&self, id: NodeId) -> Option<Self> {
-        self.doc.element(id).map(|_| Self { doc: self.doc, id })
+        self.doc.element(id).map(|_| Self { doc: self.doc, id, state: self.state })
     }
 
     fn sibling_elements(&self) -> (&'a [NodeId], usize) {
@@ -287,6 +300,25 @@ impl selectors::Element for ElementRef<'_> {
         match pc {
             PseudoClass::Link | PseudoClass::AnyLink => self.is_link(),
             PseudoClass::Defined => true,
+            PseudoClass::Inert("hover") => self.state.hovered.contains(&self.id),
+            PseudoClass::Inert("active") => self.state.active.contains(&self.id),
+            PseudoClass::Inert("focus" | "focus-visible") => self.state.focused == Some(self.id),
+            PseudoClass::Inert("focus-within") => {
+                let mut node = self.state.focused;
+                while let Some(n) = node {
+                    if n == self.id {
+                        return true;
+                    }
+                    node = self.doc.parent(n);
+                }
+                false
+            }
+            PseudoClass::Inert("target") => self.state.target == Some(self.id),
+            // Form controls aren't disabled/checked/etc. until we have forms.
+            PseudoClass::Inert("enabled") => matches!(
+                &*self.data().name.local,
+                "button" | "input" | "select" | "textarea" | "option" | "fieldset"
+            ),
             PseudoClass::Inert(_) => false,
         }
     }

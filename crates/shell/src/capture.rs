@@ -1,6 +1,6 @@
 //! Command-line options, and offscreen screenshots for development.
 //!
-//! `browser [URL] [--screenshot out.png] [--pages N] [--scroll PX] [--row N] [--size WxH] [--resize WxH]`
+//! `browser [URL] [--screenshot out.png] [--pages N] [--scroll PX] [--row N] [--size WxH] [--resize WxH] [--mouse X,Y]`
 //!
 //! With `--screenshot`, the browser loads the page, renders frames to PNG
 //! (scrolling a viewport between pages) and quits. Rendering goes through
@@ -29,6 +29,8 @@ pub struct CaptureJob {
     pub row: Option<usize>,
     /// Resize the window to this size after loading (exercises live restyling).
     pub resize: Option<(f32, f32)>,
+    /// Move the mouse here (window coordinates) before capturing (`:hover`).
+    pub mouse: Option<(f32, f32)>,
 }
 
 impl CaptureJob {
@@ -51,6 +53,7 @@ impl Args {
         let mut scroll = 0.0;
         let mut row = None;
         let mut resize = None;
+        let mut mouse = None;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -58,6 +61,11 @@ impl Args {
                 "--pages" => pages = it.next().and_then(|n| n.parse().ok()).unwrap_or(1).max(1),
                 "--scroll" => scroll = it.next().and_then(|n| n.parse().ok()).unwrap_or(0.0),
                 "--row" => row = it.next().and_then(|n| n.parse().ok()),
+                "--mouse" => {
+                    mouse = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
+                        Some((x.parse().ok()?, y.parse().ok()?))
+                    })
+                }
                 "--resize" => {
                     resize = it.next().as_deref().and_then(|s| s.split_once('x')).and_then(|(w, h)| {
                         Some((w.parse().ok()?, h.parse().ok()?))
@@ -73,7 +81,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

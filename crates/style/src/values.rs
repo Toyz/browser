@@ -446,3 +446,18 @@ pub enum VerticalAlign {
     /// Raise (positive) or lower by this many px.
     Shift(f32),
 }
+
+/// The `cursor` property, reduced to the cursors a native UI has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cursor {
+    Auto,
+    Pointer,
+    Text,
+    NotAllowed,
+    Grab,
+    Grabbing,
+    Crosshair,
+    Move,
+    ResizeColumn,
+    ResizeRow,
+}

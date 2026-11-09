@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use cascade::{Pseudo, StyleData, StyleSource, Styler, collect_style_sources};
+pub use selector::ElementState;
 pub use media::MediaEnv;
 pub use values::*;
 
@@ -94,6 +95,7 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     pub list_style: ListStyle,
     pub visible: bool,
+    pub cursor: Cursor,
     pub custom: CustomProps,
 }
 
@@ -157,6 +159,7 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             list_style: ListStyle::Disc,
             visible: true,
+            cursor: Cursor::Auto,
             custom: CustomProps::default(),
         }
     }
@@ -178,6 +181,7 @@ impl ComputedStyle {
             text_transform: parent.text_transform,
             list_style: parent.list_style,
             visible: parent.visible,
+            cursor: parent.cursor,
             custom: parent.custom.clone(),
             ..Self::initial()
         }

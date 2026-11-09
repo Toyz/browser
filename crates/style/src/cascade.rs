@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::media::{self, MediaEnv};
 use crate::props::{Decl, FontSizeSpec, GridCols, LineHeightSpec, WeightSpec, Wide, parse_declaration};
-use crate::selector::ElementRef;
+use crate::selector::{ElementRef, ElementState};
 use crate::sheet::{StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet};
 use crate::values::*;
 use crate::{ComputedStyle, CustomProps};
@@ -270,6 +270,8 @@ pub struct StyleData {
     /// The distinct media conditions rules depend on.
     conditions: Arc<Vec<Arc<str>>>,
     base: Option<Url>,
+    /// Some rule uses `:hover`/`:active`/`:focus`…: interaction can restyle.
+    has_state_rules: bool,
 }
 
 impl StyleData {
@@ -283,7 +285,18 @@ impl StyleData {
                 }
             }
         }
-        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base }
+        let has_state_rules = rules.iter().any(|r| {
+            r.selectors.slice().iter().any(|sel| {
+                let css = cssparser::ToCss::to_css_string(sel);
+                [":hover", ":active", ":focus", ":target"].iter().any(|p| css.contains(p))
+            })
+        });
+        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules }
+    }
+
+    /// Does any rule depend on hover/active/focus state?
+    pub fn has_state_rules(&self) -> bool {
+        self.has_state_rules
     }
 
     /// Gather, fetch and parse every stylesheet a document uses. `fetch` is
@@ -333,6 +346,11 @@ impl StyleData {
 
     /// A styler for this viewport: only the rules whose media conditions hold.
     pub fn styler(&self, env: MediaEnv) -> Styler {
+        self.styler_with_state(env, Arc::default())
+    }
+
+    /// A styler for this viewport and interaction state.
+    pub fn styler_with_state(&self, env: MediaEnv, state: Arc<ElementState>) -> Styler {
         let rules: Vec<StyleRule> = self
             .rules
             .iter()
@@ -342,6 +360,7 @@ impl StyleData {
         Styler {
             author: Indexes::new(rules),
             env,
+            state,
             root_font_size: Cell::new(16.0),
             base: self.base.clone(),
             element_hashes: RefCell::default(),
@@ -355,6 +374,7 @@ impl StyleData {
 pub struct Styler {
     author: Indexes,
     env: MediaEnv,
+    state: Arc<ElementState>,
     root_font_size: Cell<f32>,
     /// The document's base URL, for `url()`s in `style=""` and `var()` values.
     base: Option<Url>,
@@ -384,7 +404,7 @@ impl Styler {
             return style;
         }
 
-        let el = ElementRef::new(doc, id);
+        let el = ElementRef::new(doc, id, &self.state);
         let bloom = self.ancestor_bloom(doc, id);
         let mut caches = SelectorCaches::default();
         let mut matched = Vec::new();
@@ -435,7 +455,7 @@ impl Styler {
         if ua.is_empty() && author.is_empty() {
             return None;
         }
-        let el = ElementRef::new(doc, id);
+        let el = ElementRef::new(doc, id, &self.state);
         let bloom = self.ancestor_bloom(doc, id);
         let mut caches = SelectorCaches::default();
         let mut matched = Vec::new();
@@ -612,6 +632,7 @@ impl Styler {
             Decl::Content(v) => s.content = v.clone(),
             Decl::Float(v) => s.float = *v,
             Decl::BorderBox(v) => s.border_box = *v,
+            Decl::Cursor(v) => s.cursor = *v,
             Decl::VerticalAlign(crate::props::VAlignSpec::Keyword(k)) => s.vertical_align = *k,
             Decl::VerticalAlign(crate::props::VAlignSpec::Len(l)) => {
                 s.vertical_align = match len(l) {
@@ -1136,6 +1157,40 @@ mod tests {
         };
         assert_eq!(color(narrow), Color::Rgba(0x0000ffff));
         assert_eq!(color(wide), Color::Rgba(0xff0000ff));
+    }
+
+    #[test]
+    fn hover_state_matches() {
+        let doc = html::parse(r#"<nav><a href="/x">x</a></nav>"#, Url::parse("https://example.com/").unwrap());
+        let data = StyleData::from_sheets(vec![parse_stylesheet("a:hover { color: red } nav:hover a { font-weight: 700 }")], None);
+        assert!(data.has_state_rules());
+        let a = doc.find_element("a").unwrap();
+        let style = |state: ElementState| {
+            let styler = data.styler_with_state(MediaEnv::default(), Arc::new(state));
+            let mut st = ComputedStyle::root_parent();
+            let mut chain = vec![a];
+            while let Some(p) = doc.parent(*chain.last().unwrap()) {
+                if doc.element(p).is_none() {
+                    break;
+                }
+                chain.push(p);
+            }
+            for id in chain.into_iter().rev() {
+                st = styler.compute(&doc, id, &st);
+            }
+            st
+        };
+        let idle = style(ElementState::default());
+        assert_eq!(idle.color, Color::Link);
+        let mut hovered = ElementState::default();
+        let mut node = Some(a);
+        while let Some(n) = node {
+            hovered.hovered.insert(n);
+            node = doc.parent(n);
+        }
+        let hot = style(hovered);
+        assert_eq!(hot.color, Color::Rgba(0xff0000ff));
+        assert_eq!(hot.font_weight, 700);
     }
 
     #[test]

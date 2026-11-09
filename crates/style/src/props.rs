@@ -148,6 +148,7 @@ pub enum Decl {
     Clear(bool),
     VerticalAlign(VAlignSpec),
     BorderBox(bool),
+    Cursor(Cursor),
     TextDecoration { underline: bool, strikethrough: bool },
     FontSize(FontSizeSpec),
     LineHeight(LineHeightSpec),
@@ -386,6 +387,31 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
             ("inline-end", Float::Right),
         ])?)),
         "clear" => out.push(D::Clear(ident(p)? != "none")),
+        "cursor" => {
+            // `cursor: url(x.cur), pointer`: skip images, take the first keyword we know.
+            let mut cursor = None;
+            while !p.is_exhausted() {
+                if let Ok(Token::Ident(id)) = p.next().cloned() {
+                    let c = match id.to_ascii_lowercase().as_str() {
+                        "auto" | "default" | "none" | "context-menu" | "help" | "progress" | "wait" => Some(Cursor::Auto),
+                        "pointer" => Some(Cursor::Pointer),
+                        "text" | "vertical-text" => Some(Cursor::Text),
+                        "not-allowed" | "no-drop" => Some(Cursor::NotAllowed),
+                        "grab" => Some(Cursor::Grab),
+                        "grabbing" => Some(Cursor::Grabbing),
+                        "crosshair" | "cell" => Some(Cursor::Crosshair),
+                        "move" | "all-scroll" => Some(Cursor::Move),
+                        "col-resize" | "ew-resize" | "e-resize" | "w-resize" => Some(Cursor::ResizeColumn),
+                        "row-resize" | "ns-resize" | "n-resize" | "s-resize" => Some(Cursor::ResizeRow),
+                        _ => None,
+                    };
+                    if cursor.is_none() {
+                        cursor = c;
+                    }
+                }
+            }
+            out.push(D::Cursor(cursor.unwrap_or(Cursor::Auto)));
+        }
         "box-sizing" | "-webkit-box-sizing" | "-moz-box-sizing" => {
             out.push(D::BorderBox(ident(p)? == "border-box"))
         }
