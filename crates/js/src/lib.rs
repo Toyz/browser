@@ -69,6 +69,9 @@ pub enum ToJs {
     /// An `EventSource` event: `open`, `error`, or a message (type, data,
     /// last event id).
     Sse { id: u32, kind: &'static str, event: String, data: String, last_id: String },
+    /// A key: `keydown` / `keyup`, with the DOM `key` and `code`, at the
+    /// focused field (`None`: the page itself).
+    Key { kind: &'static str, key: String, code: String, target: Option<NodeId>, modifiers: [bool; 4] },
     /// A mouse event over `node`: `mousedown`, `mouseup`, `mousemove`,
     /// `dblclick` or `wheel`, at viewport coordinates.
     Mouse { kind: &'static str, node: NodeId, x: f32, y: f32, button: i16, buttons: u16, delta: (f32, f32) },

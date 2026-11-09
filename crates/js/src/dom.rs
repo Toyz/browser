@@ -539,6 +539,20 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Key { kind, key, code, target, modifiers } => {
+                let target = target.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
+                let args = [
+                    js_str(kind),
+                    js_str(&key),
+                    js_str(&code),
+                    target,
+                    JsValue::from(modifiers[0]),
+                    JsValue::from(modifiers[1]),
+                    JsValue::from(modifiers[2]),
+                    JsValue::from(modifiers[3]),
+                ];
+                self.call_global("__dispatchKey", &args);
+            }
             ToJs::Mouse { kind, node, x, y, button, buttons, delta } => {
                 let args = [
                     js_str(kind),

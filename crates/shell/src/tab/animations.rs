@@ -38,6 +38,8 @@ impl Transition {
 struct KeyframeRun {
     node: NodeId,
     spec: Animation,
+    /// The element's style the frames were computed from.
+    base: Arc<ComputedStyle>,
     /// (offset, style) per keyframe, computed when the animation starts.
     frames: Vec<(f32, ComputedStyle)>,
     start: Instant,
@@ -163,20 +165,27 @@ impl Tab {
                     still.insert(key);
                     continue;
                 }
-                if let Some(i) = old.iter().position(|r| r.node == node && r.spec.name == spec.name) {
-                    keep.push(old.swap_remove(i));
-                    continue;
-                }
+                // Running already: keep its clock (and its frames, unless the
+                // element's style changed under it, e.g. its stylesheet
+                // arrived after it started).
+                let start = match old.iter().position(|r| r.node == node && r.spec.name == spec.name) {
+                    Some(i) if *old[i].base == *base => {
+                        keep.push(old.swap_remove(i));
+                        continue;
+                    }
+                    Some(i) => old.swap_remove(i).start,
+                    None => now,
+                };
                 // Custom properties (`--angle`) restyle the element per
                 // frame: sample them (a few per 100ms of the cycle).
                 if let (Some(custom), Some(doc)) = (styler.keyframe_custom(&spec.name), doc.as_deref()) {
                     let samples = ((spec.duration * 30.0) as usize).clamp(8, 120);
                     let frames = render::hover::custom_property_frames(doc, styler, node, &custom, samples);
-                    keep.push(KeyframeRun { node, spec: spec.clone(), frames, start: now });
+                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, start });
                     continue;
                 }
                 if let Some(frames) = styler.keyframe_styles(&spec.name, &base) {
-                    keep.push(KeyframeRun { node, spec: spec.clone(), frames, start: now });
+                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, start });
                 }
             }
         }

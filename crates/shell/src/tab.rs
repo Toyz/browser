@@ -1976,6 +1976,8 @@ impl Render for Tab {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
                 this.script_mouse("mousemove", event.position, 0, (0.0, 0.0));
             }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, _| this.script_key("keydown", &event.keystroke)))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, _| this.script_key("keyup", &event.keystroke)))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 this.scrolling_until = Some(std::time::Instant::now() + Duration::from_millis(150));
                 // Wheel listeners (zooming maps and graphs): deltaY > 0 scrolls down.

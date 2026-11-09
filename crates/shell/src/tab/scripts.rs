@@ -69,6 +69,8 @@ impl Tab {
                 if let Some(page) = &mut this.page {
                     page.styles = Some(styles);
                 }
+                // The interaction styler was built from the old rules.
+                this.hover_styler = None;
                 // New rules may use web fonts nothing asked for yet.
                 this.load_fonts(cx);
                 this.restyle(Duration::ZERO, window, cx);
@@ -141,6 +143,15 @@ impl Tab {
         .detach();
     }
 
+    /// A key pressed (or let go) in the page: its scripts hear it, at the
+    /// focused field if there is one.
+    pub(super) fn script_key(&mut self, kind: &'static str, keystroke: &Keystroke) {
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
+        let (key, code) = dom_key(keystroke);
+        let m = &keystroke.modifiers;
+        host.send(js::ToJs::Key { kind, key, code, target: self.forms.focused, modifiers: [m.control, m.shift, m.alt, m.platform] });
+    }
+
     /// A mouse event in the page: scripts listening under the pointer get
     /// it (`position` in window coordinates).
     pub(super) fn script_mouse(&mut self, kind: &'static str, position: Point<Pixels>, button: i16, delta: (f32, f32)) {
@@ -179,4 +190,45 @@ impl Tab {
             host.send(js::ToJs::Click { node: target, reply: None });
         }
     }
+}
+
+/// A GPUI keystroke as DOM `KeyboardEvent.key` and `.code`.
+fn dom_key(k: &Keystroke) -> (String, String) {
+    let named = match k.key.as_str() {
+        "enter" => Some(("Enter", "Enter")),
+        "escape" => Some(("Escape", "Escape")),
+        "backspace" => Some(("Backspace", "Backspace")),
+        "tab" => Some(("Tab", "Tab")),
+        "space" => Some((" ", "Space")),
+        "left" => Some(("ArrowLeft", "ArrowLeft")),
+        "right" => Some(("ArrowRight", "ArrowRight")),
+        "up" => Some(("ArrowUp", "ArrowUp")),
+        "down" => Some(("ArrowDown", "ArrowDown")),
+        "delete" => Some(("Delete", "Delete")),
+        "home" => Some(("Home", "Home")),
+        "end" => Some(("End", "End")),
+        "pageup" => Some(("PageUp", "PageUp")),
+        "pagedown" => Some(("PageDown", "PageDown")),
+        "shift" => Some(("Shift", "ShiftLeft")),
+        "control" => Some(("Control", "ControlLeft")),
+        "alt" => Some(("Alt", "AltLeft")),
+        "platform" | "cmd" => Some(("Meta", "MetaLeft")),
+        _ => None,
+    };
+    if let Some((key, code)) = named {
+        return (key.into(), code.into());
+    }
+    if let Some(f) = k.key.strip_prefix('f').filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) {
+        return (format!("F{f}"), format!("F{f}"));
+    }
+    let key = k.key_char.clone().filter(|c| c.chars().count() == 1).unwrap_or_else(|| k.key.clone());
+    let ch = k.key.chars().next().unwrap_or(' ');
+    let code = if k.key.len() == 1 && ch.is_ascii_alphabetic() {
+        format!("Key{}", ch.to_ascii_uppercase())
+    } else if k.key.len() == 1 && ch.is_ascii_digit() {
+        format!("Digit{ch}")
+    } else {
+        k.key.clone()
+    };
+    (key, code)
 }

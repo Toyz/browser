@@ -663,3 +663,27 @@ fn mouse_events_reach_scripts() {
     }
     assert_eq!(text, "mousedown 50,60 40,40 1 wheel 120");
 }
+
+#[test]
+fn keys_reach_scripts() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        document.addEventListener("keydown", (e) => { document.getElementById("o").textContent = e.key + " " + e.code + " " + e.keyCode + " " + e.ctrlKey + " " + (e.target === document.body); });
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    host.send(js::ToJs::Key { kind: "keydown", key: "Enter".into(), code: "Enter".into(), target: None, modifiers: [true, false, false, false] });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while text.is_empty() && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "Enter Enter 13 true true");
+}

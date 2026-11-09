@@ -412,6 +412,10 @@
     N.log("error", text);
   }
   const clickListeners = new Set();
+  // Legacy keyCode for the keys pages still check that way.
+  const KEY_CODES = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9, " ": 32, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34, Shift: 16, Control: 17, Alt: 18, Meta: 91 };
+  // The form field focused in the tab (scripts' document.activeElement).
+  let focusedElement = null;
   const mouseListeners = new Set();
   const MOUSE_TYPES = ["mousedown", "mouseup", "mousemove", "dblclick", "wheel", "pointerdown", "pointerup", "pointermove", "contextmenu"];
 
@@ -670,8 +674,8 @@
     scrollIntoView() {}
     scrollTo() {}
     scroll() {}
-    focus() {}
-    blur() {}
+    focus() { if (focusedElement !== this) { focusedElement = this; this.dispatchEvent(new FocusEvent("focus")); this.dispatchEvent(new FocusEvent("focusin", { bubbles: true })); } }
+    blur() { if (focusedElement === this) { focusedElement = null; this.dispatchEvent(new FocusEvent("blur")); this.dispatchEvent(new FocusEvent("focusout", { bubbles: true })); } }
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
     attachShadow(init) {
       // A declarative shadow root is handed over, emptied, the first time.
@@ -1385,7 +1389,7 @@
     get compatMode() { return "CSS1Compat"; }
     get characterSet() { return "UTF-8"; }
     get contentType() { return "text/html"; }
-    get activeElement() { return this.body; }
+    get activeElement() { return (focusedElement && focusedElement.isConnected !== false ? focusedElement : null) || this.body; }
     get forms() { return this.querySelectorAll("form"); }
     get images() { return this.querySelectorAll("img"); }
     get links() { return this.querySelectorAll("a[href]"); }
@@ -2499,6 +2503,17 @@
       }
       if (listens(window) || listens(document)) out.push(N.root());
       return out;
+    },
+    __dispatchKey(kind, key, code, id, ctrl, shift, alt, meta) {
+      if (id !== null) focusedElement = wrap(id);
+      const target = (id !== null && wrap(id)) || focusedElement || document.body || document.documentElement;
+      if (!target) return;
+      const init = { bubbles: true, cancelable: true, composed: true, key, code, ctrlKey: ctrl, shiftKey: shift, altKey: alt, metaKey: meta, repeat: false, location: 0, isComposing: false };
+      const ev = new KeyboardEvent(kind, init);
+      Object.assign(ev, init, { keyCode: KEY_CODES[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0) });
+      ev.which = ev.keyCode;
+      ev.isTrusted = true;
+      target.dispatchEvent(ev);
     },
     __dispatchMouse(kind, id, x, y, button, buttons, dx, dy) {
       const n = wrap(id);
