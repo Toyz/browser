@@ -188,6 +188,7 @@ impl Runtime {
         // Runaway loops end with an exception instead of a stuck thread.
         cx.runtime_limits_mut().set_loop_iteration_limit(200_000_000);
         cx.runtime_limits_mut().set_recursion_limit(2048);
+        declarative_shadow_roots(&mut dom.borrow_mut());
         install_natives(&mut cx, &dom);
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
@@ -1001,6 +1002,19 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         dom.dirty = true;
         Ok(JsValue::from(node_to_number(root)))
     }));
+    // [host, root, host, root...]: the shadow roots that exist (declarative
+    // ones, made before the prelude ran).
+    add("shadowPairs", 0, Box::new(|d, _, cx| {
+        let dom = d.borrow();
+        let values: Vec<JsValue> = dom.shadows.iter().flat_map(|(&h, &r)| [JsValue::from(node_to_number(h)), JsValue::from(node_to_number(r))]).collect();
+        Ok(JsArray::from_iter(values, cx).into())
+    }));
+    // A parsed <template>'s contents fragment.
+    add("templateContent", 1, Box::new(|d, a, _| {
+        let dom = d.borrow();
+        let Some(t) = arg_node(&dom, a, 0) else { return Ok(JsValue::null()) };
+        Ok(dom.doc.element(t).and_then(|e| e.template_contents).map_or(JsValue::null(), |c| JsValue::from(node_to_number(c))))
+    }));
     // In the document (through shadow hosts)?
     add("connected", 1, Box::new(|d, a, _| {
         let dom = d.borrow();
@@ -1489,6 +1503,43 @@ fn shadow_styles(v: JsValue, cx: &mut Context) -> Vec<(Option<NodeId>, String)> 
         out.push((host, css));
     }
     out
+}
+
+/// `<template shadowrootmode>` (declarative shadow DOM): the template's
+/// contents become its parent's shadow root, before any script runs.
+fn declarative_shadow_roots(dom: &mut Dom) {
+    let mut scopes = vec![dom.doc.root()];
+    while let Some(scope) = scopes.pop() {
+        let templates: Vec<NodeId> = dom.doc.descendants(scope).filter(|&n| is_shadow_template(&dom.doc, n)).collect();
+        for t in templates {
+            let Some(host) = dom.doc.parent(t) else { continue };
+            if dom.doc.element(host).is_none() || dom.shadows.contains_key(&host) {
+                continue;
+            }
+            let contents = dom.doc.element(t).and_then(|e| e.template_contents);
+            let root = dom.doc.create(NodeData::Fragment);
+            let kids: Vec<NodeId> = contents.map(|c| dom.doc.children(c).to_vec()).unwrap_or_default();
+            dom.doc.set_children(root, kids);
+            if let Some(c) = contents {
+                dom.doc.set_children(c, Vec::new());
+            }
+            dom.doc.detach(t);
+            dom.shadows.insert(host, root);
+            dom.hosts.insert(root, host);
+            dom.dirty = true;
+            scopes.push(root);
+        }
+    }
+}
+
+fn is_shadow_template(doc: &Document, n: NodeId) -> bool {
+    doc.element(n).is_some_and(|e| &*e.name.local == "template" && (e.attr("shadowrootmode").is_some() || e.attr("shadowroot").is_some()))
+}
+
+/// Does the page use declarative shadow DOM (which needs the script
+/// thread to render, scripts or not)?
+pub fn has_declarative_shadow(doc: &Document) -> bool {
+    doc.descendants(doc.root()).any(|n| is_shadow_template(doc, n))
 }
 
 /// A copy of the DOM as it renders: each shadow host's children are its

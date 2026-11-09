@@ -137,6 +137,7 @@ impl Drop for ScriptHost {
 /// Does the document have scripts we'd run?
 pub fn has_scripts(doc: &Document) -> bool {
     doc.descendants(doc.root()).any(|n| doc.element(n).is_some_and(|e| &**e.local_name() == "script" && dom::runnable(e)))
+        || dom::has_declarative_shadow(doc)
 }
 
 /// Run `doc`'s scripts. Returns the DOM to paint first (the scripts' work,

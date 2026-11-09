@@ -627,6 +627,14 @@
     blur() {}
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
     attachShadow(init) {
+      // A declarative shadow root is handed over, emptied, the first time.
+      if (this._shadow && this._shadow._declarative) {
+        const root = this._shadow;
+        root._declarative = false;
+        root._mode = (init && init.mode) || "open";
+        while (root.firstChild) root.removeChild(root.firstChild);
+        return root;
+      }
       if (this._shadow) throw new DOMException("Shadow root cannot be created on a host which already hosts a shadow tree.", "NotSupportedError");
       const root = wrap(N.attachShadow(this.__id));
       root._mode = (init && init.mode) || "open";
@@ -866,7 +874,14 @@
   }
   reflect(HTMLFormElement, [["action", "action", "url"], ["method", "method"], ["name", "name"], ["target", "target"]]);
   class HTMLTemplateElement extends HTMLElement {
-    get content() { const f = document.createDocumentFragment(); for (const c of this.childNodes) f.appendChild(c.cloneNode(true)); return f; }
+    get content() {
+      // Parsed templates keep their contents in a fragment of their own.
+      const parsed = N.templateContent(this.__id);
+      if (parsed !== null) return wrap(parsed);
+      const f = document.createDocumentFragment();
+      for (const c of this.childNodes) f.appendChild(c.cloneNode(true));
+      return f;
+    }
   }
   class HTMLCanvasElement extends HTMLElement {
     getContext() { return null; }
@@ -2119,6 +2134,19 @@
   });
 
   // ---- hooks for the host ----------------------------------------------
+
+  // Declarative shadow roots (made from <template shadowrootmode>).
+  {
+    const pairs = N.shadowPairs();
+    for (let i = 0; i + 1 < pairs.length; i += 2) {
+      const host = wrap(pairs[i]), root = wrap(pairs[i + 1]);
+      if (!host || !root) continue;
+      root._mode = "open";
+      root._declarative = true;
+      host._shadow = root;
+      shadowRoots.add(root);
+    }
+  }
 
   Object.assign(window, {
     __setCurrentScript(id) { currentScript = wrap(id); },

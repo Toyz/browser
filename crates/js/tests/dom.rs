@@ -535,3 +535,16 @@ fn slotted_clicks_reach_shadow_listeners_and_push_state() {
     }
     assert_eq!(text, "pop /start null");
 }
+
+#[test]
+fn declarative_shadow_roots_render_and_reach_scripts() {
+    let doc = run(r##"<body><div id="h"><template shadowrootmode="open"><style>p { color: red }</style><p id="in">shadow <slot></slot></p></template><span>light</span></div>
+        <p id="o"></p><script>
+        const h = document.getElementById("h");
+        document.getElementById("o").textContent = (h.shadowRoot ? "root " + h.shadowRoot.querySelector("#in").textContent.trim() : "none") + " / " + h.querySelectorAll("template").length;
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "root shadow / 0");
+    // Rendered: the shadow tree with the light span slotted in.
+    let rendered = text_of(&doc, "h").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(rendered.starts_with("[data-feather-host=") && rendered.ends_with("p{ color: red } shadow light"), "{rendered}");
+}
