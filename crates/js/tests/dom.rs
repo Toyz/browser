@@ -369,3 +369,50 @@ fn storage_and_cookies() {
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "a,b 1 2 x true");
 }
+
+/// Real network: `cargo test -p js streaming -- --ignored`.
+#[test]
+#[ignore]
+fn streaming_ndjson_and_event_source() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const out = [];
+        const log = (s) => { out.push(s); document.getElementById("o").textContent = out.join(" | "); };
+        (async () => {
+          const res = await fetch("https://httpbin.org/stream/5");
+          const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+          let buf = "", lines = 0;
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += value;
+            const parts = buf.split("\n");
+            buf = parts.pop();
+            for (const p of parts) if (p.trim()) { JSON.parse(p); lines++; }
+          }
+          log("ndjson " + lines);
+          const text = await (await fetch("https://httpbin.org/stream/3")).text();
+          log("text " + text.trim().split("\n").length);
+          const es = new EventSource("https://stream.wikimedia.org/v2/stream/recentchange");
+          let n = 0;
+          es.onopen = () => log("open");
+          es.onmessage = (e) => { if (++n === 2) { log("sse " + typeof e.data); es.close(); log("closed"); } };
+        })();
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    let mut text = text_of(&doc, "o");
+    if let Some(host) = &host {
+        let until = std::time::Instant::now() + Duration::from_secs(20);
+        while !text.contains("closed") && std::time::Instant::now() < until {
+            if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+                text = text_of(&d, "o");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    assert_eq!(text, "ndjson 5 | text 3 | open | sse string | closed");
+}

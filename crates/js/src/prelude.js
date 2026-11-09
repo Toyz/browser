@@ -1454,12 +1454,29 @@
     }
   }
   class TextDecoder {
-    constructor(label) { this.encoding = label || "utf-8"; }
-    decode(buf) {
-      if (!buf) return "";
-      const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer || buf);
+    constructor(label, opts) { this.encoding = label || "utf-8"; this.fatal = !!(opts && opts.fatal); this._pending = null; }
+    // `{stream: true}`: a character split across chunks waits for the rest.
+    decode(buf, opts) {
+      let b = !buf ? new Uint8Array(0) : buf instanceof Uint8Array ? buf : ArrayBuffer.isView(buf) ? new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength) : new Uint8Array(buf);
+      if (this._pending && this._pending.length) {
+        const joined = new Uint8Array(this._pending.length + b.length);
+        joined.set(this._pending);
+        joined.set(b, this._pending.length);
+        b = joined;
+      }
+      let end = b.length;
+      if (opts && opts.stream) {
+        let i = end - 1, back = 0;
+        while (i >= 0 && back < 3 && (b[i] & 0xc0) === 0x80) { i--; back++; }
+        if (i >= 0) {
+          const c = b[i];
+          const need = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
+          if (need > end - i) end = i;
+        }
+      }
+      this._pending = end < b.length ? b.slice(end) : null;
       let out = "";
-      for (let i = 0; i < b.length;) {
+      for (let i = 0; i < end;) {
         const c = b[i++];
         let cp = c;
         if (c >= 0xf0) cp = ((c & 7) << 18) | ((b[i++] & 63) << 12) | ((b[i++] & 63) << 6) | (b[i++] & 63);
@@ -1469,6 +1486,107 @@
       }
       return out;
     }
+  }
+
+  // Streams: enough for reading bodies chunk by chunk (NDJSON, SSE-ish
+  // protocols over fetch) and piping through text decoding.
+  class ReadableStream {
+    constructor(source) {
+      this._queue = []; this._waiters = []; this._done = false; this._error = null; this.locked = false;
+      const controller = {
+        enqueue: (c) => this._push(c), close: () => this._close(), error: (e) => this._fail(e),
+        get desiredSize() { return 1; },
+      };
+      this._controller = controller;
+      this._pull = source && source.pull ? () => { try { source.pull(controller); } catch (e) { this._fail(e); } } : null;
+      this._cancel = source && source.cancel ? (r) => source.cancel(r) : null;
+      if (source && source.start) { try { source.start(controller); } catch (e) { this._fail(e); } }
+    }
+    _push(c) { if (this._done) return; const w = this._waiters.shift(); if (w) w.resolve({ value: c, done: false }); else this._queue.push(c); }
+    _close() { if (this._done) return; this._done = true; for (const w of this._waiters.splice(0)) w.resolve({ value: undefined, done: true }); }
+    _fail(e) { this._error = e; for (const w of this._waiters.splice(0)) w.reject(e); }
+    getReader() {
+      if (this.locked) throw new TypeError("ReadableStream is locked");
+      this.locked = true;
+      const s = this;
+      return {
+        read() {
+          if (s._queue.length) return Promise.resolve({ value: s._queue.shift(), done: false });
+          if (s._error) return Promise.reject(s._error);
+          if (s._done) return Promise.resolve({ value: undefined, done: true });
+          return new Promise((resolve, reject) => { s._waiters.push({ resolve, reject }); if (s._pull) s._pull(); });
+        },
+        releaseLock() { s.locked = false; },
+        cancel(r) { if (s._cancel) s._cancel(r); s._queue = []; s._close(); return Promise.resolve(); },
+        get closed() { return new Promise((r) => { const t = setInterval(() => { if (s._done) { clearInterval(t); r(); } }, 10); }); },
+      };
+    }
+    cancel(r) { if (this._cancel) this._cancel(r); this._close(); return Promise.resolve(); }
+    pipeThrough(transform) {
+      this.pipeTo(transform.writable).catch((e) => transform.readable._fail(e));
+      return transform.readable;
+    }
+    async pipeTo(writable) {
+      const reader = this.getReader();
+      const writer = writable.getWriter();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        await writer.write(value);
+      }
+      await writer.close();
+    }
+    tee() {
+      const a = new ReadableStream(), b = new ReadableStream();
+      (async () => { const r = this.getReader(); for (;;) { const { value, done } = await r.read(); if (done) { a._close(); b._close(); return; } a._push(value); b._push(value); } })();
+      return [a, b];
+    }
+    async *[Symbol.asyncIterator]() {
+      const reader = this.getReader();
+      try { for (;;) { const { value, done } = await reader.read(); if (done) return; yield value; } } finally { reader.releaseLock(); }
+    }
+    static from(iterable) {
+      return new ReadableStream({ async start(c) { for await (const x of iterable) c.enqueue(x); c.close(); } });
+    }
+  }
+  class WritableStream {
+    constructor(sink) { this._sink = sink || {}; this.locked = false; }
+    getWriter() {
+      const sink = this._sink;
+      return {
+        write: (c) => Promise.resolve(sink.write && sink.write(c)),
+        close: () => Promise.resolve(sink.close && sink.close()),
+        abort: (r) => Promise.resolve(sink.abort && sink.abort(r)),
+        releaseLock() {}, get ready() { return Promise.resolve(); }, get desiredSize() { return 1; },
+      };
+    }
+  }
+  class TransformStream {
+    constructor(transformer) {
+      transformer = transformer || {};
+      const readable = new ReadableStream();
+      const controller = { enqueue: (c) => readable._push(c), error: (e) => readable._fail(e), terminate: () => readable._close() };
+      if (transformer.start) transformer.start(controller);
+      this.readable = readable;
+      this.writable = new WritableStream({
+        write: (c) => (transformer.transform ? transformer.transform(c, controller) : controller.enqueue(c)),
+        close: () => { if (transformer.flush) transformer.flush(controller); readable._close(); },
+        abort: (e) => readable._fail(e),
+      });
+    }
+  }
+  class TextDecoderStream extends TransformStream {
+    constructor(label, opts) {
+      const decoder = new TextDecoder(label, opts);
+      super({
+        transform(chunk, c) { const t = decoder.decode(chunk, { stream: true }); if (t) c.enqueue(t); },
+        flush(c) { const t = decoder.decode(); if (t) c.enqueue(t); },
+      });
+      this.encoding = decoder.encoding;
+    }
+  }
+  class TextEncoderStream extends TransformStream {
+    constructor() { const e = new TextEncoder(); super({ transform(chunk, c) { c.enqueue(e.encode(chunk)); } }); this.encoding = "utf-8"; }
   }
 
   class Blob {
@@ -1562,13 +1680,42 @@
       this.url = "";
       this.redirected = false;
       this.bodyUsed = false;
-      this.body = null;
     }
     get ok() { return this.status >= 200 && this.status < 300; }
+    // A fetched response's body arrives later: `_full` settles with it.
     _consume() {
       if (this.bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
       this.bodyUsed = true;
-      return Promise.resolve(this._text);
+      return this._full || Promise.resolve(this._text);
+    }
+    get body() {
+      if (this._stream) return this._stream;
+      const stream = (this._stream = new ReadableStream());
+      if (this._id !== undefined && !this._finished) N.fetchStream(this._id);
+      else { if (this._text) stream._push(new TextEncoder().encode(this._text)); stream._close(); }
+      return stream;
+    }
+    set body(_) {}
+    _chunk(latin1) {
+      if (!this._stream) return;
+      const bytes = new Uint8Array(latin1.length);
+      for (let i = 0; i < latin1.length; i++) bytes[i] = latin1.charCodeAt(i);
+      this._delivered = (this._delivered || 0) + bytes.length;
+      this._stream._push(bytes);
+    }
+    _finish(text) {
+      this._finished = true;
+      this._text = text;
+      if (this._stream) {
+        if (!this._delivered && text) this._stream._push(new TextEncoder().encode(text));
+        this._stream._close();
+      }
+      if (this._resolveFull) this._resolveFull(text);
+    }
+    _fail(e) {
+      this._finished = true;
+      if (this._stream) this._stream._fail(e);
+      if (this._rejectFull) this._rejectFull(e);
     }
     text() { return this._consume(); }
     json() { return this._consume().then((t) => JSON.parse(t)); }
@@ -1619,11 +1766,30 @@
     if (type && !req.headers.has("content-type")) req.headers.set("content-type", type);
     return new Promise((resolve, reject) => {
       const id = nextRequest++;
-      requests.set(id, (args) => {
-        if (args[1] !== null) { N.log("warn", "fetch " + req.url + ": " + args[1]); reject(new TypeError("Failed to fetch")); }
-        else resolve(toResponse(args));
+      let response = null;
+      const failed = (why) => { N.log("warn", "fetch " + req.url + ": " + why); return new TypeError("Failed to fetch"); };
+      // The promise settles with the head; the body follows.
+      const start = (args) => {
+        response = toResponse(args);
+        response._text = "";
+        response._id = id;
+        response._full = new Promise((res, rej) => { response._resolveFull = res; response._rejectFull = rej; });
+        response._full.catch(() => {});
+        resolve(response);
+      };
+      requests.set(id, {
+        head: start,
+        chunk: (data) => { if (response) response._chunk(data); },
+        done: (args) => {
+          if (args[1] !== null) { const e = failed(args[1]); if (response) response._fail(e); else reject(e); return; }
+          if (!response) start(args);
+          response._finish(args[6]);
+        },
       });
-      if (req.signal) req.signal.addEventListener("abort", () => { if (requests.delete(id)) reject(req.signal.reason); });
+      if (req.signal) req.signal.addEventListener("abort", () => {
+        if (!requests.delete(id)) return;
+        if (response) response._fail(req.signal.reason); else reject(req.signal.reason);
+      });
       N.fetch(id, req.method, req.url, req.headers._list(), body, req.mode, req.credentials);
     });
   }
@@ -1691,7 +1857,7 @@
       }
       const id = nextRequest++;
       this._id = id;
-      requests.set(id, (args) => this._finish(args));
+      requests.set(id, { head: () => {}, chunk: () => {}, done: (args) => this._finish(args) });
       N.fetch(id, this._method, this._url, this._headers._list(), text, "cors", credentials);
     }
     abort() {
@@ -1739,6 +1905,28 @@
   }
   Object.assign(WebSocket, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
   Object.assign(WebSocket.prototype, { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 });
+  const eventSources = new Map();
+  let nextEventSource = 1;
+  class EventSource extends EventTarget {
+    constructor(url, init) {
+      super();
+      this.withCredentials = !!(init && init.withCredentials);
+      this.readyState = 0;
+      this._id = nextEventSource++;
+      eventSources.set(this._id, this);
+      this.url = N.sseOpen(this._id, String(url), this.withCredentials);
+    }
+    close() { this.readyState = 2; eventSources.delete(this._id); N.sseClose(this._id); }
+  }
+  Object.assign(EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+  function sseEvent(id, kind, name, data, lastId) {
+    const es = eventSources.get(id);
+    if (!es) return;
+    if (kind === "open") { es.readyState = 1; es.dispatchEvent(new Event("open")); }
+    else if (kind === "message") { const ev = new MessageEvent(name, { data, origin: new URL(es.url).origin }); ev.lastEventId = lastId; es.dispatchEvent(ev); }
+    else if (kind === "error") { es.readyState = 0; es.dispatchEvent(new Event("error")); }
+    else if (kind === "close") { es.readyState = 2; eventSources.delete(id); es.dispatchEvent(new Event("error")); }
+  }
   function socketEvent(id, kind, data, code, reason, clean) {
     const ws = sockets.get(id);
     if (!ws) return;
@@ -1761,12 +1949,15 @@
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
     fetch, Headers, Request, Response, XMLHttpRequest, FormData, Blob, File, TextEncoder, TextDecoder,
     AbortController, AbortSignal, DOMException,
+    __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
+    __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },
     __fetchDone(...args) {
-      const done = requests.get(args[0]);
-      if (!done) return;
+      const r = requests.get(args[0]);
+      if (!r) return;
       requests.delete(args[0]);
-      done(args);
+      r.done(args);
     },
+    ReadableStream, WritableStream, TransformStream, TextDecoderStream, TextEncoderStream, EventSource, __sseEvent: sseEvent,
   });
 
   // ---- hooks for the host ----------------------------------------------

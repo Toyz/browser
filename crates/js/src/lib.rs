@@ -16,6 +16,7 @@ pub mod cors;
 mod dom;
 mod modules;
 pub mod storage;
+mod sse;
 pub mod websocket;
 
 use std::sync::Arc;
@@ -57,8 +58,15 @@ pub enum ToJs {
     Submit { form: NodeId, reply: mpsc::Sender<bool> },
     /// Something happened on one of the page's WebSockets.
     Socket { id: u32, event: websocket::SocketEvent },
+    /// A script's request got its response head (CORS allowing).
+    FetchHead { id: u32, head: cors::ScriptResponse },
+    /// More of the body, for a script reading it as a stream.
+    FetchChunk { id: u32, bytes: Vec<u8> },
     /// A request a script made finished (from its network thread).
     FetchDone { id: u32, result: Result<cors::ScriptResponse, String> },
+    /// An `EventSource` event: `open`, `error`, or a message (type, data,
+    /// last event id).
+    Sse { id: u32, kind: &'static str, event: String, data: String, last_id: String },
     Shutdown,
 }
 

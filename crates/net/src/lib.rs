@@ -193,14 +193,31 @@ impl HttpResponse {
 /// Make an HTTP request as a page's script asked (any method, headers and
 /// body). `data:` URLs work too.
 pub fn request(req: &HttpRequest) -> Result<HttpResponse> {
-    if req.url.scheme() == "data" {
-        let body = decode_data_url(req.url.as_str())?;
-        let mime = req.url.path().split([',', ';']).next().unwrap_or("text/plain").to_owned();
-        return Ok(HttpResponse { url: req.url.clone(), status: 200, status_text: "OK".into(), headers: vec![("content-type".into(), mime)], body });
-    }
-    if req.url.scheme() == "file" {
-        let body = file::read(&req.url)?;
-        return Ok(HttpResponse { url: req.url.clone(), status: 200, status_text: "OK".into(), headers: Vec::new(), body });
+    let mut body = Vec::new();
+    let mut head = request_streaming(req, |_| true, |chunk| {
+        body.extend_from_slice(chunk);
+        true
+    })?;
+    head.body = body;
+    Ok(head)
+}
+
+/// The same, streamed: `on_head` sees the status and headers (`false`
+/// stops there), then `on_chunk` each piece of the body as it arrives
+/// (`false` stops reading). Returns the head (with an empty body).
+pub fn request_streaming(
+    req: &HttpRequest,
+    mut on_head: impl FnMut(&HttpResponse) -> bool,
+    mut on_chunk: impl FnMut(&[u8]) -> bool,
+) -> Result<HttpResponse> {
+    if matches!(req.url.scheme(), "data" | "file") {
+        let body = if req.url.scheme() == "data" { decode_data_url(req.url.as_str())? } else { file::read(&req.url)? };
+        let mime = if req.url.scheme() == "data" { req.url.path().split([',', ';']).next().unwrap_or("text/plain").to_owned() } else { String::new() };
+        let head = HttpResponse { url: req.url.clone(), status: 200, status_text: "OK".into(), headers: vec![("content-type".into(), mime)], body: Vec::new() };
+        if on_head(&head) {
+            on_chunk(&body);
+        }
+        return Ok(head);
     }
     if !matches!(req.url.scheme(), "http" | "https") {
         bail!("unsupported scheme: {}", req.url.scheme());
@@ -227,24 +244,35 @@ pub fn request(req: &HttpRequest) -> Result<HttpResponse> {
         None => agent.run(builder.body(())?),
     };
     let mut response = result.with_context(|| format!("failed to fetch {}", req.url))?;
-    let final_url = Url::parse(&ureq::ResponseExt::get_uri(&response).to_string()).unwrap_or_else(|_| req.url.clone());
-    let status = response.status();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.as_str().to_ascii_lowercase(), v.to_str().unwrap_or_default().to_owned()))
-        .collect();
-    let body = response.body_mut().with_config().limit(MAX_BODY_BYTES).read_to_vec().context("reading the response")?;
     if req.cookies {
         save_cookies();
     }
-    Ok(HttpResponse {
+    let final_url = Url::parse(&ureq::ResponseExt::get_uri(&response).to_string()).unwrap_or_else(|_| req.url.clone());
+    let status = response.status();
+    let head = HttpResponse {
         url: final_url,
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or("").to_owned(),
-        headers,
-        body,
-    })
+        headers: response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_ascii_lowercase(), v.to_str().unwrap_or_default().to_owned()))
+            .collect(),
+        body: Vec::new(),
+    };
+    if !on_head(&head) {
+        return Ok(head);
+    }
+    use std::io::Read as _;
+    let mut reader = response.body_mut().with_config().limit(MAX_BODY_BYTES).reader();
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        let n = reader.read(&mut buf).context("reading the response")?;
+        if n == 0 || !on_chunk(&buf[..n]) {
+            break;
+        }
+    }
+    Ok(head)
 }
 
 /// `document.cookie` for a page: the jar's cookies for its URL, minus

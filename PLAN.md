@@ -143,7 +143,8 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] Changes mark the page dirty → restyle → `cx.notify()`
 - [x] `fetch` / `XMLHttpRequest` with CORS (preflight, credentials, exposed headers), `FormData`, `submit`/`change`/`input` from the page's widgets
 - [ ] `history.pushState` navigation (needed for SPAs)
-- [ ] ES modules, custom elements, shadow DOM (`<slot>`, constructable stylesheets)
+- [x] ES modules, custom elements, shadow DOM (`<slot>`, constructable stylesheets)
+- [x] Streams (`ReadableStream` bodies), `EventSource`, `WebSocket`, `crypto.subtle`, web storage, `document.cookie`
 - [ ] Stub everything else (no-ops / plausible defaults)
 
 **Done when:** a Preact or React todo app works, and a common SPA's first screen renders.

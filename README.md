@@ -42,11 +42,11 @@ It is deeply cursed, and it renders Wikipedia.
 
 Pages' scripts run in [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, on a thread per page that owns the page's DOM. Every task that changes the DOM sends the tab a snapshot, which is restyled and laid out like any page. The DOM API is mostly JavaScript (a [prelude](crates/js/src/prelude.js) over a few dozen native functions that take node ids), so wrappers and listeners live where the garbage collector can see them.
 
-What's there: the DOM (queries through our own selector engine, `innerHTML` through html5ever, events with capture/bubble/`preventDefault`, inline handlers), timers, promises and `async`, `fetch` and `XMLHttpRequest` with real CORS (preflights, credentials, exposed headers), `FormData`, `Intl` (ICU, with time zones from Temporal), form fields and `submit` events, `location`, storage. Wikipedia gets its JavaScript layout and blizztrack's search works.
+What's there: the DOM (queries through our own selector engine, `innerHTML` through html5ever, events with capture/bubble/`preventDefault`, inline handlers), timers, promises and `async`, ES modules (static and dynamic `import`), custom elements and shadow DOM (slots, scoped and constructed stylesheets), `fetch` and `XMLHttpRequest` with real CORS (preflights, credentials, exposed headers) and streamed bodies (`ReadableStream`, NDJSON), `EventSource`, `WebSocket`, `crypto.subtle`, `localStorage`/`sessionStorage` and `document.cookie` on the real cookie jar, `FormData`, `Intl` (ICU, with time zones from Temporal), form fields and `submit` events, `location`, storage. Wikipedia gets its JavaScript layout, blizztrack's search works, and badgedirectory.com (a web-component app on WebSockets and signed RPC) renders.
 
 ## What doesn't (yet)
 
-ES modules, custom elements and shadow DOM (so web-component apps stay blank), layout queries (`getBoundingClientRect` is zeros), rotating text and photos, `conic-gradient`, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md). `FEATHER_NO_JS=1` turns scripts off.
+Layout queries (`getBoundingClientRect` is zeros), rotating text and photos, `conic-gradient`, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md). `FEATHER_NO_JS=1` turns scripts off.
 
 ## Running it
 

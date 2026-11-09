@@ -49,6 +49,8 @@ fn origin_of(url: &Url) -> String {
 fn safelisted(name: &str, value: &str) -> bool {
     match name {
         "accept" | "accept-language" | "content-language" => value.len() <= 128,
+        // EventSource's reconnects.
+        "last-event-id" => value.len() <= 128,
         "content-type" => {
             let essence = value.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
             matches!(essence.as_str(), "application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain")
@@ -57,9 +59,28 @@ fn safelisted(name: &str, value: &str) -> bool {
     }
 }
 
-/// Run a script's request. `Err` is a network error (`TypeError: Failed to
-/// fetch`), with the reason for the console.
+/// Run a script's request, whole. `Err` is a network error (`TypeError:
+/// Failed to fetch`), with the reason for the console.
 pub fn fetch(page: &Url, req: ScriptRequest) -> Result<ScriptResponse, String> {
+    let mut head = None;
+    let mut body = Vec::new();
+    fetch_streaming(page, req, |h| head = Some(h), |chunk| {
+        body.extend_from_slice(chunk);
+        true
+    })?;
+    let mut response = head.ok_or("no response")?;
+    response.body = body;
+    Ok(response)
+}
+
+/// The same, streamed: `on_head` gets the response (empty body) once CORS
+/// allows it, then `on_chunk` the body as it arrives.
+pub fn fetch_streaming(
+    page: &Url,
+    req: ScriptRequest,
+    mut on_head: impl FnMut(ScriptResponse),
+    mut on_chunk: impl FnMut(&[u8]) -> bool,
+) -> Result<(), String> {
     let headers: Vec<(String, String)> = req
         .headers
         .into_iter()
@@ -77,8 +98,17 @@ pub fn fetch(page: &Url, req: ScriptRequest) -> Result<ScriptResponse, String> {
 
     if same_origin || data || page.scheme() == "file" {
         let cookies = req.credentials != "omit";
-        let response = net::request(&HttpRequest { method, url: req.url.clone(), headers, body: req.body, cookies }).map_err(|e| format!("{e:#}"))?;
-        return Ok(basic(response, &req.url, "basic"));
+        let requested = req.url.clone();
+        net::request_streaming(
+            &HttpRequest { method, url: req.url.clone(), headers, body: req.body, cookies },
+            |head| {
+                on_head(basic(head.clone(), &requested, "basic"));
+                true
+            },
+            &mut on_chunk,
+        )
+        .map_err(|e| format!("{e:#}"))?;
+        return Ok(());
     }
     match req.mode.as_str() {
         "same-origin" => return Err(format!("{} is cross-origin (mode: same-origin)", req.url)),
@@ -89,7 +119,7 @@ pub fn fetch(page: &Url, req: ScriptRequest) -> Result<ScriptResponse, String> {
             }
             let cookies = req.credentials == "include";
             net::request(&HttpRequest { method, url: req.url.clone(), headers, body: req.body, cookies }).map_err(|e| format!("{e:#}"))?;
-            return Ok(ScriptResponse {
+            on_head(ScriptResponse {
                 kind: "opaque",
                 url: req.url,
                 status: 0,
@@ -98,6 +128,7 @@ pub fn fetch(page: &Url, req: ScriptRequest) -> Result<ScriptResponse, String> {
                 body: Vec::new(),
                 redirected: false,
             });
+            return Ok(());
         }
         _ => {}
     }
@@ -145,20 +176,36 @@ pub fn fetch(page: &Url, req: ScriptRequest) -> Result<ScriptResponse, String> {
     }
     let mut actual = headers;
     actual.push(("origin".into(), origin.clone()));
-    let response = net::request(&HttpRequest { method, url: req.url.clone(), headers: actual, body: req.body, cookies: credentials })
-        .map_err(|e| format!("{e:#}"))?;
-    allowed_origin(&response, &origin, credentials)?;
-    let exposed: Vec<String> = response
-        .header("access-control-expose-headers")
-        .unwrap_or("")
-        .split(',')
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let all = !credentials && exposed.iter().any(|e| e == "*");
-    let mut out = basic(response, &req.url, "cors");
-    out.headers.retain(|(k, _)| SAFELISTED_RESPONSE.contains(&k.as_str()) || all || exposed.contains(k));
-    Ok(out)
+    let mut refused = None;
+    let requested = req.url.clone();
+    net::request_streaming(
+        &HttpRequest { method, url: req.url.clone(), headers: actual, body: req.body, cookies: credentials },
+        |response| {
+            // Nothing of a response the page may not read reaches it.
+            if let Err(e) = allowed_origin(response, &origin, credentials) {
+                refused = Some(e);
+                return false;
+            }
+            let exposed: Vec<String> = response
+                .header("access-control-expose-headers")
+                .unwrap_or("")
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let all = !credentials && exposed.iter().any(|e| e == "*");
+            let mut out = basic(response.clone(), &requested, "cors");
+            out.headers.retain(|(k, _)| SAFELISTED_RESPONSE.contains(&k.as_str()) || all || exposed.contains(k));
+            on_head(out);
+            true
+        },
+        &mut on_chunk,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    match refused {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// The response's `Access-Control-Allow-Origin` lets `origin` read it.

@@ -121,6 +121,10 @@ pub(crate) struct Dom {
     fetches: usize,
     /// The tab, for sessionStorage.
     session: u64,
+    /// Responses in flight: whether the page reads them as streams.
+    streams: HashMap<u32, Arc<std::sync::atomic::AtomicBool>>,
+    /// Open EventSources: set to stop them.
+    event_sources: HashMap<u32, Arc<std::sync::atomic::AtomicBool>>,
     /// Open WebSockets: where their outgoing frames go.
     sockets: HashMap<u32, mpsc::Sender<crate::websocket::Outgoing>>,
 }
@@ -155,6 +159,8 @@ impl Runtime {
             fetch_tx,
             fetches: 0,
             sockets: HashMap::new(),
+            streams: HashMap::new(),
+            event_sources: HashMap::new(),
             session: opts.session,
             shadows: HashMap::new(),
             hosts: HashMap::new(),
@@ -459,6 +465,16 @@ impl Runtime {
                 }
             }
             ToJs::FetchDone { id, result } => self.fetch_done(id, result),
+            ToJs::FetchHead { id, head } => {
+                let args = response_args(id, Ok(head), &mut self.cx);
+                self.call_global("__fetchHead", &args);
+            }
+            ToJs::FetchChunk { id, bytes } => {
+                self.call_global("__fetchChunk", &[JsValue::from(id), js_str(&latin1(&bytes))]);
+            }
+            ToJs::Sse { id, kind, event, data, last_id } => {
+                self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
+            }
             ToJs::Socket { id, event } => self.socket_event(id, event),
             ToJs::Checked { node, checked } => {
                 self.call_global("__dispatchChecked", &[JsValue::from(node_to_number(node)), JsValue::from(checked)]);
@@ -501,7 +517,10 @@ impl Runtime {
 
     /// Hand a finished request to its promise (or XHR).
     fn fetch_done(&mut self, id: u32, result: Result<crate::cors::ScriptResponse, String>) {
-        self.dom.borrow_mut().fetches -= 1;
+        let mut dom = self.dom.borrow_mut();
+        dom.fetches = dom.fetches.saturating_sub(1);
+        dom.streams.remove(&id);
+        drop(dom);
         let args = response_args(id, result, &mut self.cx);
         self.call_global("__fetchDone", &args);
     }
@@ -975,6 +994,9 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let tx = dom.fetch_tx.clone();
         dom.fetches += 1;
         let debug = dom.debug;
+        // Set when the page asks for the body as a stream.
+        let streaming = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dom.streams.insert(id, streaming.clone());
         drop(dom);
         let Some(req) = req else {
             tx.send(ToJs::FetchDone { id, result: Err("invalid URL".into()) }).ok();
@@ -985,7 +1007,33 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             .spawn(move || {
                 let t = Instant::now();
                 let what = format!("{} {}", req.method, req.url);
-                let result = crate::cors::fetch(&page, req);
+                let mut head = None;
+                let mut body: Vec<u8> = Vec::new();
+                let mut sent = 0;
+                let result = crate::cors::fetch_streaming(
+                    &page,
+                    req,
+                    |h| {
+                        tx.send(ToJs::FetchHead { id, head: h.clone() }).ok();
+                        head = Some(h);
+                    },
+                    |chunk| {
+                        body.extend_from_slice(chunk);
+                        if streaming.load(std::sync::atomic::Ordering::Relaxed) {
+                            tx.send(ToJs::FetchChunk { id, bytes: body[sent..].to_vec() }).ok();
+                            sent = body.len();
+                        }
+                        true
+                    },
+                );
+                if streaming.load(std::sync::atomic::Ordering::Relaxed) && sent < body.len() {
+                    tx.send(ToJs::FetchChunk { id, bytes: body[sent..].to_vec() }).ok();
+                }
+                let result = result.and_then(|()| {
+                    let mut r = head.ok_or_else(|| "no response".to_owned())?;
+                    r.body = body;
+                    Ok(r)
+                });
                 if debug {
                     match &result {
                         Ok(r) => eprintln!("js: fetch {what} → {} ({} bytes) in {:?}", r.status, r.body.len(), t.elapsed()),
@@ -995,6 +1043,35 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
                 tx.send(ToJs::FetchDone { id, result }).ok();
             })
             .ok();
+        Ok(JsValue::undefined())
+    }));
+    // The page wants this response's body as a stream from now on.
+    add("fetchStream", 1, Box::new(|d, a, _| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        if let Some(flag) = d.borrow().streams.get(&id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(JsValue::undefined())
+    }));
+    // sseOpen(id, url, withCredentials): an EventSource connection.
+    add("sseOpen", 3, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let href = arg_string(a, 1, cx)?;
+        let credentials = a.get_or_undefined(2).to_boolean();
+        let mut dom = d.borrow_mut();
+        let Some(url) = dom.doc.resolve_url(&href) else {
+            return Err(boa_engine::JsNativeError::syntax().with_message(format!("invalid EventSource URL {href}")).into());
+        };
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        dom.event_sources.insert(id, closed.clone());
+        crate::sse::open(id, dom.doc.url.clone(), url.clone(), credentials, closed, dom.fetch_tx.clone());
+        Ok(js_str(url.as_str()))
+    }));
+    add("sseClose", 1, Box::new(|d, a, _| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        if let Some(flag) = d.borrow_mut().event_sources.remove(&id) {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(JsValue::undefined())
     }));
     // wsOpen(id, url, [protocols]): connect in the background.
