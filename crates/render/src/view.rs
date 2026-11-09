@@ -774,12 +774,68 @@ fn render_paragraph(p: &Arc<Paragraph>, cx: &RenderCx) -> AnyElement {
     if p.style.white_space.wraps() {
         flow.into_any_element()
     } else {
-        // Unwrapped text (pre, nowrap) scrolls sideways instead of overflowing.
+        // Unwrapped text (pre, nowrap) scrolls sideways instead of
+        // overflowing: as wide as its longest line, inside a scroller.
+        let handle = sideways::handle(p);
+        let claim = handle.clone();
         div()
             .id(("nowrap", p.id))
+            .flex()
+            .flex_row()
             .overflow_x_scroll()
-            .child(flow)
+            .track_scroll(&handle)
+            .on_scroll(move |event, _, _| sideways::maybe_claim(&claim, event))
+            .child(div().flex_none().min_w_full().child(flow))
             .into_any_element()
+    }
+}
+
+/// Sideways scrolling inside the page (`<pre>` and nowrap text) wins over
+/// the shell's swipe-to-go-back while there's room to scroll that way.
+pub mod sideways {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use gpui_kit::{ScrollEvent, ScrollHandle, px};
+
+    use crate::boxes::Paragraph;
+
+    thread_local! {
+        /// Scroll positions per paragraph (by address: a new layout starts
+        /// over at the left).
+        static HANDLES: RefCell<HashMap<usize, ScrollHandle>> = RefCell::new(HashMap::new());
+        static CLAIMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn handle(p: &Arc<Paragraph>) -> ScrollHandle {
+        HANDLES.with_borrow_mut(|h| {
+            if h.len() > 2000 {
+                h.clear();
+            }
+            h.entry(Arc::as_ptr(p) as usize).or_default().clone()
+        })
+    }
+
+    pub(crate) fn maybe_claim(handle: &ScrollHandle, event: &ScrollEvent) {
+        let d = event.delta.pixel_delta(px(20.));
+        if d.x.abs() <= d.y.abs() {
+            return;
+        }
+        let (at, max) = (-handle.offset().x, handle.max_offset().x);
+        // The element's own scrolling may have run already: where it was
+        // before this event counts too. Positive x moves towards the start.
+        let before = at + d.x;
+        let room = if d.x > px(0.) { at > px(0.) || before > px(0.) } else { at < max || before < max };
+        if room {
+            CLAIMED.set(true);
+        }
+    }
+
+    /// Whether the scroll event being dispatched was taken by page content
+    /// (and clears it for the next one).
+    pub fn take_claim() -> bool {
+        CLAIMED.replace(false)
     }
 }
 

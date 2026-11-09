@@ -1060,7 +1060,7 @@ impl Tab {
             if let Some((dx, end)) = job.swipe {
                 cx.update(|window, cx| {
                     window.draw(cx).clear(cx);
-                    let position = point(px(500.), px(300.));
+                    let position = point(px(500.), window.viewport_size().height * 0.6);
                     let event = |delta: f32, touch_phase| {
                         PlatformInput::Scroll(ScrollEvent {
                             position,
@@ -1070,6 +1070,11 @@ impl Tab {
                             source: Default::default(),
                         })
                     };
+                    // Scrolls go to what's under the pointer.
+                    window.dispatch_event(
+                        PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }),
+                        cx,
+                    );
                     window.dispatch_event(event(0.0, TouchPhase::Started), cx);
                     for _ in 0..10 {
                         window.dispatch_event(event(dx / 10.0, TouchPhase::Moved), cx);
@@ -1326,6 +1331,8 @@ impl Tab {
         let delta = event.delta.pixel_delta(px(20.));
         let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
         let width = f32::from(window.viewport_size().width);
+        // Page content scrolling sideways (a wide <pre>) keeps the gesture.
+        let claimed = render::view::sideways::take_claim();
         match event.touch_phase {
             TouchPhase::Started => {
                 self.swipe_active = self.swipe_release.is_none();
@@ -1334,7 +1341,7 @@ impl Tab {
             }
             TouchPhase::Moved => {
                 // Mostly sideways, and somewhere to go that way.
-                if self.swipe_active && (dx.abs() > dy.abs() * 1.5 || self.swipe != 0.0) {
+                if self.swipe_active && ((dx.abs() > dy.abs() * 1.5 && !claimed) || self.swipe != 0.0) {
                     let next = self.swipe + dx;
                     let open = (next > 0.0 && self.can_go_back()) || (next < 0.0 && self.can_go_forward());
                     // Nowhere to go: the page gives a little, reluctantly.
