@@ -407,11 +407,12 @@ struct Declarations {
 /// Split a trailing `!important` off a raw declaration value.
 fn split_important(raw: &str) -> (&str, bool) {
     let trimmed = raw.trim_end();
-    let lower_tail = trimmed.len().checked_sub("important".len()).map(|i| &trimmed[i..]);
+    // `get`: the cut may fall inside a multi-byte character (`content: "英"`).
+    let lower_tail = trimmed.len().checked_sub("important".len()).and_then(|i| trimmed.get(i..));
     if let Some(tail) = lower_tail
         && tail.eq_ignore_ascii_case("important")
     {
-        let before = trimmed[..trimmed.len() - "important".len()].trim_end();
+        let before = trimmed.get(..trimmed.len() - "important".len()).unwrap_or("").trim_end();
         if let Some(value) = before.strip_suffix('!') {
             return (value, true);
         }
@@ -466,6 +467,26 @@ mod tests {
     use crate::values::*;
 
     #[test]
+    fn multibyte_values_dont_panic() {
+        assert_eq!(split_important("\"英\""), ("\"英\"", false));
+        assert_eq!(split_important("red !important"), ("red ", true));
+        let sheet = parse_stylesheet(r#"a::after{content:"英"}@font-face{font-family:X;src:url(https://e.com/x.woff2)}"#);
+        assert_eq!(sheet.font_faces.len(), 1);
+    }
+
+    #[test]
+    fn font_faces_by_unicode_range() {
+        let base = url::Url::parse("https://developer.mozilla.org/en-US/docs/x").unwrap();
+        let sheet = crate::props::with_base(Some(&base), || parse_stylesheet(
+            r#"@font-face{font-display:swap;font-family:Inter;font-feature-settings:"calt" 0;font-style:normal;font-weight:100 900;src:url(/a.woff2) format("woff2");unicode-range:u+00??,u+0131,u+2000-206f}
+               @font-face{font-family:Inter;src:url(/cyr.woff2) format("woff2");unicode-range:u+0301,u+0400-045f}"#,
+        ));
+        let urls: Vec<&str> = sheet.font_faces.iter().flat_map(|f| f.sources.iter().map(|(u, _)| &**u)).collect();
+        assert_eq!(urls, vec!["https://developer.mozilla.org/a.woff2"]);
+        assert_eq!(sheet.font_faces[0].weight, (100, 900));
+    }
+
+    #[test]
     fn parses_rules_media_and_important() {
         let css = r#"
             @import url("base.css") screen;
@@ -497,3 +518,4 @@ mod tests {
         assert_eq!(important, vec![Decl::Display(Display::None)]);
     }
 }
+

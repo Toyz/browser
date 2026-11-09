@@ -569,6 +569,7 @@ impl Tab {
         let mut known = false;
         // Only families the page actually asks for (a font CSS may declare dozens).
         let used = styles.used_font_families();
+        let face_count = styles.font_faces().len();
         {
             let registry = cx.global::<crate::fonts::WebFonts>();
             for face in styles.font_faces() {
@@ -595,7 +596,7 @@ impl Tab {
             self.fonts_changed(cx);
         }
         if std::env::var_os("BROWSER_DEBUG").is_some() {
-            eprintln!("web fonts: used {:?}, fetching {:?}", used.len(), fetch.iter().map(|f| (&f.0, &f.1)).collect::<Vec<_>>());
+            eprintln!("web fonts: used {}, faces {face_count}, fetching {:?}", used.len(), fetch.iter().map(|f| (&f.0, &f.1)).collect::<Vec<_>>());
         }
         if fetch.is_empty() {
             return;
