@@ -825,8 +825,23 @@
     }
     getAttributeNames() { return N.attrNames(this.__id); }
     get attributes() {
-      const list = N.attrNames(this.__id).map((name) => ({ name, value: this.getAttribute(name), localName: name }));
-      list.getNamedItem = (n) => list.find((a) => a.name === n) || null;
+      // A NamedNodeMap: indexed, and by name (`attributes.class`).
+      const el = this;
+      const list = N.attrNames(this.__id).map((name) => ({
+        name, localName: name, namespaceURI: null, prefix: null, specified: true, ownerElement: el,
+        get value() { return el.getAttribute(name) ?? ""; },
+        set value(v) { el.setAttribute(name, v); },
+        get nodeValue() { return this.value; },
+        nodeType: 2, nodeName: name,
+      }));
+      for (const a of list) if (!(a.name in list) && !/^\d+$/.test(a.name)) Object.defineProperty(list, a.name, { value: a, enumerable: false });
+      Object.defineProperties(list, {
+        item: { value: (i) => list[i] || null },
+        getNamedItem: { value: (n) => list.find((a) => a.name === String(n).toLowerCase()) || null },
+        getNamedItemNS: { value: (_, n) => list.find((a) => a.name === n) || null },
+        setNamedItem: { value: (a) => { el.setAttribute(a.name, a.value); return null; } },
+        removeNamedItem: { value: (n) => { const a = list.getNamedItem(n); el.removeAttribute(n); return a; } },
+      });
       return list;
     }
     getAttributeNS(_, name) { return this.getAttribute(name); }
