@@ -563,3 +563,13 @@ fn cssom_rules_render() {
     let css = text_of(&doc, "s");
     assert!(css.contains(".a { color: red }") && css.contains("@media (min-width: 1px) { .b { color: blue } }") && !css.contains(".c"), "{css}");
 }
+
+#[test]
+fn relative_time_and_date_constructor() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+        const d = new Date(0);
+        document.getElementById("o").textContent = [rtf.format(-1, "day"), rtf.format(3, "weeks"), new Intl.RelativeTimeFormat("en").format(-2, "year"), String(d.constructor === Date), String(new d.constructor(5).getTime())].join(" | ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "yesterday | in 3 weeks | 2 years ago | true | 5");
+}

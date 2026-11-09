@@ -118,6 +118,48 @@
     Date.prototype.toLocaleDateString = function (l, o) { return new DateTimeFormat(l, locale(o, { year: "numeric", month: "numeric", day: "numeric" })).format(this); };
     Date.prototype.toLocaleTimeString = function (l, o) { return new DateTimeFormat(l, locale(o, { hour: "numeric", minute: "2-digit", second: "2-digit" })).format(this); };
   }
+  // Intl.RelativeTimeFormat (Boa lacks it): English, "in 3 days" / "3
+  // days ago", numeric: "auto" says "yesterday", "next week"...
+  if (typeof Intl !== "undefined" && !Intl.RelativeTimeFormat) {
+    const UNITS = ["year", "quarter", "month", "week", "day", "hour", "minute", "second"];
+    const AUTO = {
+      day: { "-1": "yesterday", "0": "today", "1": "tomorrow" },
+      year: { "-1": "last year", "0": "this year", "1": "next year" },
+      quarter: { "-1": "last quarter", "0": "this quarter", "1": "next quarter" },
+      month: { "-1": "last month", "0": "this month", "1": "next month" },
+      week: { "-1": "last week", "0": "this week", "1": "next week" },
+      hour: { "0": "this hour" }, minute: { "0": "this minute" }, second: { "0": "now" },
+    };
+    const SHORT = { year: "yr.", quarter: "qtr.", month: "mo.", week: "wk.", day: "day", hour: "hr.", minute: "min.", second: "sec." };
+    class RelativeTimeFormat {
+      constructor(locale, options) {
+        this._o = Object.assign({ numeric: "always", style: "long", localeMatcher: "best fit" }, options || {});
+        this._locale = Array.isArray(locale) ? locale[0] || "en-US" : locale || "en-US";
+      }
+      static supportedLocalesOf(l) { return (Array.isArray(l) ? l : [l]).filter(Boolean); }
+      resolvedOptions() { return { locale: this._locale, numberingSystem: "latn", ...this._o }; }
+      _unit(unit) {
+        const u = String(unit).replace(/s$/, "");
+        if (!UNITS.includes(u)) throw new RangeError("Invalid unit argument for format() '" + unit + "'");
+        return u;
+      }
+      formatToParts(value, unit) {
+        const u = this._unit(unit);
+        const v = Number(value);
+        if (!isFinite(v)) throw new RangeError("Invalid value");
+        if (this._o.numeric === "auto" && AUTO[u] && AUTO[u][String(v)] !== undefined) return [{ type: "literal", value: AUTO[u][String(v)] }];
+        const n = Math.abs(v);
+        const num = new Intl.NumberFormat(this._locale).format(n);
+        const name = this._o.style === "long" ? u + (n === 1 ? "" : "s") : SHORT[u];
+        const past = v < 0 || Object.is(v, -0);
+        return past
+          ? [{ type: "integer", value: num, unit: u }, { type: "literal", value: " " + name + " ago" }]
+          : [{ type: "literal", value: "in " }, { type: "integer", value: num, unit: u }, { type: "literal", value: " " + name }];
+      }
+      format(value, unit) { return this.formatToParts(value, unit).map((p) => p.value).join(""); }
+    }
+    Intl.RelativeTimeFormat = RelativeTimeFormat;
+  }
   if (typeof Intl !== "undefined" && Intl.NumberFormat && !Intl.NumberFormat.prototype.formatToParts) {
     legacy(Intl.NumberFormat.prototype, "formatToParts", function (n) {
       const parts = [];
@@ -177,6 +219,8 @@
       },
     });
     NativeDate.parse = parse;
+    // Dates' constructor is the Date pages see (`d.constructor === Date`).
+    Object.defineProperty(NativeDate.prototype, "constructor", { value: global.Date, writable: true, configurable: true });
   }
   // Boa prints classes as `function X() { [native code] }`; frameworks tell
   // classes from factories by the source starting with `class`. Calling a
