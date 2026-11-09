@@ -96,7 +96,7 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] `calc()` in media queries; CSS block semantics for auto-margin boxes
 - [x] Interactive states: `:hover` (blocks report via GPUI hover, inline elements via the inline engine's hit-testing; the chain includes flattened ancestors), `:active`, `:target`, `:focus*` matching (nothing focusable yet). Restyles run in the background only when the page has state rules. CSS `cursor`.
 - [ ] Faster state restyles: today a hover change re-runs style + layout for the whole page (~35ms on Wikipedia). Restyle only the affected subtree / rows.
-- [ ] `transition` (interpolate colors/opacity over frames)
+- [ ] `transition` / `@keyframes` animations: interpolate paint properties (colors, opacity, transforms) per frame on top of the hover patcher, no re-layout (a compositor-style fast path)
 - [ ] Dark mode (`prefers-color-scheme: dark` + a dark canvas)
 - [x] Re-style on window resize: rules keep their `@media` conditions; pages keep `Document` + `StyleData`; when a condition flips, restyle + re-layout in the background (debounced) and swap, keeping scroll position. (Viewport units only update on breakpoint changes for now.)
 - [ ] CSS nesting, `::before/::after` content (Wikipedia's "[edit]" brackets), fonts from `@font-face`
@@ -112,7 +112,8 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] **Inline layout engine** ([inline.rs](crates/render/src/inline.rs)): our own GPUI element. Words measured with GPUI's shaper, greedy line breaking, CSS line boxes (per-run font sizes, line-height, `vertical-align`), inline-box decorations (`<code>` chips, `<mark>`), images in the line, real min/max-content answers, link hit-testing.
 - [ ] Inline layout, still missing: text wrapping *under* floats, `inline-flex`/`inline-grid` in the line, `text-indent`, justify, breaking overlong words, text selection
 - [ ] Tables (approximate with grid)
-- [ ] Forms: text inputs, buttons, GET form submission
+- [x] Forms: text inputs (gpui-kit editors in CSS-styled boxes), textareas, checkboxes, radios, selects, buttons, labels; GET and POST submission; `:checked`/`:focus`/`:disabled`...
+- [x] Source view: CSS/JS/JSON responses and `view-source:` in a highlighted code editor, minified code pretty-printed
 - [ ] Find in page, text selection & copy, zoom
 - [x] `position: relative` (offsets), `absolute` (relative to the parent box, painted on top via GPUI `deferred()`), `fixed` (viewport overlay layer). Absolute boxes with no positioned ancestor (besides html/body) stay hidden; `sticky` is static for now.
 - [x] Real `inline-block`: with inline content, atomic objects laid out as nested inline flows; with block content, real GPUI subtrees laid out as absolute children of the inline element, measured with last frame's sizes and moved into their line slot (one extra frame to settle). Shrink-to-fit, margins, borders, radius, `vertical-align: top/middle/bottom`
@@ -149,7 +150,8 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [ ] Cookies and login flows
 - [x] Performance pass 1 (measured with `--bench`): engine/render crates optimized in dev builds; inline layouts + shaped text cached across frames in element state; shaped lines behind `Rc`; restyles reuse unchanged rows (keeping caches); hover restyles re-measure only visible rows; absolute children no longer block row splitting; in-memory subresource cache; back/forward page cache with scroll restore; loading bar. Wikipedia scroll: 39ms → ~1.3ms/frame.
 - [x] Performance pass 2: grids and flex columns split into rows (blizztrack's home page: 1 → 148 rows); links prerender on hover; text shaping cached by content across pages and tabs; images shared between consecutive pages show up instantly; hover restyles wait for scrolling to stop and only re-measure rows that changed
-- [ ] Performance: incremental restyle (only affected subtrees), web fonts off the critical path
+- [x] Hover patching: state changes restyle only the elements involved and patch paint-only changes into the layout (~0.5ms)
+- [ ] Performance: incremental restyle for layout-affecting changes, web fonts off the critical path
 
 ---
 
