@@ -19,7 +19,86 @@ pub struct Response {
     pub status: u16,
     pub content_type: Option<String>,
     pub body: String,
+    /// A 401 asking for HTTP Basic credentials: the realm it named.
+    pub auth_realm: Option<String>,
 }
+
+/// Where the browser keeps state between runs (the cookie jar). `None`
+/// (the default, and screenshot runs): memory only.
+static STATE_DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+
+/// Set up persistence: load saved cookies from `dir`, save them there later.
+pub fn init(dir: Option<std::path::PathBuf>) {
+    if let Some(dir) = &dir
+        && let Ok(file) = std::fs::File::open(dir.join("cookies.json"))
+    {
+        let _ = agent().cookie_jar_lock().load_json(std::io::BufReader::new(file));
+    }
+    STATE_DIR.set(dir).ok();
+}
+
+/// Write the cookie jar out (after responses that may have set cookies).
+fn save_cookies() {
+    let Some(Some(dir)) = STATE_DIR.get() else { return };
+    let mut out = Vec::new();
+    if agent().cookie_jar_lock().save_json(&mut out).is_ok() {
+        std::fs::create_dir_all(dir).ok();
+        // Write then rename, so a crash mid-write can't eat the jar.
+        let tmp = dir.join("cookies.json.tmp");
+        if std::fs::write(&tmp, &out).is_ok() {
+            std::fs::rename(tmp, dir.join("cookies.json")).ok();
+        }
+    }
+}
+
+/// HTTP Basic credentials, by origin, once the user has given them (or the
+/// URL carried them: `https://user:pass@host/`).
+mod auth {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use url::Url;
+
+    fn store() -> &'static Mutex<HashMap<String, (String, String)>> {
+        static STORE: OnceLock<Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
+        STORE.get_or_init(Default::default)
+    }
+
+    pub fn set(url: &Url, user: &str, password: &str) {
+        store().lock().unwrap().insert(url.origin().ascii_serialization(), (user.to_owned(), password.to_owned()));
+    }
+
+    /// The `Authorization` header for a request to `url`, if we have credentials.
+    pub fn header(url: &Url) -> Option<String> {
+        use base64::Engine as _;
+        let from_url = (!url.username().is_empty())
+            .then(|| (percent_decode(url.username()), percent_decode(url.password().unwrap_or_default())));
+        let creds = from_url.or_else(|| store().lock().unwrap().get(&url.origin().ascii_serialization()).cloned())?;
+        Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", creds.0, creds.1))))
+    }
+
+    fn percent_decode(s: &str) -> String {
+        percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()
+    }
+}
+
+/// Remember HTTP Basic credentials for `url`'s origin (after a sign-in prompt).
+pub fn set_credentials(url: &Url, user: &str, password: &str) {
+    auth::set(url, user, password);
+}
+
+/// The realm of a `WWW-Authenticate: Basic realm="..."` challenge.
+fn basic_realm(header: &str) -> Option<String> {
+    let rest = header.trim();
+    if !rest.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("basic")) {
+        return None;
+    }
+    let realm = rest.split("realm=").nth(1).map(|r| r.trim_matches(|c| c == '"' || c == ' ').split('"').next().unwrap_or("").to_owned());
+    Some(realm.unwrap_or_default())
+}
+
+/// What a document request accepts (roughly a browser's).
+const ACCEPT_DOCUMENT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+const ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
 
 /// Interpret URL-bar input: full URLs pass through, bare hosts get `https://`.
 pub fn parse_input(input: &str) -> Result<Url> {
@@ -72,27 +151,68 @@ fn agent() -> &'static ureq::Agent {
 /// Fetch a URL, following redirects. Non-2xx responses still return their body
 /// (error pages are documents too).
 pub fn fetch(url: &Url) -> Result<Response> {
-    if url.scheme() == "file" {
-        return file::fetch(url);
-    }
-    let response = agent()
-        .get(url.as_str())
-        .call()
-        .with_context(|| format!("failed to fetch {url}"))?;
-    read_document(url, response)
+    fetch_document(url, None, None)
 }
 
 /// Submit a form with `POST` (`application/x-www-form-urlencoded`).
 pub fn fetch_post(url: &Url, body: &str) -> Result<Response> {
-    if !matches!(url.scheme(), "http" | "https") {
-        bail!("can't POST to {url}");
+    fetch_document(url, None, Some(body))
+}
+
+/// Fetch a document (a navigation): GET, or POST a urlencoded form body.
+/// Cookies are sent and stored; `referer` is the page the navigation
+/// came from (not sent from https to http, like browsers).
+pub fn fetch_document(url: &Url, referer: Option<&Url>, post: Option<&str>) -> Result<Response> {
+    if url.scheme() == "file" && post.is_none() {
+        return file::fetch(url);
     }
-    let response = agent()
-        .post(url.as_str())
-        .header("content-type", "application/x-www-form-urlencoded")
-        .send(body)
-        .with_context(|| format!("failed to post to {url}"))?;
-    read_document(url, response)
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("unsupported scheme: {}", url.scheme());
+    }
+    // Credentials in the URL go in a header, not on the wire's URL.
+    let mut clean = url.clone();
+    let _ = clean.set_username("");
+    let _ = clean.set_password(None);
+    let referer = referer
+        .filter(|r| matches!(r.scheme(), "http" | "https"))
+        .filter(|r| !(r.scheme() == "https" && url.scheme() == "http"))
+        .map(|r| {
+            let mut r = r.clone();
+            r.set_fragment(None);
+            let _ = r.set_username("");
+            let _ = r.set_password(None);
+            r.to_string()
+        });
+    let result = match post {
+        Some(body) => {
+            let mut req = agent()
+                .post(clean.as_str())
+                .header("accept", ACCEPT_DOCUMENT)
+                .header("accept-language", ACCEPT_LANGUAGE)
+                .header("content-type", "application/x-www-form-urlencoded");
+            if let Some(r) = &referer {
+                req = req.header("referer", r);
+            }
+            if let Some(a) = auth::header(url) {
+                req = req.header("authorization", a);
+            }
+            req.send(body)
+        }
+        None => {
+            let mut req = agent().get(clean.as_str()).header("accept", ACCEPT_DOCUMENT).header("accept-language", ACCEPT_LANGUAGE);
+            if let Some(r) = &referer {
+                req = req.header("referer", r);
+            }
+            if let Some(a) = auth::header(url) {
+                req = req.header("authorization", a);
+            }
+            req.call()
+        }
+    };
+    let response = result.with_context(|| format!("failed to fetch {url}"))?;
+    let document = read_document(&clean, response);
+    save_cookies();
+    document
 }
 
 fn read_document(url: &Url, mut response: ureq::http::Response<ureq::Body>) -> Result<Response> {
@@ -104,6 +224,9 @@ fn read_document(url: &Url, mut response: ureq::http::Response<ureq::Body>) -> R
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
+    let auth_realm = (status == 401)
+        .then(|| response.headers().get("www-authenticate").and_then(|v| v.to_str().ok()).and_then(basic_realm))
+        .flatten();
     let body = response
         .body_mut()
         .with_config()
@@ -117,6 +240,7 @@ fn read_document(url: &Url, mut response: ureq::http::Response<ureq::Body>) -> R
         status,
         content_type,
         body,
+        auth_realm,
     })
 }
 
@@ -189,10 +313,11 @@ fn fetch_bytes_uncached(url: &Url) -> Result<Vec<u8>> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("unsupported scheme: {}", url.scheme());
     }
-    let mut response = agent()
-        .get(url.as_str())
-        .call()
-        .with_context(|| format!("failed to fetch {url}"))?;
+    let mut req = agent().get(url.as_str()).header("accept-language", ACCEPT_LANGUAGE);
+    if let Some(a) = auth::header(url) {
+        req = req.header("authorization", a);
+    }
+    let mut response = req.call().with_context(|| format!("failed to fetch {url}"))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         bail!("HTTP {status} for {url}");
@@ -229,7 +354,7 @@ mod file {
 
     pub fn fetch(url: &Url) -> Result<Response> {
         let path = path(url)?;
-        let html = |url: Url, body: String| Response { url, status: 200, content_type: Some("text/html".into()), body };
+        let html = |url: Url, body: String| Response { url, status: 200, content_type: Some("text/html".into()), body, auth_realm: None };
         if path.is_dir() {
             // Relative links in the listing need the trailing slash.
             let mut url = url.clone();
@@ -255,7 +380,7 @@ mod file {
             "html" | "htm" | "xhtml" => "text/html",
             _ => "text/plain",
         };
-        Ok(Response { url: url.clone(), status: 200, content_type: Some(content_type.into()), body })
+        Ok(Response { url: url.clone(), status: 200, content_type: Some(content_type.into()), body, auth_realm: None })
     }
 
     fn listing(dir: &std::path::Path) -> Result<String> {

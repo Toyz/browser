@@ -11,7 +11,9 @@ license = "MIT OR Apache-2.0"
 # gpui-kit re-exports GPUI (gpui-pre =0.3.11); never list gpui directly.
 # `syntect`: syntax highlighting for CSS/JS/JSON responses and view-source:.
 gpui-kit = { version = "0.9.0", features = ["syntect"] }
-ureq = "3"
+# cookies: a cookie jar (json: saving it); brotli: compressed responses;
+# charset: pages that aren't UTF-8.
+ureq = { version = "3", features = ["cookies", "json", "brotli", "charset"] }
 anyhow = "1"
 url = "2"
 net = { path = "crates/net" }

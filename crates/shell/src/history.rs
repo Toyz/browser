@@ -47,7 +47,8 @@ pub fn display_url(url: &Url) -> String {
     s.strip_suffix('/').unwrap_or(s).to_owned()
 }
 
-fn data_dir() -> Option<PathBuf> {
+/// Feather's data folder (history, cookies).
+pub fn data_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     Some(if cfg!(target_os = "macos") {
         home.join("Library/Application Support/Feather")

@@ -550,6 +550,8 @@ fn main() {
         render::set_text_fetcher(net::fetch_text_cached);
         let capturing = args.capture.is_some();
         History::init(!capturing, cx);
+        // Cookies persist (screenshot runs keep them in memory).
+        net::init((!capturing).then(history::data_dir).flatten());
         let bounds = Bounds::centered(None, size(px(args.width), px(args.height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

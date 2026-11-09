@@ -25,6 +25,8 @@ pub struct LoadedPage {
     /// Source code shown in a code editor instead (CSS, JS, JSON responses;
     /// `view-source:`).
     pub source: Option<Source>,
+    /// The server wants HTTP Basic credentials (the realm it named).
+    pub auth_realm: Option<String>,
 }
 
 #[derive(Clone)]
@@ -78,7 +80,7 @@ pub fn may_load(page: &Url, url: &Url) -> bool {
 }
 
 /// Fetch → parse → style → build boxes. Blocking: run it in the background.
-pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Result<LoadedPage> {
+pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>) -> anyhow::Result<LoadedPage> {
     if url.scheme() == "view-source" {
         let inner = Url::parse(url.path()).map_err(|e| anyhow::anyhow!("bad view-source URL: {e}"))?;
         let response = net::fetch(&inner)?;
@@ -92,12 +94,11 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
             styles: None,
             signature: Vec::new(),
             source: Some(Source::new("html", &response.body)),
+            auth_realm: None,
         });
     }
-    let response = match post {
-        Some(body) => net::fetch_post(url, body)?,
-        None => net::fetch(url)?,
-    };
+    let response = net::fetch_document(url, referer, post)?;
+    let auth_realm = response.auth_realm.clone();
     let is_html = match &response.content_type {
         Some(ct) => ct.contains("html"),
         None => response.body.trim_start().starts_with('<'),
@@ -107,6 +108,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
             favicon: default_favicon(&response.url),
             refresh: None,
             source: code_language(response.content_type.as_deref(), &response.url).map(|l| Source::new(l, &response.body)),
+            auth_realm,
             url: response.url,
             title: None,
             layout: Arc::new(render::build_plain_text(&response.body)),
@@ -127,6 +129,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
         favicon: favicon(&doc).or_else(|| default_favicon(&response.url)),
         refresh: meta_refresh(&doc),
         source: None,
+        auth_realm,
         url: response.url,
         title: doc.title(),
         layout: Arc::new(layout),

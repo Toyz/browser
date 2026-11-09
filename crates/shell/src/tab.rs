@@ -39,6 +39,14 @@ const PRERENDER_DWELL: Duration = Duration::from_millis(60);
 
 type PageResult = Result<LoadedPage, Arc<anyhow::Error>>;
 
+/// The sign-in sheet for HTTP Basic authentication.
+struct AuthPrompt {
+    realm: String,
+    user: Entity<gpui_kit::component::input::InputState>,
+    password: Entity<gpui_kit::component::input::InputState>,
+    _subscriptions: Vec<Subscription>,
+}
+
 /// A link loaded in the background because the pointer is resting on it:
 /// by the time it's clicked it's usually fetched, parsed, styled and laid out.
 struct Prerender {
@@ -98,6 +106,8 @@ pub struct Tab {
     source_editor: Option<Entity<gpui_kit::component::input::EditorState>>,
     source_pretty: bool,
     _source_redraw: Option<Subscription>,
+    /// A site asking for HTTP Basic credentials.
+    auth_prompt: Option<AuthPrompt>,
     /// Running CSS transitions and animations.
     animations: animations::Animations,
     /// Form controls' widgets and state.
@@ -161,6 +171,7 @@ impl Tab {
             hover_styler: None,
             forms: Default::default(),
             animations: Default::default(),
+            auth_prompt: None,
             source_editor: None,
             source_pretty: false,
             _source_redraw: None,
@@ -363,7 +374,9 @@ impl Tab {
                 None
             }
         };
-        let page = loader::deep(move || loader::load(&url, env, post.as_deref()).map_err(Arc::new));
+        // The page we're leaving is the referrer.
+        let referer = self.page.as_ref().map(|p| p.url.clone());
+        let page = loader::deep(move || loader::load(&url, env, post.as_deref(), referer.as_ref()).map_err(Arc::new));
         cx.background_spawn(page).shared()
     }
 
@@ -374,6 +387,7 @@ impl Tab {
         }
         let favicon = page.favicon.clone();
         let refresh = page.refresh.clone();
+        self.auth_prompt = page.auth_realm.clone().map(|realm| self.new_auth_prompt(realm, window, cx));
         // Source code goes in a (read-only) code editor, highlighted.
         // Minified code opens un-minified.
         self.source_pretty = page.source.as_ref().is_some_and(|s| s.pretty.is_some());
@@ -1178,6 +1192,148 @@ impl Tab {
         Some(if back { arrow.left(offset) } else { arrow.right(offset) }.into_any_element())
     }
 
+    fn new_auth_prompt(&mut self, realm: String, window: &mut Window, cx: &mut Context<Self>) -> AuthPrompt {
+        use gpui_kit::component::input::{InputEvent, InputState};
+        let user = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
+        let password = cx.new(|cx| InputState::new(window, cx).placeholder("Password").masked(true));
+        let submit = |this: &mut Self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.sign_in(window, cx);
+            }
+        };
+        let subs = vec![cx.subscribe_in(&user, window, submit), cx.subscribe_in(&password, window, submit)];
+        user.update(cx, |s, cx| s.focus(window, cx));
+        AuthPrompt { realm, user, password, _subscriptions: subs }
+    }
+
+    fn sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.auth_prompt.take() else { return };
+        let Some(url) = self.url() else { return };
+        let user = prompt.user.read(cx).value().to_string();
+        let password = prompt.password.read(cx).value().to_string();
+        net::set_credentials(&url, &user, &password);
+        self.reload(window, cx);
+    }
+
+    fn render_auth_prompt(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use gpui_kit::component::button::Button;
+        use gpui_kit::component::input::Input;
+        let prompt = self.auth_prompt.as_ref()?;
+        let theme = cx.theme();
+        let url = self.url();
+        let origin = url.as_ref().map(|u| u.origin().ascii_serialization()).unwrap_or_default();
+        let insecure = url.as_ref().is_some_and(|u| u.scheme() == "http");
+        let blue: Hsla = rgb(0x0b57d0).into();
+        let label = |text: &'static str| div().text_xs().font_weight(FontWeight::MEDIUM).text_color(theme.muted_foreground).child(text);
+        Some(
+            // A sheet hanging under the toolbar, like Chrome's.
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(8.))
+                .child(
+                    div()
+                        .id("auth-prompt")
+                        .occlude()
+                        .w(px(380.))
+                        .flex()
+                        .flex_col()
+                        .gap_4()
+                        .p_6()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.popover)
+                        .text_color(theme.popover_foreground)
+                        .shadow_xl()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .size(px(36.))
+                                        .flex_none()
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(blue.opacity(0.12))
+                                        .child(Icon::new(Lucide::LockKeyhole).size(px(18.)).text_color(blue)),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .min_w_0()
+                                        .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child("Sign in"))
+                                        .child(div().text_xs().text_color(theme.muted_foreground).truncate().child(origin)),
+                                ),
+                        )
+                        .when(!prompt.realm.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(format!("The site says: “{}”", prompt.realm)),
+                            )
+                        })
+                        .when(insecure, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .text_color(theme.danger)
+                                    .child(Icon::new(Lucide::TriangleAlert).size(px(14.)))
+                                    .child("Your password will be sent unencrypted."),
+                            )
+                        })
+                        .child(div().flex().flex_col().gap_1p5().child(label("Username")).child(Input::new(&prompt.user)))
+                        .child(div().flex().flex_col().gap_1p5().child(label("Password")).child(Input::new(&prompt.password)))
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .pt_1()
+                                .child(
+                                    Button::new("auth-cancel")
+                                        .outline()
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.auth_prompt = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("auth-sign-in")
+                                        .px_4()
+                                        .py_1p5()
+                                        .rounded_md()
+                                        .bg(blue)
+                                        .hover(|d| d.bg(blue.opacity(0.9)))
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(gpui_kit::white())
+                                        .cursor_pointer()
+                                        .child("Sign in")
+                                        .on_click(cx.listener(|this, _, window, cx| this.sign_in(window, cx))),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Switch a source page between pretty-printed and raw.
     fn toggle_pretty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(source) = self.page.as_ref().and_then(|p| p.source.clone()) else { return };
@@ -1333,5 +1489,6 @@ impl Render for Tab {
             })
             .children(status)
             .children(self.render_swipe(cx))
+            .children(self.render_auth_prompt(cx))
     }
 }
