@@ -139,6 +139,7 @@ impl Tab {
         if elements.is_empty() && self.animations.keyframes.is_empty() {
             return;
         }
+        let doc = page.doc.clone();
         let mut old = std::mem::take(&mut self.animations.keyframes);
         let Some(styler) = self.styler(window) else { return };
         let now = Instant::now();
@@ -150,6 +151,14 @@ impl Tab {
                 }
                 if let Some(i) = old.iter().position(|r| r.node == node && r.spec.name == spec.name) {
                     keep.push(old.swap_remove(i));
+                    continue;
+                }
+                // Custom properties (`--angle`) restyle the element per
+                // frame: sample them (a few per 100ms of the cycle).
+                if let (Some(custom), Some(doc)) = (styler.keyframe_custom(&spec.name), doc.as_deref()) {
+                    let samples = ((spec.duration * 30.0) as usize).clamp(8, 120);
+                    let frames = render::hover::custom_property_frames(doc, styler, node, &custom, samples);
+                    keep.push(KeyframeRun { node, spec: spec.clone(), frames, start: now });
                     continue;
                 }
                 if let Some(frames) = styler.keyframe_styles(&spec.name, &base) {

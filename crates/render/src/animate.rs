@@ -91,6 +91,12 @@ fn mix_shadows(a: &ComputedStyle, b: &ComputedStyle, t: f32) -> Option<std::sync
 pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
     let mut s = to.clone();
     s.color = mix_color(from.color, to.color, t);
+    // Gradient text sliding (`background-position` on clipped text).
+    if let (Some(a), Some(b)) = (&from.text_gradient, &to.text_gradient)
+        && a.stops == b.stops
+    {
+        s.text_gradient = Some(std::sync::Arc::new(style::TextGradient { pos: mix_f(a.pos, b.pos, t), scale: mix_f(a.scale, b.scale, t), ..(**b).clone() }));
+    }
     s.background = mix_background(from.background, to.background, t);
     s.background_image = mix_background(from.background_image, to.background_image, t);
     for side in style::Side::ALL {
@@ -100,6 +106,10 @@ pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
         *r = mix_len(*a, *b, t);
     }
     s.opacity = mix_f(from.opacity, to.opacity, t);
+    s.background_position = style::BgPos {
+        x: mix_f(from.background_position.x, to.background_position.x, t),
+        y: mix_f(from.background_position.y, to.background_position.y, t),
+    };
     let mix_offset = |a: style::Offset, b: style::Offset| style::Offset { px: mix_f(a.px, b.px, t), pct: mix_f(a.pct, b.pct, t) };
     s.translate = (mix_offset(from.translate.0, to.translate.0), mix_offset(from.translate.1, to.translate.1));
     s.rotate = mix_f(from.rotate, to.rotate, t);

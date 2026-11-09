@@ -653,6 +653,55 @@ pub enum Cursor {
     ResizeRow,
 }
 
+/// Gradient text (`background-clip: text` over a gradient): what the glyphs
+/// are colored with, sampled along the line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextGradient {
+    /// (position 0..1, color), in order.
+    pub stops: Arc<[(f32, Color)]>,
+    /// The gradient's width over the box's (`background-size: 200%` is 2).
+    pub scale: f32,
+    /// `background-position` x, as a fraction of the free space.
+    pub pos: f32,
+    /// Repeats sideways (`background-repeat`).
+    pub repeat: bool,
+}
+
+impl TextGradient {
+    /// The color at `frac` (0..1) across the box.
+    pub fn at(&self, frac: f32) -> Color {
+        // The tile is `scale` boxes wide and offset by (1 - scale) * pos.
+        let scale = self.scale.max(0.01);
+        let mut u = (frac + (scale - 1.0) * self.pos) / scale;
+        if self.repeat {
+            u = u.rem_euclid(1.0);
+        }
+        let stops = &self.stops;
+        let Some(&(first_pos, first)) = stops.first() else { return Color::TRANSPARENT };
+        if u <= first_pos {
+            return first;
+        }
+        for pair in stops.windows(2) {
+            let ((a, ca), (b, cb)) = (pair[0], pair[1]);
+            if u <= b {
+                let f = if b > a { (u - a) / (b - a) } else { 1.0 };
+                return match (ca, cb) {
+                    (Color::Rgba(x), Color::Rgba(y)) => {
+                        let ch = |shift: u32| {
+                            let (p, q) = (((x >> shift) & 0xff) as f32, ((y >> shift) & 0xff) as f32);
+                            ((p + (q - p) * f).round() as u32) << shift
+                        };
+                        Color::Rgba(ch(24) | ch(16) | ch(8) | ch(0))
+                    }
+                    _ if f < 0.5 => ca,
+                    _ => cb,
+                };
+            }
+        }
+        stops[stops.len() - 1].1
+    }
+}
+
 /// A CSS gradient image.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Gradient {

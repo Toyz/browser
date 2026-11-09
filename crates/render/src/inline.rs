@@ -864,15 +864,33 @@ fn paint_flow(
             let stop = para.pieces[items[last - 1].0].range.end;
             let text: SharedString = para.text[start..stop].to_owned().into();
             let style = &para.spans[piece.span as usize].style;
-            let shaped = state
-                .borrow_mut()
-                .shaped
-                .entry((wrap, start))
-                .or_insert_with(|| {
-                    let run = text_run(text.len(), style, palette);
-                    shapes::paint(&ts, text, px(style.font_size), &run)
-                })
-                .clone();
+            let shaped = match &style.gradient {
+                // Gradient text: a run per character, colored by where it
+                // falls in its span (not cached: it may be animating).
+                Some(gradient) => {
+                    let span_start: usize = para.spans[..piece.span as usize].iter().map(|s| s.len).sum();
+                    let span_len = para.spans[piece.span as usize].len.max(1) as f32;
+                    let base = text_run(1, style, palette);
+                    let runs: Vec<TextRun> = text
+                        .char_indices()
+                        .map(|(i, ch)| {
+                            let frac = (start + i - span_start) as f32 / span_len;
+                            let color = palette.color(gradient.at(frac.clamp(0.0, 1.0)));
+                            TextRun { len: ch.len_utf8(), color, ..base.clone() }
+                        })
+                        .collect();
+                    Rc::new(ts.shape_line(text.clone(), px(style.font_size), &runs, None))
+                }
+                None => state
+                    .borrow_mut()
+                    .shaped
+                    .entry((wrap, start))
+                    .or_insert_with(|| {
+                        let run = text_run(text.len(), style, palette);
+                        shapes::paint(&ts, text, px(style.font_size), &run)
+                    })
+                    .clone(),
+            };
             let m = measured[ix];
             let origin = point(dx + x, baseline - px(style.baseline_shift) - m.ascent);
             shaped.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();

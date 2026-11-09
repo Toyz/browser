@@ -20,6 +20,11 @@ pub struct GradientFill {
     repeat: BgRepeat,
     position: style::BgPos,
     radii: Corners<Pixels>,
+    /// Per layer (top first): paints under the border too (`background-clip:
+    /// border-box` with a border to show through).
+    border_box: Vec<bool>,
+    border: style::Edges<f32>,
+    outer_radii: Corners<Pixels>,
     palette: Palette,
 }
 
@@ -31,7 +36,22 @@ impl GradientFill {
             _ => px(0.0),
         };
         let bw = s.border_width;
+        let outer = |i: usize| match s.border_radius[i] {
+            CssLength::Px(r) => px(r),
+            _ => px(0.0),
+        };
+        // Borders paint over the background: only a see-through one shows it.
+        let bc = s.border_color;
+        let has_border = bw.top + bw.right + bw.bottom + bw.left > 0.0
+            && [bc.top, bc.right, bc.bottom, bc.left].iter().all(|c| c.is_transparent());
+        let border_box = match &s.bg_clip_border {
+            Some(clips) if has_border => (0..layers.len()).map(|i| clips.get(i).or(clips.last()).copied().unwrap_or(false)).collect(),
+            _ => Vec::new(),
+        };
         Some(GradientFill {
+            border_box,
+            border: bw,
+            outer_radii: Corners { top_left: outer(0), top_right: outer(1), bottom_right: outer(2), bottom_left: outer(3) },
             layers,
             size: s.background_size,
             repeat: s.background_repeat,
@@ -108,14 +128,23 @@ impl Element for GradientFill {
             return;
         }
         // Bottom layer first.
-        for layer in self.layers.iter().rev() {
-            self.paint_layer(layer, bounds, window);
+        for (i, layer) in self.layers.iter().enumerate().rev() {
+            if self.border_box.get(i).copied().unwrap_or(false) {
+                let b = self.border;
+                let outer = Bounds::new(
+                    bounds.origin - point(px(b.left), px(b.top)),
+                    size(bounds.size.width + px(b.left + b.right), bounds.size.height + px(b.top + b.bottom)),
+                );
+                self.paint_layer(layer, outer, self.outer_radii, window);
+            } else {
+                self.paint_layer(layer, bounds, self.radii, window);
+            }
         }
     }
 }
 
 impl GradientFill {
-    fn paint_layer(&self, g: &Gradient, bounds: Bounds<Pixels>, window: &mut Window) {
+    fn paint_layer(&self, g: &Gradient, bounds: Bounds<Pixels>, radii: Corners<Pixels>, window: &mut Window) {
         let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         let tile = match self.size {
             BgSize::Explicit(w, h) => {
@@ -143,7 +172,7 @@ impl GradientFill {
         if whole && let Some(angle) = simple_linear(g, tile) {
             let to_hsla = |c: Rgba| -> Hsla { c.into() };
             let bg = linear_gradient(angle, linear_color_stop(to_hsla(colors[0]), 0.0), linear_color_stop(to_hsla(colors[1]), 1.0));
-            window.paint_quad(fill(bounds, bg).corner_radii(self.radii));
+            window.paint_quad(fill(bounds, bg).corner_radii(radii));
             return;
         }
 
@@ -168,7 +197,7 @@ impl GradientFill {
             let mut x = sx;
             while x < bw {
                 let at = Bounds::new(bounds.origin + point(px(x), px(y)), block);
-                window.paint_image(bounds, at, self.radii, image.clone(), 0, false).ok();
+                window.paint_image(bounds, at, radii, image.clone(), 0, false).ok();
                 if !rx {
                     break;
                 }
@@ -209,12 +238,18 @@ thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new((HashMap::new(), 0));
 }
 
-const CACHE_LIMIT: usize = 192;
+const CACHE_LIMIT: usize = 384;
 
 fn cached(g: &Gradient, colors: &[Rgba], tile: (f32, f32), reps: (u32, u32), scale: f32, window: &mut Window) -> Option<Arc<RenderImage>> {
     // Pixels: the tile at device resolution, capped (gradients are smooth;
     // the GPU scales them up the rest of the way).
-    let cap = 1024.0;
+    // Smooth ones (no hard stops) that don't repeat look the same from a
+    // small image stretched, which keeps animation frames cheap to cache.
+    let hard = g.stops.windows(2).any(|w| match (w[0].pos, w[1].pos) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    });
+    let cap = if !g.repeating && !hard && reps == (1, 1) { 128.0 } else { 1024.0 };
     let fit = |v: f32| (v * scale).ceil().clamp(1.0, cap);
     let (pw, ph) = (fit(tile.0), fit(tile.1));
     let key = {

@@ -333,6 +333,8 @@ pub struct InlineStyle {
     /// The innermost element this text belongs to (for `:hover`).
     pub node: Option<NodeId>,
     pub cursor: style::Cursor,
+    /// Gradient text: glyph colors across the span (instead of `color`).
+    pub gradient: Option<Arc<style::TextGradient>>,
 }
 
 impl InlineStyle {
@@ -352,6 +354,7 @@ impl InlineStyle {
             baseline_shift: 0.0,
             node: None,
             cursor: s.cursor,
+            gradient: s.text_gradient.clone().filter(|_| s.visible),
         }
     }
 }

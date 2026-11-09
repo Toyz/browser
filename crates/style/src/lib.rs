@@ -99,6 +99,12 @@ pub struct ComputedStyle {
     pub aspect_ratio: Option<f32>,
     /// `background-clip: text` (gradient text).
     pub clip_text: bool,
+    /// `background-clip`, per gradient layer (top first): `true` for
+    /// `border-box`. `None` (unset): layers fill the padding box.
+    pub bg_clip_border: Option<Arc<[bool]>>,
+    /// Gradient text: the colors the glyphs take across the box (inherited,
+    /// like the transparent fill that lets it show).
+    pub text_gradient: Option<Arc<TextGradient>>,
     /// `-webkit-text-fill-color` (inherited).
     pub text_fill: Option<Color>,
     /// SVG paint properties from CSS (`fill`, `stroke`...): inherited, and
@@ -197,6 +203,8 @@ impl ComputedStyle {
             rotate: 0.0,
             svg_paint: None,
             clip_text: false,
+            bg_clip_border: None,
+            text_gradient: None,
             aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),
@@ -255,6 +263,7 @@ impl ComputedStyle {
             custom: parent.custom.clone(),
             svg_paint: parent.svg_paint.clone(),
             text_fill: parent.text_fill,
+            text_gradient: parent.text_gradient.clone(),
             ..Self::initial()
         }
     }

@@ -531,6 +531,40 @@ impl Styler {
         Some(out)
     }
 
+    /// The custom properties `@keyframes name` animates, per keyframe
+    /// (`border-rotate { to { --angle: 360deg } }`): those change what
+    /// `var()`s resolve to, so frames are whole restyles (see
+    /// `compute_with_custom`).
+    pub fn keyframe_custom(&self, name: &str) -> Option<Vec<(f32, Vec<(Arc<str>, Arc<str>)>)>> {
+        let frames = self.keyframes.get(name)?;
+        let out: Vec<(f32, Vec<(Arc<str>, Arc<str>)>)> = frames
+            .iter()
+            .map(|(offset, decls)| {
+                let custom = decls
+                    .iter()
+                    .filter_map(|d| match d {
+                        Decl::Custom(n, v) => Some((n.clone(), v.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                (*offset, custom)
+            })
+            .collect();
+        out.iter().any(|(_, c): &(f32, Vec<_>)| !c.is_empty()).then_some(out)
+    }
+
+    /// An element's style with some custom properties overridden (inherited
+    /// from its parent as if set there).
+    pub fn compute_with_custom(&self, doc: &Document, id: NodeId, parent: &ComputedStyle, overrides: &[(Arc<str>, Arc<str>)]) -> ComputedStyle {
+        let mut parent = parent.clone();
+        let mut custom = (*parent.custom).clone();
+        for (k, v) in overrides {
+            custom.insert(k.clone(), v.clone());
+        }
+        parent.custom = Arc::new(custom);
+        self.compute(doc, id, &parent)
+    }
+
     pub fn new(sheets: Vec<Stylesheet>, env: MediaEnv) -> Self {
         StyleData::from_sheets(sheets, None).styler(env)
     }
@@ -845,6 +879,7 @@ impl Styler {
             }
             Decl::Rotate(v) => s.rotate = *v,
             Decl::ClipText(v) => s.clip_text = *v,
+            Decl::BgClipBorder(v) => s.bg_clip_border = Some(v.clone()),
             Decl::AspectRatio(v) => s.aspect_ratio = *v,
             Decl::TextFill(c) => s.text_fill = Some(*c),
             Decl::SvgPaint(name, value) => {
@@ -1142,6 +1177,34 @@ fn finalize(s: &mut ComputedStyle) {
     // background's first color fills the glyphs and the box shows none.
     if s.clip_text {
         let fill = s.text_fill.unwrap_or(s.color);
+        // The glyphs sample the gradient across the box (see TextGradient).
+        let scale = match s.background_size {
+            BgSize::Explicit(Length::Percent(p), _) if p > 0.0 => p / 100.0,
+            _ => 1.0,
+        };
+        if fill.is_transparent()
+            && let Some(g) = s.gradients.as_ref().and_then(|g| g.first())
+            && g.stops.len() >= 2
+        {
+            let n = g.stops.len();
+            let mut stops: Vec<(f32, Color)> = Vec::with_capacity(n);
+            for (i, st) in g.stops.iter().enumerate() {
+                let even = i as f32 / (n - 1) as f32;
+                let pos = match st.pos {
+                    Some(StopPos::Fraction(f)) => f,
+                    _ => even,
+                };
+                let prev = stops.last().map_or(0.0, |&(p, _)| p);
+                stops.push((pos.max(prev), scheme_color(st.color, s.dark)));
+            }
+            s.text_gradient = Some(Arc::new(TextGradient { stops: stops.into(), scale, pos: s.background_position.x, repeat: s.background_repeat.x }));
+        } else if let Some(tg) = &s.text_gradient
+            && (tg.pos != s.background_position.x || tg.scale != scale)
+            && s.gradients.is_none()
+        {
+            // An animation frame moving the background.
+            s.text_gradient = Some(Arc::new(TextGradient { pos: s.background_position.x, scale, ..(**tg).clone() }));
+        }
         if fill.is_transparent() {
             let first = s.gradients.as_ref().and_then(|g| g.first()).and_then(|g| g.stops.first()).map(|st| st.color);
             if let Some(c) = first.or(s.background_image).or(s.background) {
@@ -1154,6 +1217,7 @@ fn finalize(s: &mut ComputedStyle) {
         s.gradients = None;
     } else if let Some(fill) = s.text_fill.filter(|c| !c.is_transparent()) {
         s.color = fill;
+        s.text_gradient = None;
     }
     if let Some(layers) = &s.gradients {
         let (color, dark) = (s.color, s.dark);

@@ -171,6 +171,9 @@ pub enum Decl {
     /// `transform` / `translate`: just the translation (x, y).
     Translate(LenSpec, LenSpec),
     ClipText(bool),
+    /// `background-clip` per layer: `true` where a layer paints under the
+    /// border too (`border-box`).
+    BgClipBorder(Arc<[bool]>),
     AspectRatio(Option<f32>),
     TextFill(Color),
     /// An SVG paint property and its value as written.
@@ -411,12 +414,21 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         // `text`: the background shows through the glyphs (gradient text).
         "background-clip" | "-webkit-background-clip" => {
             let mut text = false;
+            let mut layers = vec![true];
             while !p.is_exhausted() {
-                if let Ok(Token::Ident(id)) = p.next() {
-                    text |= id.eq_ignore_ascii_case("text");
+                match p.next() {
+                    Ok(Token::Ident(id)) => {
+                        text |= id.eq_ignore_ascii_case("text");
+                        if let Some(last) = layers.last_mut() {
+                            *last = id.eq_ignore_ascii_case("border-box");
+                        }
+                    }
+                    Ok(Token::Comma) => layers.push(true),
+                    _ => {}
                 }
             }
             out.push(D::ClipText(text));
+            out.push(D::BgClipBorder(layers.into()));
         }
         "-webkit-text-fill-color" => out.push(D::TextFill(parse_color(p)?)),
         // `1`, `16 / 9`, `auto 4/3` (`auto` alone: none).

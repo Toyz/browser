@@ -45,6 +45,10 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.background_image = from.background_image;
     to.gradients = from.gradients.clone();
     to.background_repeat = from.background_repeat;
+    to.background_position = from.background_position;
+    to.background_size = from.background_size;
+    to.bg_clip_border = from.bg_clip_border.clone();
+    to.text_gradient = from.text_gradient.clone();
     to.border_color = from.border_color;
     to.border_radius = from.border_radius;
     to.opacity = from.opacity;
@@ -232,6 +236,60 @@ pub fn apply(layout: &LayoutTree, changes: &HashMap<NodeId, Arc<ComputedStyle>>)
     touched.then_some(tree)
 }
 
+/// Frames of an animation of custom properties on `node`: its style at
+/// `samples + 1` evenly spaced points, each a restyle with the properties
+/// interpolated (`--angle: 0deg` to `360deg` turns a conic gradient).
+pub fn custom_property_frames(
+    doc: &Document,
+    styler: &Styler,
+    node: NodeId,
+    keyframes: &[(f32, Vec<(Arc<str>, Arc<str>)>)],
+    samples: usize,
+) -> Vec<(f32, ComputedStyle)> {
+    let mut styles = Styles::new(doc, styler);
+    let parent = match doc.parent(node) {
+        Some(p) if doc.element(p).is_some() => styles.get(p),
+        _ => styles.root_parent.clone(),
+    };
+    let names: Vec<Arc<str>> = {
+        let mut v: Vec<Arc<str>> = keyframes.iter().flat_map(|(_, c)| c.iter().map(|(n, _)| n.clone())).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    // `12.5deg` -> (12.5, "deg").
+    let number = |v: &str| -> Option<(f32, String)> {
+        let v = v.trim();
+        let end = v.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+')).unwrap_or(v.len());
+        Some((v[..end].parse().ok()?, v[end..].to_owned()))
+    };
+    (0..=samples)
+        .map(|k| {
+            let p = k as f32 / samples.max(1) as f32;
+            let overrides: Vec<(Arc<str>, Arc<str>)> = names
+                .iter()
+                .filter_map(|name| {
+                    let at: Vec<(f32, &Arc<str>)> =
+                        keyframes.iter().filter_map(|(o, c)| c.iter().find(|(n, _)| n == name).map(|(_, v)| (*o, v))).collect();
+                    let after = at.iter().position(|(o, _)| *o >= p).unwrap_or(at.len() - 1);
+                    let (o1, v1) = at[after];
+                    let (o0, v0) = if after > 0 { at[after - 1] } else { at[after] };
+                    let value = match (number(v0), number(v1)) {
+                        (Some((a, ua)), Some((b, ub))) if ua == ub && o1 > o0 => {
+                            let t = ((p - o0) / (o1 - o0)).clamp(0.0, 1.0);
+                            format!("{}{ua}", a + (b - a) * t).into()
+                        }
+                        _ if p < (o0 + o1) / 2.0 => v0.clone(),
+                        _ => v1.clone(),
+                    };
+                    Some((name.clone(), value))
+                })
+                .collect();
+            (p, styler.compute_with_custom(doc, node, &parent, &overrides))
+        })
+        .collect()
+}
+
 /// Every element in the layout with CSS animations, and its style.
 pub fn animated_elements(layout: &LayoutTree) -> Vec<(NodeId, Arc<ComputedStyle>)> {
     fn walk(b: &LayoutBox, out: &mut Vec<(NodeId, Arc<ComputedStyle>)>) {
@@ -414,6 +472,7 @@ fn patch_para(p: &mut Paragraph, ch: &Changes) {
         s.underline = new.underline;
         s.strikethrough = new.strikethrough;
         s.cursor = new.cursor;
+        s.gradient = new.text_gradient.clone().filter(|_| new.visible);
     }
     for object in &mut p.objects {
         match object {
