@@ -41,8 +41,11 @@ pub fn may_load(page: &Url, url: &Url) -> bool {
 }
 
 /// Fetch → parse → style → build boxes. Blocking: run it in the background.
-pub fn load(url: &Url, env: style::MediaEnv) -> anyhow::Result<LoadedPage> {
-    let response = net::fetch(url)?;
+pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Result<LoadedPage> {
+    let response = match post {
+        Some(body) => net::fetch_post(url, body)?,
+        None => net::fetch(url)?,
+    };
     let is_html = match &response.content_type {
         Some(ct) => ct.contains("html"),
         None => response.body.trim_start().starts_with('<'),

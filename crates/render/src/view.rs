@@ -13,7 +13,7 @@ use style::{
 };
 use url::Url;
 
-use crate::boxes::{Block, BlockKind, ImageBox, InlineStyle, LayoutBox, Paragraph, Row};
+use crate::boxes::{Block, BlockKind, Control, ImageBox, InlineStyle, LayoutBox, Paragraph, Row};
 use crate::images::{ImageState, ImageStore};
 
 /// The fonts installed on this system, for resolving CSS `font-family` lists.
@@ -122,6 +122,8 @@ pub type LinkHover = Rc<dyn Fn(Option<&Url>, &mut Window, &mut App)>;
 pub type BlockHover = Rc<dyn Fn(page::NodeId, bool, &mut Window, &mut App)>;
 /// The inline element under the pointer within paragraph `id` changed.
 pub type InlineHover = Rc<dyn Fn(usize, Option<page::NodeId>, &mut Window, &mut App)>;
+/// Draws a form control's widget (inside the box the page styled for it).
+pub type ControlRenderer = Rc<dyn Fn(&Control, &ComputedStyle, &mut Window, &mut App) -> AnyElement>;
 
 /// Everything rendering needs besides the boxes themselves.
 #[derive(Clone)]
@@ -137,6 +139,7 @@ pub struct RenderCx {
     pub track_hover: bool,
     pub on_block_hover: BlockHover,
     pub on_inline_hover: InlineHover,
+    pub controls: ControlRenderer,
 }
 
 pub(crate) fn cursor_style(c: style::Cursor) -> Option<CursorStyle> {
@@ -311,13 +314,44 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
 /// relative to their parent's box (in CSS: the nearest positioned ancestor,
 /// which usually *is* the parent); fixed ones relative to the viewport overlay.
 fn apply_position(d: Div, s: &ComputedStyle) -> Div {
+    // `transform: translate()`: shift the box without moving anything else,
+    // which is what a relative offset does. Percentages are of its own size.
+    let own = |l: style::Length, size: style::Length, edges: f32| match (l, size) {
+        (style::Length::Px(v), _) => v,
+        (style::Length::Percent(p), style::Length::Px(w)) => (w + edges) * p / 100.0,
+        _ => 0.0,
+    };
+    let tx = own(s.translate.0, s.width, s.horizontal_edges());
+    let ty = own(s.translate.1, s.height, s.vertical_edges());
+    let shifted = |side: style::Side, v: style::Length| -> style::Length {
+        let delta = match side {
+            style::Side::Left => tx,
+            style::Side::Right => -tx,
+            style::Side::Top => ty,
+            style::Side::Bottom => -ty,
+        };
+        match v {
+            style::Length::Px(p) => style::Length::Px(p + delta),
+            other => other,
+        }
+    };
     let d = match s.position {
         style::Position::Absolute | style::Position::Fixed => d.absolute(),
         style::Position::Relative => d.relative(),
+        style::Position::Static | style::Position::Sticky if tx != 0.0 || ty != 0.0 => {
+            return d.relative().left(px(tx)).top(px(ty));
+        }
         style::Position::Static | style::Position::Sticky => return d,
     };
     let inset = |d: Div, side: style::Side| -> Div {
-        let v = s.inset.get(side);
+        let mut v = s.inset.get(side);
+        // Relative boxes with no offset on a side get the translation there.
+        if v.is_auto() && s.position == style::Position::Relative && matches!(side, style::Side::Left | style::Side::Top) {
+            v = style::Length::ZERO;
+        }
+        if !v.is_auto() {
+            v = shifted(side, v);
+        }
         if v.is_auto() {
             return d;
         }
@@ -404,6 +438,12 @@ fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow:
     };
 
     let el = match &block.kind {
+        BlockKind::Control(control) => base.child(ControlHost {
+            control: control.clone(),
+            style: block.style.clone(),
+            render: cx.controls.clone(),
+            child: None,
+        }),
         BlockKind::Normal | BlockKind::Table => {
             base.flex().flex_col().children(render_flow_children(&block.children, cx))
         }
@@ -670,5 +710,77 @@ fn render_paragraph(p: &Arc<Paragraph>, cx: &RenderCx) -> AnyElement {
             .overflow_x_scroll()
             .child(flow)
             .into_any_element()
+    }
+}
+
+/// Asks the shell for a control's widget while laying out (when it can
+/// create the widget's state), then is that widget.
+struct ControlHost {
+    control: Arc<Control>,
+    style: Arc<ComputedStyle>,
+    render: ControlRenderer,
+    child: Option<AnyElement>,
+}
+
+impl IntoElement for ControlHost {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for ControlHost {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut child = (self.render)(&self.control, &self.style, window, cx);
+        let id = child.request_layout(window, cx);
+        self.child = Some(child);
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(child) = &mut self.child {
+            child.prepaint(window, cx);
+        }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(child) = &mut self.child {
+            child.paint(window, cx);
+        }
     }
 }

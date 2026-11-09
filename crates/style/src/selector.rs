@@ -191,6 +191,10 @@ pub struct ElementState {
     pub focused: Option<NodeId>,
     /// The element the URL's `#fragment` points at (`:target`).
     pub target: Option<NodeId>,
+    /// Checked checkboxes/radios/options (`:checked`), once the user has
+    /// touched the page's form controls; until then the `checked` and
+    /// `selected` attributes decide.
+    pub checked: Option<std::sync::Arc<std::collections::HashSet<NodeId>>>,
 }
 
 /// An element of our document, as `selectors` sees it.
@@ -214,6 +218,24 @@ impl<'a> ElementRef<'a> {
 
     fn data(&self) -> &'a page::ElementData {
         self.doc.element(self.id).expect("ElementRef to a non-element")
+    }
+
+    fn is_form_control(&self) -> bool {
+        matches!(&*self.data().name.local, "button" | "input" | "select" | "textarea" | "option" | "fieldset")
+    }
+
+    /// A text field the user can type in.
+    fn is_editable(&self) -> bool {
+        let e = self.data();
+        let text_input = match &*e.name.local {
+            "textarea" => true,
+            "input" => matches!(
+                e.attr("type").unwrap_or("text").to_ascii_lowercase().as_str(),
+                "text" | "search" | "email" | "url" | "tel" | "password" | "number"
+            ),
+            _ => false,
+        };
+        text_input && e.attr("readonly").is_none() && e.attr("disabled").is_none()
     }
 
     fn element_at(&self, id: NodeId) -> Option<Self> {
@@ -314,11 +336,27 @@ impl selectors::Element for ElementRef<'_> {
                 false
             }
             PseudoClass::Inert("target") => self.state.target == Some(self.id),
-            // Form controls aren't disabled/checked/etc. until we have forms.
-            PseudoClass::Inert("enabled") => matches!(
-                &*self.data().name.local,
-                "button" | "input" | "select" | "textarea" | "option" | "fieldset"
-            ),
+            PseudoClass::Inert("checked") => match &self.state.checked {
+                Some(set) => set.contains(&self.id),
+                None => {
+                    let e = self.data();
+                    match &*e.name.local {
+                        "input" => e.attr("checked").is_some(),
+                        "option" => e.attr("selected").is_some(),
+                        _ => false,
+                    }
+                }
+            },
+            PseudoClass::Inert("disabled") => self.is_form_control() && self.data().attr("disabled").is_some(),
+            PseudoClass::Inert("enabled") => self.is_form_control() && self.data().attr("disabled").is_none(),
+            PseudoClass::Inert("required") => self.is_form_control() && self.data().attr("required").is_some(),
+            PseudoClass::Inert("optional") => self.is_form_control() && self.data().attr("required").is_none(),
+            PseudoClass::Inert("read-only") => !self.is_editable(),
+            PseudoClass::Inert("read-write") => self.is_editable(),
+            PseudoClass::Inert("placeholder-shown") => {
+                let e = self.data();
+                self.is_editable() && e.attr("placeholder").is_some() && e.attr("value").is_none_or(str::is_empty)
+            }
             PseudoClass::Inert(_) => false,
         }
     }

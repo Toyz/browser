@@ -20,6 +20,8 @@ use render::{ImageState, ImageStore, Palette, RenderCx};
 use style::ElementState;
 use url::Url;
 
+mod forms;
+
 use crate::capture::{self, CaptureJob};
 use crate::history::{self, History};
 use crate::loader::{self, LoadedPage, same_document};
@@ -84,6 +86,10 @@ pub struct Tab {
     /// Bumped per page shown, so hover reports from the previous page's last
     /// frame (with that document's node ids) are ignored.
     page_gen: u64,
+    /// Form controls' widgets and state.
+    forms: forms::Forms,
+    /// A form `POST` waiting for its navigation to start loading.
+    pending_post: Option<(Url, String)>,
     /// A styler kept for patching hover changes (keyed by media signature).
     hover_styler: Option<(Vec<bool>, style::Styler)>,
     /// The interaction state the current layout was styled with.
@@ -137,6 +143,8 @@ impl Tab {
             _scroll_end: None,
             page_gen: 0,
             hover_styler: None,
+            forms: Default::default(),
+            pending_post: None,
             element_state: Arc::default(),
             capture: None,
             _capture_task: None,
@@ -316,10 +324,17 @@ impl Tab {
         }));
     }
 
-    fn spawn_load(&self, url: Url, window: &Window, cx: &mut Context<Self>) -> Shared<Task<PageResult>> {
+    fn spawn_load(&mut self, url: Url, window: &Window, cx: &mut Context<Self>) -> Shared<Task<PageResult>> {
         // Media queries see the page area's size.
         let env = media_env(window);
-        let page = loader::deep(move || loader::load(&url, env).map_err(Arc::new));
+        let post = match self.pending_post.take() {
+            Some((target, body)) if target == url => Some(body),
+            other => {
+                self.pending_post = other;
+                None
+            }
+        };
+        let page = loader::deep(move || loader::load(&url, env, post.as_deref()).map_err(Arc::new));
         cx.background_spawn(page).shared()
     }
 
@@ -343,6 +358,7 @@ impl Tab {
         self.page = Some(page);
         self.page_gen += 1;
         self.hover_styler = None;
+        self.forms = Default::default();
         self.hover_blocks.clear();
         self.hover_inline = None;
         self.hovered_link = None;
@@ -512,6 +528,8 @@ impl Tab {
         if self.mouse_down {
             state.active = state.hovered.clone();
         }
+        state.focused = self.forms.focused;
+        state.checked = self.forms.checked.clone();
         state.target = page.target();
         state
     }
@@ -684,6 +702,29 @@ impl Tab {
                 .ok();
                 cx.background_executor().timer(Duration::from_millis(500)).await;
             }
+            if let Some((x, y)) = job.click {
+                let position = point(px(x), px(y));
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    let down = MouseDownEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    };
+                    window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                    window.dispatch_event(PlatformInput::MouseDown(down), cx);
+                    window.dispatch_event(
+                        PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Left, position, modifiers: Modifiers::default(), click_count: 1 }),
+                        cx,
+                    );
+                })
+                .ok();
+                // Whatever it did (restyle, navigation) gets time to finish.
+                cx.background_executor().timer(Duration::from_millis(2500)).await;
+                wait_for_images(cx).await;
+            }
             if let Some(text) = job.typing.clone() {
                 this.update(cx, |_, cx| cx.emit(TabEvent::TypeInOmnibox(text))).ok();
                 cx.background_executor().timer(Duration::from_millis(300)).await;
@@ -763,7 +804,13 @@ impl Tab {
             .and_then(|p| p.styles.as_ref())
             .is_some_and(|s| s.has_state_rules());
         let page_gen = self.page_gen;
+        let controls = cx.entity().downgrade();
         RenderCx {
+            controls: Rc::new(move |control, style, window, cx| {
+                controls
+                    .update(cx, |this, cx| this.control_element(control, style, window, cx))
+                    .unwrap_or_else(|_| div().into_any_element())
+            }),
             palette: self.palette.clone(),
             images: self.images.clone(),
             images_generation: self.images_generation,
@@ -805,6 +852,14 @@ impl Tab {
                     .ok();
             }),
             on_link_click: Rc::new(move |url, window, cx| {
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("link click {url}");
+                }
+                // Buttons and labels: activate the element.
+                if let Some(node) = render::activation_target(url) {
+                    click.update(cx, |this, cx| this.activate(node, window, cx)).ok();
+                    return;
+                }
                 let url = url.clone();
                 let new_tab = window.modifiers().secondary(cx);
                 click
@@ -818,7 +873,7 @@ impl Tab {
                     .ok();
             }),
             on_link_hover: Rc::new(move |url, window, cx| {
-                let url = url.cloned();
+                let url = url.filter(|u| render::activation_target(u).is_none()).cloned();
                 hover.update(cx, |this, cx| this.link_hovered(url, window, cx)).ok();
             }),
         }

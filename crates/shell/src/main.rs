@@ -430,7 +430,7 @@ impl Render for Feather {
 }
 
 // gpui-kit embeds only the components' own icons; these are ours.
-gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen]);
+gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen, Check, ChevronDown]);
 
 /// The components' icons, then ours.
 struct AppAssets;

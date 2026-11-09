@@ -26,6 +26,8 @@ It is cursed. It also kind of works.
 - **Links load before you click them.** Rest the pointer on a link for 60ms and Feather fetches, parses, styles and lays out the whole page in the background. By the time you click, it's done. This is the closest thing it has to speculative execution.
 - **Grids are sliced like bread.** A CSS grid with a hundred cards becomes fifty two-card grids stacked on top of each other, each one its own list row. They agree on column widths because they all have the same template and the same width. Nobody can tell.
 - **Text shaping is shared across the whole browser.** Shaped text is cached by content, not by element, so Wikipedia's sidebar shapes once and every other Wikipedia tab gets it free.
+- **Form fields are actual text editors.** Each `<input>` is a box drawn from the page's CSS with a gpui-kit text editor (the kind you'd find in a code editor's settings panel) sitting inside it. Buttons don't have click handlers: their content links to `feather-activate:<node id>`, a URL scheme that exists only to make the inline layout's link hit-testing press buttons.
+- **CSS grid templates are faked twice.** GPUI only knows "N equal columns", so `grid-template-areas` layouts are placed by hand and rebuilt as flex rows. When one column holds most of the page (Wikipedia's article), it stays splittable so the page still virtualizes, and the sidebar is hung off the article's first row as an absolutely positioned box.
 - **The screenshot tool doesn't take screenshots.** It asks GPUI to render the window's frame into a texture offscreen. That's how the pictures above were made, with no screen-recording permission.
 
 ## What actually works
@@ -44,10 +46,12 @@ It is cursed. It also kind of works.
 
 - Tabs in the title bar, Chrome-style, with favicons; an omnibox with history suggestions, inline completion and search
 - Dark mode (`prefers-color-scheme`, `color-scheme`, `light-dark()`), `file://` pages and directory listings
+- Forms: text fields, textareas, checkboxes, radios, selects, buttons, labels; GET and POST submission; `:checked`, `:focus`, `:disabled`…
+- CSS grid templates (`grid-template-areas`, mixed track sizes), `transform: translate()`, box-generating `::before`/`::after`
 
 ## What doesn't (yet)
 
-JavaScript. Forms. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt [Boa](https://github.com/boa-dev/boa) (a JavaScript engine written in Rust, because of course) onto a DOM that was never meant to exist.
+JavaScript. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt [Boa](https://github.com/boa-dev/boa) (a JavaScript engine written in Rust, because of course) onto a DOM that was never meant to exist.
 
 ## Running it
 

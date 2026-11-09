@@ -70,10 +70,27 @@ pub fn fetch(url: &Url) -> Result<Response> {
     if url.scheme() == "file" {
         return file::fetch(url);
     }
-    let mut response = agent()
+    let response = agent()
         .get(url.as_str())
         .call()
         .with_context(|| format!("failed to fetch {url}"))?;
+    read_document(url, response)
+}
+
+/// Submit a form with `POST` (`application/x-www-form-urlencoded`).
+pub fn fetch_post(url: &Url, body: &str) -> Result<Response> {
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("can't POST to {url}");
+    }
+    let response = agent()
+        .post(url.as_str())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .send(body)
+        .with_context(|| format!("failed to post to {url}"))?;
+    read_document(url, response)
+}
+
+fn read_document(url: &Url, mut response: ureq::http::Response<ureq::Body>) -> Result<Response> {
 
     let final_url = Url::parse(&response.get_uri().to_string()).unwrap_or_else(|_| url.clone());
     let status = response.status().as_u16();

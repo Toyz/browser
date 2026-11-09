@@ -36,6 +36,8 @@ pub struct CaptureJob {
     pub mouse: Option<(f32, f32)>,
     /// Scroll-and-draw this many frames, timing each, and print stats.
     pub bench: Option<usize>,
+    /// Click here (window coordinates) before capturing, then let it settle.
+    pub click: Option<(f32, f32)>,
     /// Type this into the omnibox before capturing (suggestions, autocomplete).
     pub typing: Option<String>,
 }
@@ -63,6 +65,7 @@ impl Args {
         let mut mouse = None;
         let mut bench = None;
         let mut typing = None;
+        let mut click = None;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -73,6 +76,11 @@ impl Args {
                 "--scroll" => scroll = it.next().and_then(|n| n.parse().ok()).unwrap_or(0.0),
                 "--row" => row = it.next().and_then(|n| n.parse().ok()),
                 "--type" => typing = it.next(),
+                "--click" => {
+                    click = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
+                        Some((x.parse().ok()?, y.parse().ok()?))
+                    })
+                }
                 "--bench" => bench = it.next().and_then(|n| n.parse().ok()).or(Some(120)),
                 "--mouse" => {
                     mouse = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
@@ -94,7 +102,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

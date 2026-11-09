@@ -84,6 +84,22 @@ pub struct Lin {
     pub pct: f32,
 }
 
+impl std::ops::Add for Lin {
+    type Output = Lin;
+    fn add(self, o: Lin) -> Lin {
+        Lin {
+            px: self.px + o.px,
+            em: self.em + o.em,
+            rem: self.rem + o.rem,
+            vw: self.vw + o.vw,
+            vh: self.vh + o.vh,
+            vmin: self.vmin + o.vmin,
+            vmax: self.vmax + o.vmax,
+            pct: self.pct + o.pct,
+        }
+    }
+}
+
 impl Lin {
     pub fn px(v: f32) -> Self {
         Lin { px: v, ..Default::default() }

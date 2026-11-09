@@ -144,6 +144,8 @@ pub enum Decl {
     GridColumn(Option<GridSpan>),
     Overflow(Overflow),
     Opacity(f32),
+    /// `transform` / `translate`: just the translation (x, y).
+    Translate(LenSpec, LenSpec),
     Masked(bool),
     MaskUrl(Option<Arc<str>>),
     MaskSize(BgSizeSpec),
@@ -483,6 +485,47 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
         "mask-position" | "-webkit-mask-position" => out.push(D::MaskPosition(parse_bg_position(p)?)),
         "background-size" => out.push(D::BackgroundSize(parse_bg_size(p)?)),
         "background-position" => out.push(D::BackgroundPosition(parse_bg_position(p)?)),
+        "transform" | "translate" => {
+            // Only translations: rotations and scales are ignored.
+            let (mut x, mut y) = (Vec::new(), Vec::new());
+            if name == "translate" {
+                if let Ok(v) = parse_len(p) {
+                    x.push(v);
+                }
+                if let Ok(v) = p.try_parse(parse_len) {
+                    y.push(v);
+                }
+            }
+            while !p.is_exhausted() {
+                let Ok(token) = p.next().cloned() else { break };
+                let Token::Function(f) = token else { continue };
+                let f = f.to_ascii_lowercase();
+                p.parse_nested_block(|p| {
+                    let first = parse_len(p);
+                    let second = p.try_parse(|p| {
+                        p.expect_comma()?;
+                        parse_len(p)
+                    });
+                    while p.next().is_ok() {}
+                    match f.as_str() {
+                        "translate" | "translate3d" => {
+                            x.extend(first.ok());
+                            y.extend(second.ok());
+                        }
+                        "translatex" => x.extend(first.ok()),
+                        "translatey" => y.extend(first.ok()),
+                        _ => {}
+                    }
+                    Ok(())
+                })?;
+            }
+            let sum = |v: Vec<LenSpec>| match v.len() {
+                0 => LenSpec::px(0.0),
+                1 => v.into_iter().next().expect("one"),
+                _ => LenSpec::Lin(v.iter().filter_map(|l| match l { LenSpec::Lin(l) => Some(*l), _ => None }).fold(Lin::default(), |a, b| a + b)),
+            };
+            out.push(D::Translate(sum(x), sum(y)));
+        }
         "opacity" => {
             let v = match p.next()?.clone() {
                 Token::Number { value, .. } => value,
@@ -784,7 +827,7 @@ fn parse_tracks<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Vec<TrackSpec>>> {
                 Some(l) => TrackSpec::Len(LenSpec::Lin(l)),
                 None => TrackSpec::Auto,
             },
-            Token::Number { value, .. } if value == 0.0 => TrackSpec::Len(LenSpec::px(0.0)),
+            Token::Number { value: 0.0, .. } => TrackSpec::Len(LenSpec::px(0.0)),
             Token::Function(f) if f.eq_ignore_ascii_case("minmax") => p.parse_nested_block(|p| {
                 while !p.is_exhausted() && !matches!(p.next()?, Token::Comma) {}
                 Ok(match p.next()?.clone() {

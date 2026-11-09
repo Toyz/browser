@@ -9,6 +9,7 @@ name = "feather"
 path = "src/main.rs"
 
 [dependencies]
+slotmap.workspace = true
 gpui-kit.workspace = true
 anyhow.workspace = true
 url.workspace = true

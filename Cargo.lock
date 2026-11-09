@@ -5725,6 +5725,7 @@ dependencies = [
  "net",
  "page",
  "percent-encoding",
+ "slotmap",
  "style",
  "url",
 ]
@@ -6357,6 +6358,7 @@ dependencies = [
  "net",
  "page",
  "render",
+ "slotmap",
  "style",
  "url",
 ]

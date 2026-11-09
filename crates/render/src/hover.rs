@@ -40,6 +40,7 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.background_image = from.background_image;
     to.border_color = from.border_color;
     to.opacity = from.opacity;
+    to.translate = from.translate;
     to.underline = from.underline;
     to.strikethrough = from.strikethrough;
     to.visible = from.visible;
@@ -56,6 +57,17 @@ fn changed_roots(a: &ElementState, b: &ElementState) -> Vec<NodeId> {
     }
     if a.target != b.target {
         out.extend(a.target.into_iter().chain(b.target));
+    }
+    if a.checked != b.checked {
+        let empty = Default::default();
+        let (x, y) = (a.checked.as_deref().unwrap_or(&empty), b.checked.as_deref().unwrap_or(&empty));
+        // Without explicit state, the attributes decided: treat every
+        // control in the other set as possibly changed.
+        if a.checked.is_none() || b.checked.is_none() {
+            out.extend(x.union(y));
+        } else {
+            out.extend(x.symmetric_difference(y));
+        }
     }
     out
 }

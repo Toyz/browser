@@ -60,6 +60,8 @@ impl LayoutBox {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockKind {
+    /// A form control, drawn by the shell as a native widget inside the box.
+    Control(Arc<Control>),
     Normal,
     ListItem { marker: Option<SharedString> },
     Flex,
@@ -90,6 +92,39 @@ pub struct Block {
     pub cell: Option<CellLayout>,
     /// A section heading (h1–h6, or a wrapper starting with one); floats stop at these.
     pub heading: bool,
+}
+
+/// A form control (`<input>`, `<textarea>`, `<select>`) as the page built it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Control {
+    pub node: NodeId,
+    pub kind: ControlKind,
+    /// The initial value (the `value` attribute, or a textarea's text).
+    pub value: String,
+    pub placeholder: Option<String>,
+    pub disabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlKind {
+    Text { password: bool, multiline: bool },
+    Checkbox,
+    Radio,
+    /// (value, label) per option, and the initially selected one.
+    Select { options: Vec<(String, String)>, selected: usize },
+}
+
+/// Buttons, labels and checkboxes are activated by clicking anywhere in
+/// them: their content links to this internal URL, so the inline layout's
+/// link hit-testing does the work.
+pub fn activation_url(node: NodeId) -> Arc<Url> {
+    use slotmap::Key as _;
+    Arc::new(Url::parse(&format!("feather-activate:{}", node.data().as_ffi())).expect("valid URL"))
+}
+
+/// The element an [`activation_url`] points at.
+pub fn activation_target(url: &Url) -> Option<NodeId> {
+    (url.scheme() == "feather-activate").then(|| url.path().parse::<u64>().ok()).flatten().map(|v| slotmap::KeyData::from_ffi(v).into())
 }
 
 /// A table cell's flex sizing, derived from its whole column so that every
@@ -600,10 +635,48 @@ impl Container {
 struct Generated {
     before: Option<(String, ComputedStyle)>,
     after: Option<(String, ComputedStyle)>,
+    /// `::before`/`::after` that make a box rather than text (`content: ''`
+    /// plus a size, a background, absolute positioning...): toggle knobs,
+    /// dividers, decorative dots.
+    before_box: Option<Block>,
+    after_box: Option<Block>,
+}
+
+impl Generated {
+    /// Put a generated box where it goes in its container.
+    fn place(b: Option<Block>, c: &mut Container, link: Option<&Arc<Url>>) {
+        let Some(b) = b else { return };
+        if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed) {
+            c.absolutes.push(LayoutBox::Block(b));
+        } else if b.style.display.is_block_level() {
+            c.children.push(LayoutBox::Block(b));
+        } else {
+            let style = b.style.clone();
+            c.inline.push_object(InlineObject::BlockBox(Arc::new(b)), &style, link);
+        }
+    }
 }
 
 impl Builder<'_> {
-    fn generated(&self, id: NodeId, style: &ComputedStyle) -> Generated {
+    fn generated(&mut self, id: NodeId, style: &ComputedStyle) -> Generated {
+        // Empty content with a box of its own.
+        let mut boxed = |which| -> Option<Block> {
+            let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
+            let empty = ps.content.as_deref()?.iter().all(|i| matches!(i, ContentItem::Str(s) if s.is_empty()));
+            let positioned = matches!(ps.position, style::Position::Absolute | style::Position::Fixed);
+            let sized = !ps.width.is_auto() || !ps.height.is_auto();
+            let visible = ps.painted_background().is_some() || ps.has_border();
+            if !empty || !(positioned || (sized && visible)) || ps.display == Display::None {
+                return None;
+            }
+            let mut ps = ps;
+            if ps.display == Display::Inline {
+                ps.display = Display::InlineBlock;
+            }
+            Some(self.synthetic_block(ps, BlockKind::Normal, Vec::new()))
+        };
+        let before_box = boxed(Pseudo::Before);
+        let after_box = boxed(Pseudo::After);
         let one = |which| {
             let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
             let element = self.doc.element(id)?;
@@ -618,7 +691,7 @@ impl Builder<'_> {
             }
             (!text.is_empty()).then_some((text, ps))
         };
-        Generated { before: one(Pseudo::Before), after: one(Pseudo::After) }
+        Generated { before: one(Pseudo::Before), after: one(Pseudo::After), before_box, after_box }
     }
 
     /// Approximate floats: a floated box and the content after it (up to the
@@ -958,6 +1031,128 @@ impl Builder<'_> {
         out
     }
 
+    /// `<input>`, `<select>`, `<textarea>`.
+    fn build_control(
+        &mut self,
+        id: NodeId,
+        element: &page::ElementData,
+        input_type: Option<&str>,
+        style: Arc<ComputedStyle>,
+        c: &mut Container,
+        link: Option<&Arc<Url>>,
+    ) {
+        let tag = &*element.name.local;
+        // Visually hidden controls (`sr-only` toggles styled through a sibling).
+        if matches!(style.position, style::Position::Absolute | style::Position::Fixed) {
+            return;
+        }
+        let place = |this: &mut Self, block: Block, c: &mut Container| {
+            let style = block.style.clone();
+            if style.display.is_block_level() {
+                this.flush(c);
+                c.children.push(LayoutBox::Block(block));
+            } else {
+                c.inline.push_object(InlineObject::BlockBox(Arc::new(block)), &style, link);
+            }
+        };
+        let fs = style.font_size;
+        let kind = match (tag, input_type) {
+            (_, Some("hidden")) => return,
+            (_, Some(t @ ("submit" | "reset" | "button" | "image"))) => {
+                // A button: an inline-block showing its label.
+                let label = element.attr("value").map(str::to_owned).unwrap_or_else(|| match t {
+                    "reset" => "Reset".into(),
+                    "submit" | "image" => "Submit".into(),
+                    _ => String::new(),
+                });
+                let generated = Generated { before: Some((label, (*style).clone())), ..Default::default() };
+                let block = self.build_block(id, style.clone(), BlockKind::Normal, link, generated);
+                if style.display.is_block_level() {
+                    self.flush(c);
+                    c.children.push(LayoutBox::Block(block));
+                } else {
+                    let content = match block.children.as_slice() {
+                        [LayoutBox::Paragraph(p)] => Some(p.clone()),
+                        _ => None,
+                    };
+                    let object = InlineObject::Block(AtomicBox { node: Some(id), style: style.clone(), content });
+                    c.inline.push_object(object, &style, link);
+                }
+                return;
+            }
+            (_, Some("checkbox")) => ControlKind::Checkbox,
+            (_, Some("radio")) => ControlKind::Radio,
+            ("select", _) => {
+                let mut options = Vec::new();
+                let mut selected = None;
+                for n in self.doc.descendants(id) {
+                    let Some(o) = self.doc.element(n) else { continue };
+                    if &*o.name.local != "option" {
+                        continue;
+                    }
+                    let label = self.doc.text_content(n).split_whitespace().collect::<Vec<_>>().join(" ");
+                    let value = o.attr("value").map(str::to_owned).unwrap_or_else(|| label.clone());
+                    if o.attr("selected").is_some() && selected.is_none() {
+                        selected = Some(options.len());
+                    }
+                    options.push((value, label));
+                }
+                ControlKind::Select { options, selected: selected.unwrap_or(0) }
+            }
+            ("textarea", _) => ControlKind::Text { password: false, multiline: true },
+            (_, t) => ControlKind::Text { password: t == Some("password"), multiline: false },
+        };
+        let value = match tag {
+            "textarea" => self.doc.text_content(id),
+            _ => element.attr("value").unwrap_or_default().to_owned(),
+        };
+
+        // Intrinsic size (content box), when the page doesn't size it.
+        let char_w = fs * 0.55;
+        let line = fs * 1.25;
+        let attr_num = |name: &str, default: f32| element.attr(name).and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(default);
+        let (w, h) = match &kind {
+            ControlKind::Checkbox | ControlKind::Radio => (13.0, 13.0),
+            ControlKind::Select { options, .. } => {
+                let longest = options.iter().map(|(_, l)| l.chars().count()).max().unwrap_or(4) as f32;
+                (longest * fs * 0.6 + 30.0, line)
+            }
+            ControlKind::Text { multiline: true, .. } => (attr_num("cols", 20.0) * char_w, attr_num("rows", 2.0) * line),
+            ControlKind::Text { .. } => (attr_num("size", 20.0) * char_w, line),
+        };
+        let mut st = (*style).clone();
+        let edges_w = if st.border_box { st.horizontal_edges() } else { 0.0 };
+        let edges_h = if st.border_box { st.vertical_edges() } else { 0.0 };
+        if st.width.is_auto() {
+            st.width = Length::Px(w + edges_w);
+        }
+        if st.height.is_auto() {
+            st.height = Length::Px(h + edges_h);
+        }
+        let control = Control {
+            node: id,
+            kind,
+            value,
+            placeholder: element.attr("placeholder").map(str::to_owned),
+            disabled: element.attr("disabled").is_some(),
+        };
+        let width = st.outer_width(st.width).px_or_zero();
+        let block = Block {
+            id: self.next_id(),
+            node: Some(id),
+            style: Arc::new(st),
+            kind: BlockKind::Control(Arc::new(control)),
+            children: Vec::new(),
+            anchors: Vec::new(),
+            min_content: width,
+            max_content: width,
+            colspan: 1,
+            cell: None,
+            heading: false,
+        };
+        place(self, block, c);
+    }
+
     fn synthetic_block(&mut self, style: ComputedStyle, kind: BlockKind, children: Vec<LayoutBox>) -> Block {
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         Block {
@@ -1054,13 +1249,22 @@ impl Builder<'_> {
         };
         // Flex and grid containers "blockify" their children: each is an item.
         let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid);
+        let mut generated = generated;
         if let Some((text, st)) = &generated.before {
             c.inline.push_text(text, st, link);
         }
+        if generated.before_box.as_ref().is_some_and(|b| b.style.display.is_block_level()) {
+            self.flush(&mut c);
+        }
+        Generated::place(generated.before_box.take(), &mut c, link);
         self.build_children(id, &style, &mut c, link, blockify);
         if let Some((text, st)) = &generated.after {
             c.inline.push_text(text, st, link);
         }
+        if generated.after_box.as_ref().is_some_and(|b| b.style.display.is_block_level()) {
+            self.flush(&mut c);
+        }
+        Generated::place(generated.after_box.take(), &mut c, link);
         self.flush(&mut c);
         let anchors = std::mem::take(&mut c.pending_anchors);
         let children = if matches!(kind, BlockKind::Normal | BlockKind::ListItem { .. } | BlockKind::TableCell) {
@@ -1233,7 +1437,18 @@ impl Builder<'_> {
                 .flatten()
                 .and_then(|href| self.base_url.join(href.trim()).ok())
                 .map(Arc::new);
-            let link = own_link.as_ref().or(link);
+            // Buttons, labels, checkboxes: clicking anywhere in them activates them.
+            let input_type = (tag == "input").then(|| element.attr("type").unwrap_or("text").to_ascii_lowercase());
+            let activates = element.is_html()
+                && (matches!(tag, "button" | "label")
+                    || matches!(input_type.as_deref(), Some("submit" | "reset" | "button" | "image")));
+            let activation = (activates && link.is_none() && own_link.is_none()).then(|| activation_url(child));
+            let link = own_link.as_ref().or(activation.as_ref()).or(link);
+
+            if element.is_html() && matches!(tag, "input" | "select" | "textarea") {
+                self.build_control(child, element, input_type.as_deref(), style, c, link);
+                continue;
+            }
 
             // Out-of-flow boxes.
             match style.position {
@@ -1276,9 +1491,13 @@ impl Builder<'_> {
                     // out that way; anything else becomes a block-level box.
                     let generated = self.generated(child, &style);
                     let block = self.build_block(child, style.clone(), BlockKind::Normal, link, generated);
+                    // Nested flows can't host GPUI subtrees (form controls,
+                    // block inline-blocks): those make this one a subtree too.
                     let content = match block.children.as_slice() {
                         [] => Some(None),
-                        [LayoutBox::Paragraph(p)] => Some(Some(p.clone())),
+                        [LayoutBox::Paragraph(p)] if !p.objects.iter().any(|o| matches!(o, InlineObject::BlockBox(_))) => {
+                            Some(Some(p.clone()))
+                        }
                         _ => None,
                     };
                     let object = match content {
@@ -1301,14 +1520,16 @@ impl Builder<'_> {
                         c.inline.shifts.push(shift);
                         let box_start = c.inline.text.len();
                         c.inline.push_spacer(pad_left, &style, link);
-                        let generated = self.generated(child, &style);
+                        let mut generated = self.generated(child, &style);
                         if let Some((text, st)) = &generated.before {
                             c.inline.push_text(text, st, link);
                         }
+                        Generated::place(generated.before_box.take().filter(|b| !b.style.display.is_block_level()), c, link);
                         self.build_children(child, &style, c, link, false);
                         if let Some((text, st)) = &generated.after {
                             c.inline.push_text(text, st, link);
                         }
+                        Generated::place(generated.after_box.take().filter(|b| !b.style.display.is_block_level()), c, link);
                         c.inline.push_spacer(pad_right, &style, link);
                         let box_end = c.inline.text.len();
                         c.inline.shifts.pop();
@@ -2677,5 +2898,28 @@ mod tests {
         assert_eq!(alpha(1), "a");
         assert_eq!(alpha(27), "aa");
         assert_eq!(roman(1994), "mcmxciv");
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    #[test]
+    fn buttons_link_to_their_activation() {
+        let doc = html::parse(
+            r#"<form><p><input type="submit" value="Go"> <button>B</button></p></form>"#,
+            Url::parse("https://example.com/").unwrap(),
+        );
+        let styles = style::StyleData::for_document(&doc, &|_| None);
+        let tree = build(&doc, &styles.styler(style::MediaEnv::default()));
+        let mut found = Vec::new();
+        for row in &tree.rows {
+            if let LayoutBox::Paragraph(p) = &row.content {
+                found.push((p.text.to_string(), p.links.iter().map(|l| (l.range.clone(), l.url.scheme().to_owned())).collect::<Vec<_>>()));
+            }
+        }
+        println!("{found:?}");
+        assert!(found.iter().any(|(_, links)| links.iter().any(|(_, s)| s == "feather-activate")), "{found:?}");
     }
 }

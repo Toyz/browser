@@ -72,6 +72,8 @@ pub struct ComputedStyle {
     pub grid_area: Option<Arc<str>>,
     pub overflow: Overflow,
     pub opacity: f32,
+    /// `transform: translate(x, y)`: drawn this far from where it's laid out.
+    pub translate: (Length, Length),
     /// `mask-image` is set: the background is a stencil (usually an icon).
     pub masked: bool,
     /// The mask image's (absolute) URL, if it's one we can fetch.
@@ -151,6 +153,7 @@ impl ComputedStyle {
             grid_area: None,
             overflow: Overflow::Visible,
             opacity: 1.0,
+            translate: (Length::ZERO, Length::ZERO),
             masked: false,
             mask_url: None,
             mask_size: BgSize::Auto,

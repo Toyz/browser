@@ -288,7 +288,7 @@ impl StyleData {
         let has_state_rules = rules.iter().any(|r| {
             r.selectors.slice().iter().any(|sel| {
                 let css = cssparser::ToCss::to_css_string(sel);
-                [":hover", ":active", ":focus", ":target"].iter().any(|p| css.contains(p))
+                [":hover", ":active", ":focus", ":target", ":checked"].iter().any(|p| css.contains(p))
             })
         });
         Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules }
@@ -669,6 +669,7 @@ impl Styler {
             Decl::GridArea(v) => s.grid_area = v.clone(),
             Decl::Overflow(v) => s.overflow = *v,
             Decl::Opacity(v) => s.opacity = *v,
+            Decl::Translate(x, y) => s.translate = (len(x), len(y)),
             Decl::Masked(v) => s.masked = *v,
             Decl::Content(v) => s.content = v.clone(),
             Decl::Float(v) => s.float = *v,

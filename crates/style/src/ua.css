@@ -13,11 +13,49 @@ track, area, map, dialog, noembed, noframes, rp, col, colgroup, [hidden] {
   display: none;
 }
 
-/* Replaced and interactive content we can't render yet. */
-math, canvas, video, audio, iframe, object, embed, input, select, textarea,
-picture > source {
+/* Replaced content we can't render yet. */
+math, canvas, video, audio, iframe, object, embed, picture > source {
   display: none;
 }
+
+/* Form controls (the shell draws native widgets inside these boxes). */
+input, select, textarea, button {
+  display: inline-block;
+  font-family: system-ui, sans-serif;
+  font-size: 13.333px;
+  font-weight: normal;
+  line-height: normal;
+  color: FieldText;
+  text-align: left;
+  vertical-align: baseline;
+}
+input, select, textarea {
+  background-color: Field;
+  border: 1px solid #767676;
+  border-radius: 2px;
+  padding: 1px 2px;
+}
+textarea { white-space: pre-wrap; }
+select { padding: 1px 0; }
+input[type=checkbox], input[type=radio] {
+  margin: 3px 3px 3px 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  vertical-align: -2px;
+}
+button, input[type=submit], input[type=reset], input[type=button], input[type=image] {
+  padding: 1px 6px;
+  border: 1px solid #767676;
+  border-radius: 3px;
+  background-color: ButtonFace;
+  text-align: center;
+  cursor: default;
+}
+option, optgroup, datalist { display: none; }
+label { cursor: default; }
+fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }
+legend { padding: 0 2px; }
 
 html { color: CanvasText; font-family: system-ui, sans-serif; }
 body { margin: 8px; }
