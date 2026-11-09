@@ -38,9 +38,15 @@ It is deeply cursed, and it renders Wikipedia.
 - **Dark mode:** `prefers-color-scheme`, `color-scheme`, `light-dark()`
 - **Fonts and motion:** `@font-face` web fonts (WOFF, WOFF2, variable fonts instanced per weight), `box-shadow`, CSS transitions and `@keyframes` animations
 
+## JavaScript
+
+Pages' scripts run in [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, on a thread per page that owns the page's DOM. Every task that changes the DOM sends the tab a snapshot, which is restyled and laid out like any page. The DOM API is mostly JavaScript (a [prelude](crates/js/src/prelude.js) over a few dozen native functions that take node ids), so wrappers and listeners live where the garbage collector can see them.
+
+What's there: the DOM (queries through our own selector engine, `innerHTML` through html5ever, events with capture/bubble/`preventDefault`, inline handlers), timers, promises and `async`, `fetch` and `XMLHttpRequest` with real CORS (preflights, credentials, exposed headers), `FormData`, `Intl` (ICU, with time zones from Temporal), form fields and `submit` events, `location`, storage. Wikipedia gets its JavaScript layout and blizztrack's search works.
+
 ## What doesn't (yet)
 
-JavaScript. The plan is [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, because of course. Until then, sites that build themselves in JS (Google search, most web apps) stay blank or send their no-JS fallback. Also missing: rotating text and photos, `conic-gradient`, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md).
+ES modules, custom elements and shadow DOM (so web-component apps stay blank), layout queries (`getBoundingClientRect` is zeros), rotating text and photos, `conic-gradient`, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md). `FEATHER_NO_JS=1` turns scripts off.
 
 ## Running it
 
@@ -78,7 +84,7 @@ cargo run --features screenshot -- https://example.com --screenshot out.png \
 ## How it's put together
 
 ```
-net ──► html ──► page (the "DOM") ──► style (cascade) ──► render (boxes → GPUI) ──► shell (Feather)
+net ──► html ──► page (the "DOM") ──► js (Boa) ──► style (cascade) ──► render (boxes → GPUI) ──► shell (Feather)
 ```
 
 | Crate | What it does |
@@ -88,6 +94,7 @@ net ──► html ──► page (the "DOM") ──► style (cascade) ──�
 | [`page`](crates/page) | The arena tree everything else reads |
 | [`style`](crates/style) | Stylesheet parsing, selector matching, the cascade, computed styles, the [UA stylesheet](crates/style/src/ua.css) |
 | [`render`](crates/render) | Box tree, row flattening, grid/table/float approximations, the inline layout engine, hover patching, GPUI rendering |
+| [`js`](crates/js) | Scripts: the Boa thread, the DOM prelude, `fetch`/XHR with CORS |
 | [`shell`](crates/shell) | Feather itself: tabs, omnibox, history, prerendering, forms, the source view and its pretty-printers |
 
 Built on [GPUI](https://www.gpui.rs) via [gpui-kit](https://gpui-kit.com), [html5ever](https://github.com/servo/html5ever), [cssparser and selectors](https://github.com/servo/stylo), [Taffy](https://github.com/DioxusLabs/taffy) underneath GPUI, and [syntect](https://github.com/trishume/syntect) for the source view.

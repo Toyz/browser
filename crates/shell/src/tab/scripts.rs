@@ -28,6 +28,7 @@ impl Tab {
                     match msg {
                         js::FromJs::Document(doc) => this.script_dom(doc, window, cx),
                         js::FromJs::Navigate(url) => this.navigate(url, window, cx),
+                        js::FromJs::Submit(form) => this.submit_native(form, None, window, cx),
                     }
                     true
                 });

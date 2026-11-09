@@ -139,9 +139,10 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] DOM read API: `document`, `getElementById`, `querySelector(All)`, `textContent`, `getAttribute`, `children`, `parentNode`
 - [x] DOM write API (the framework subset): `createElement`, `createTextNode`, `appendChild`, `insertBefore`, `removeChild`, `setAttribute`, `classList`, `style.*`, `innerHTML` (setter reuses the `html` crate)
 - [x] Events: `addEventListener`, capture/bubbling, `click` (with `preventDefault` on links and buttons), `preventDefault`
-- [ ] Events: `input`, `submit`, `keydown` from the page's widgets
+- [ ] `keydown`/`keyup` from the page
 - [x] Changes mark the page dirty → restyle → `cx.notify()`
-- [ ] `fetch` / `XMLHttpRequest` with CORS, `history.pushState` (needed for SPAs); `localStorage` and `location` are in
+- [x] `fetch` / `XMLHttpRequest` with CORS (preflight, credentials, exposed headers), `FormData`, `submit`/`change`/`input` from the page's widgets
+- [ ] `history.pushState` navigation (needed for SPAs)
 - [ ] ES modules, custom elements, shadow DOM (`<slot>`, constructable stylesheets)
 - [ ] Stub everything else (no-ops / plausible defaults)
 

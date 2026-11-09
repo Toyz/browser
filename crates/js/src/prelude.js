@@ -131,6 +131,53 @@
       return parts;
     });
   }
+  // Date strings Chrome reads and Boa doesn't: microseconds, "2026-10-26
+  // 17:36", slashes, month names ("Oct 26 2026 17:36 GMT+0000").
+  {
+    const NativeDate = Date;
+    const nativeParse = Date.parse;
+    const MONTH = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+    const lenient = (text) => {
+      let s = String(text).trim();
+      // ISO with more than milliseconds.
+      let m = /^(\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?)(?:\.(\d+))?(Z|[+-]\d\d:?\d\d)?$/i.exec(s);
+      if (m) {
+        const frac = m[2] ? "." + m[2].slice(0, 3).padEnd(3, "0") : "";
+        const zone = m[3] ? (m[3].length === 5 ? m[3].slice(0, 3) + ":" + m[3].slice(3) : m[3]) : "";
+        return nativeParse(m[1].replace(" ", "T") + frac + zone);
+      }
+      m = /^(\d{4})\/(\d{1,2})\/(\d{1,2})(?:[ T](\d{1,2}):(\d\d)(?::(\d\d))?)?$/.exec(s);
+      if (m) return new NativeDate(+m[1], m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)).getTime();
+      // Words: month name, day, year, time, zone, in the usual orders.
+      const words = s.replace(/,/g, " ").split(/\s+/).filter(Boolean);
+      let year, month, day, h = 0, min = 0, sec = 0, zone = null;
+      for (const w of words) {
+        const lower = w.toLowerCase();
+        if (MONTH[lower.slice(0, 3)] !== undefined && /^[a-z]+\.?$/i.test(w)) month = MONTH[lower.slice(0, 3)];
+        else if (/^\d{1,2}:\d\d(:\d\d)?$/.test(w)) [h, min, sec = 0] = w.split(":").map(Number);
+        else if (/^\d{4}$/.test(w)) year = +w;
+        else if (/^\d{1,2}(st|nd|rd|th)?$/i.test(w) && day === undefined) day = parseInt(w, 10);
+        else if (/^(gmt|utc|z)([+-]\d{2}:?\d{2})?$/i.test(w) || /^[+-]\d{4}$/.test(w)) {
+          const off = /([+-])(\d\d):?(\d\d)/.exec(w);
+          zone = off ? (off[1] === "-" ? -1 : 1) * (+off[2] * 60 + +off[3]) : 0;
+        } else if (/^(am|pm)$/i.test(w)) { if (lower === "pm" && h < 12) h += 12; if (lower === "am" && h === 12) h = 0; }
+      }
+      if (year === undefined || month === undefined) return NaN;
+      if (zone === null) return new NativeDate(year, month, day || 1, h, min, sec).getTime();
+      return NativeDate.UTC(year, month, day || 1, h, min, sec) - zone * 60000;
+    };
+    const parse = (text) => {
+      const t = nativeParse(text);
+      return isNaN(t) ? lenient(text) : t;
+    };
+    global.Date = new Proxy(NativeDate, {
+      construct(target, args, newTarget) {
+        if (args.length === 1 && typeof args[0] === "string") args = [parse(args[0])];
+        return Reflect.construct(target, args, newTarget);
+      },
+    });
+    NativeDate.parse = parse;
+  }
   legacy(Object.prototype, "__defineGetter__", function (k, fn) { Object.defineProperty(this, k, { get: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__defineSetter__", function (k, fn) { Object.defineProperty(this, k, { set: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__lookupGetter__", function (k) { const d = Object.getOwnPropertyDescriptor(this, k); return d && d.get; });
@@ -574,7 +621,7 @@
     get outerText() { return this.textContent; }
   }
   reflect(HTMLElement, [["title", "title"], ["lang", "lang"], ["dir", "dir"], ["hidden", "hidden", "bool"], ["tabIndex", "tabindex", "num"], ["accessKey", "accesskey"], ["contentEditable", "contenteditable"], ["draggable", "draggable", "bool"]]);
-  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mousedown", "mouseup", "scroll", "resize"]) {
+  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mousedown", "mouseup", "scroll", "resize", "abort", "loadstart", "loadend", "progress", "timeout", "readystatechange", "message", "popstate", "hashchange", "visibilitychange"]) {
     for (const target of [HTMLElement.prototype, EventTarget.prototype]) {
       Object.defineProperty(target, "on" + ev, {
         configurable: true,
@@ -655,7 +702,7 @@
   reflect(HTMLButtonElement, [["type", "type"], ["name", "name"], ["value", "value"], ["disabled", "disabled", "bool"]]);
   class HTMLFormElement extends HTMLElement {
     get elements() { return this.querySelectorAll("input, select, textarea, button"); }
-    submit() { N.navigate(this.action || location.href); }
+    submit() { N.submitForm(this.__id); }
     requestSubmit() { if (this.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))) this.submit(); }
     reset() {}
   }
@@ -933,7 +980,7 @@
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Feather/0.1 Safari/537.36",
     language: "en-US", languages: ["en-US", "en"], platform: "MacIntel", vendor: "", onLine: true,
     cookieEnabled: true, hardwareConcurrency: 8, maxTouchPoints: 0, webdriver: false,
-    sendBeacon() { return true; },
+    sendBeacon(url, data) { fetch(url, { method: "POST", body: data, mode: "no-cors", credentials: "include" }).catch(() => {}); return true; },
     clipboard: { writeText: () => Promise.resolve(), readText: () => Promise.resolve("") },
     serviceWorker: undefined,
   };
@@ -1011,6 +1058,302 @@
     return out;
   }
 
+  // ---- network -----------------------------------------------------------
+
+  class Headers {
+    constructor(init) {
+      this._map = new Map();
+      if (init instanceof Headers) init.forEach((v, k) => this.append(k, v));
+      else if (Array.isArray(init)) for (const [k, v] of init) this.append(k, v);
+      else if (init && typeof init === "object") for (const k of Object.keys(init)) this.append(k, init[k]);
+    }
+    append(k, v) { k = String(k).toLowerCase(); const old = this._map.get(k); this._map.set(k, old === undefined ? String(v) : old + ", " + v); }
+    set(k, v) { this._map.set(String(k).toLowerCase(), String(v)); }
+    get(k) { const v = this._map.get(String(k).toLowerCase()); return v === undefined ? null : v; }
+    has(k) { return this._map.has(String(k).toLowerCase()); }
+    delete(k) { this._map.delete(String(k).toLowerCase()); }
+    forEach(fn, self) { for (const [k, v] of this._map) fn.call(self, v, k, this); }
+    keys() { return this._map.keys(); }
+    values() { return this._map.values(); }
+    entries() { return this._map.entries(); }
+    [Symbol.iterator]() { return this._map.entries(); }
+    _list() { return Array.from(this._map.entries()); }
+  }
+
+  // UTF-8 both ways (Boa has no TextEncoder).
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(s) {
+      s = String(s === undefined ? "" : s);
+      const out = [];
+      for (const ch of s) {
+        let c = ch.codePointAt(0);
+        if (c < 0x80) out.push(c);
+        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+      }
+      return new Uint8Array(out);
+    }
+  }
+  class TextDecoder {
+    constructor(label) { this.encoding = label || "utf-8"; }
+    decode(buf) {
+      if (!buf) return "";
+      const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf.buffer || buf);
+      let out = "";
+      for (let i = 0; i < b.length;) {
+        const c = b[i++];
+        let cp = c;
+        if (c >= 0xf0) cp = ((c & 7) << 18) | ((b[i++] & 63) << 12) | ((b[i++] & 63) << 6) | (b[i++] & 63);
+        else if (c >= 0xe0) cp = ((c & 15) << 12) | ((b[i++] & 63) << 6) | (b[i++] & 63);
+        else if (c >= 0xc0) cp = ((c & 31) << 6) | (b[i++] & 63);
+        out += String.fromCodePoint(cp);
+      }
+      return out;
+    }
+  }
+
+  class Blob {
+    constructor(parts, opts) {
+      this._text = (parts || []).map((p) => (p instanceof Blob ? p._text : typeof p === "string" ? p : new TextDecoder().decode(p))).join("");
+      this.type = (opts && opts.type) || "";
+    }
+    get size() { return new TextEncoder().encode(this._text).length; }
+    text() { return Promise.resolve(this._text); }
+    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._text).buffer); }
+    slice(a, b) { return new Blob([this._text.slice(a, b)], { type: this.type }); }
+  }
+  class File extends Blob {
+    constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now(); }
+  }
+
+  class FormData {
+    constructor(form) {
+      this._list = [];
+      if (form && form.__id !== undefined) {
+        for (const el of form.querySelectorAll("input, select, textarea")) {
+          const name = el.getAttribute("name");
+          if (!name || el.hasAttribute("disabled")) continue;
+          const type = (el.getAttribute("type") || "").toLowerCase();
+          if ((type === "checkbox" || type === "radio") && !el.checked) continue;
+          if (type === "submit" || type === "button" || type === "reset" || type === "file" || type === "image") continue;
+          this._list.push([name, type === "checkbox" && !el.hasAttribute("value") ? "on" : String(el.value)]);
+        }
+      }
+    }
+    append(k, v) { this._list.push([String(k), v instanceof Blob ? v : String(v)]); }
+    set(k, v) { this.delete(k); this.append(k, v); }
+    get(k) { const e = this._list.find(([a]) => a === k); return e ? e[1] : null; }
+    getAll(k) { return this._list.filter(([a]) => a === k).map(([, v]) => v); }
+    has(k) { return this._list.some(([a]) => a === k); }
+    delete(k) { this._list = this._list.filter(([a]) => a !== k); }
+    forEach(fn, self) { for (const [k, v] of this._list) fn.call(self, v, k, this); }
+    keys() { return this._list.map(([k]) => k)[Symbol.iterator](); }
+    values() { return this._list.map(([, v]) => v)[Symbol.iterator](); }
+    entries() { return this._list.map((e) => e.slice())[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+  }
+
+  // A body (string, URLSearchParams, FormData, Blob, typed array) as
+  // text, plus the content type it implies.
+  function encodeBody(body) {
+    if (body === undefined || body === null) return [null, null];
+    if (typeof body === "string") return [body, "text/plain;charset=UTF-8"];
+    if (body instanceof URLSearchParams) return [body.toString(), "application/x-www-form-urlencoded;charset=UTF-8"];
+    if (body instanceof FormData) {
+      const boundary = "----FeatherFormBoundary" + Math.random().toString(16).slice(2);
+      let out = "";
+      for (const [k, v] of body._list) {
+        out += "--" + boundary + "\r\n";
+        if (v instanceof Blob) out += 'Content-Disposition: form-data; name="' + k + '"; filename="' + (v.name || "blob") + '"\r\nContent-Type: ' + (v.type || "application/octet-stream") + "\r\n\r\n" + v._text + "\r\n";
+        else out += 'Content-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + "\r\n";
+      }
+      return [out + "--" + boundary + "--\r\n", "multipart/form-data; boundary=" + boundary];
+    }
+    if (body instanceof Blob) return [body._text, body.type || null];
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return [new TextDecoder().decode(body instanceof ArrayBuffer ? new Uint8Array(body) : body), null];
+    return [String(body), "text/plain;charset=UTF-8"];
+  }
+
+  class Request {
+    constructor(input, init) {
+      init = init || {};
+      const from = input instanceof Request ? input : null;
+      this.url = from ? from.url : (N.resolve(String(input)) || String(input));
+      this.method = String(init.method || (from && from.method) || "GET").toUpperCase();
+      this.headers = new Headers(init.headers || (from && from.headers));
+      this._body = init.body !== undefined ? init.body : from ? from._body : null;
+      this.mode = init.mode || (from && from.mode) || "cors";
+      this.credentials = init.credentials || (from && from.credentials) || "same-origin";
+      this.cache = init.cache || "default";
+      this.redirect = init.redirect || "follow";
+      this.signal = init.signal || (from && from.signal) || null;
+      this.referrer = "about:client";
+    }
+    clone() { return new Request(this); }
+  }
+
+  class Response {
+    constructor(body, init) {
+      init = init || {};
+      this._text = body === undefined || body === null ? "" : encodeBody(body)[0];
+      this.status = init.status === undefined ? 200 : init.status;
+      this.statusText = init.statusText || "";
+      this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers);
+      this.type = "default";
+      this.url = "";
+      this.redirected = false;
+      this.bodyUsed = false;
+      this.body = null;
+    }
+    get ok() { return this.status >= 200 && this.status < 300; }
+    _consume() {
+      if (this.bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
+      this.bodyUsed = true;
+      return Promise.resolve(this._text);
+    }
+    text() { return this._consume(); }
+    json() { return this._consume().then((t) => JSON.parse(t)); }
+    arrayBuffer() { return this._consume().then((t) => new TextEncoder().encode(t).buffer); }
+    blob() { return this._consume().then((t) => new Blob([t], { type: this.headers.get("content-type") || "" })); }
+    formData() { return this._consume().then((t) => { const f = new FormData(); new URLSearchParams(t).forEach((v, k) => f.append(k, v)); return f; }); }
+    clone() { const r = new Response(this._text, this); Object.assign(r, { type: this.type, url: this.url, redirected: this.redirected }); return r; }
+    static json(data, init) { const r = new Response(JSON.stringify(data), init); r.headers.set("content-type", "application/json"); return r; }
+    static error() { const r = new Response(null, { status: 0 }); r.type = "error"; return r; }
+    static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: url } }); }
+  }
+
+  class AbortSignal extends EventTarget {
+    constructor() { super(); this.aborted = false; this.reason = undefined; this.onabort = null; }
+    throwIfAborted() { if (this.aborted) throw this.reason; }
+    static timeout(ms) { const c = new AbortController(); setTimeout(() => c.abort(new DOMException("The operation timed out.", "TimeoutError")), ms); return c.signal; }
+    static abort(reason) { const c = new AbortController(); c.abort(reason); return c.signal; }
+  }
+  class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason) {
+      const s = this.signal;
+      if (s.aborted) return;
+      s.aborted = true;
+      s.reason = reason === undefined ? new DOMException("signal is aborted without reason", "AbortError") : reason;
+      s.dispatchEvent(new Event("abort"));
+      if (typeof s.onabort === "function") s.onabort(new Event("abort"));
+    }
+  }
+  class DOMException extends Error {
+    constructor(message, name) { super(message); this.name = name || "Error"; }
+  }
+
+  // Requests in flight: id → callback(error, response fields).
+  const requests = new Map();
+  let nextRequest = 1;
+  function toResponse(args) {
+    const [, , status, statusText, url, headers, body, type, redirected] = args;
+    const r = new Response(body, { status, statusText, headers: new Headers(headers) });
+    r.url = url; r.type = type; r.redirected = redirected;
+    return r;
+  }
+  function fetch(input, init) {
+    let req;
+    try { req = new Request(input, init); } catch (e) { return Promise.reject(e); }
+    if (req.signal && req.signal.aborted) return Promise.reject(req.signal.reason);
+    const [body, type] = encodeBody(req._body);
+    if (type && !req.headers.has("content-type")) req.headers.set("content-type", type);
+    return new Promise((resolve, reject) => {
+      const id = nextRequest++;
+      requests.set(id, (args) => {
+        if (args[1] !== null) { N.log("warn", "fetch " + req.url + ": " + args[1]); reject(new TypeError("Failed to fetch")); }
+        else resolve(toResponse(args));
+      });
+      if (req.signal) req.signal.addEventListener("abort", () => { if (requests.delete(id)) reject(req.signal.reason); });
+      N.fetch(id, req.method, req.url, req.headers._list(), body, req.mode, req.credentials);
+    });
+  }
+
+  class XMLHttpRequest extends EventTarget {
+    constructor() {
+      super();
+      this.readyState = 0; this.status = 0; this.statusText = ""; this.responseText = ""; this.responseURL = "";
+      this.responseType = ""; this.timeout = 0; this.withCredentials = false; this.upload = new EventTarget();
+      this._headers = new Headers(); this._response = null; this._id = 0;
+    }
+    get response() {
+      if (this.readyState !== 4) return this.responseType === "" || this.responseType === "text" ? "" : null;
+      if (this.responseType === "json") { try { return JSON.parse(this.responseText); } catch (_) { return null; } }
+      if (this.responseType === "arraybuffer") return new TextEncoder().encode(this.responseText).buffer;
+      if (this.responseType === "blob") return new Blob([this.responseText]);
+      if (this.responseType === "document") return new DOMParser().parseFromString(this.responseText, "text/html");
+      return this.responseText;
+    }
+    get responseXML() { return this.responseType === "document" ? this.response : null; }
+    open(method, url, async) {
+      this._method = String(method).toUpperCase();
+      this._url = N.resolve(String(url)) || String(url);
+      this._async = async !== false;
+      this._headers = new Headers();
+      this._set(1);
+    }
+    setRequestHeader(k, v) { this._headers.append(k, v); }
+    overrideMimeType() {}
+    getResponseHeader(k) { return this._response ? this._response.headers.get(k) : null; }
+    getAllResponseHeaders() {
+      if (!this._response) return "";
+      return this._response.headers._list().map(([k, v]) => k + ": " + v).join("\r\n") + "\r\n";
+    }
+    // (`onload` and friends run from dispatchEvent.)
+    _set(state) {
+      this.readyState = state;
+      this.dispatchEvent(new Event("readystatechange"));
+    }
+    _fire(type) { this.dispatchEvent(new Event(type)); }
+    _finish(args) {
+      if (args[1] !== null) {
+        N.log("warn", "XMLHttpRequest " + this._url + ": " + args[1]);
+        this.status = 0;
+        this._set(4);
+        this._fire("error");
+        this._fire("loadend");
+        return;
+      }
+      const r = toResponse(args);
+      this._response = r;
+      this.status = r.status; this.statusText = r.statusText; this.responseURL = r.url; this.responseText = r._text;
+      this._set(2); this._set(3); this._set(4);
+      this._fire("load");
+      this._fire("loadend");
+    }
+    send(body) {
+      const [text, type] = this._method === "GET" || this._method === "HEAD" ? [null, null] : encodeBody(body);
+      if (type && !this._headers.has("content-type")) this._headers.set("content-type", type);
+      const credentials = this.withCredentials ? "include" : "same-origin";
+      this._fire("loadstart");
+      if (!this._async) {
+        this._finish(N.fetchSync(0, this._method, this._url, this._headers._list(), text, "cors", credentials));
+        return;
+      }
+      const id = nextRequest++;
+      this._id = id;
+      requests.set(id, (args) => this._finish(args));
+      N.fetch(id, this._method, this._url, this._headers._list(), text, "cors", credentials);
+    }
+    abort() {
+      if (requests.delete(this._id)) { this.readyState = 0; this._fire("abort"); this._fire("loadend"); }
+    }
+  }
+  Object.assign(XMLHttpRequest, { UNSENT: 0, OPENED: 1, HEADERS_RECEIVED: 2, LOADING: 3, DONE: 4 });
+
+  Object.assign(window, {
+    fetch, Headers, Request, Response, XMLHttpRequest, FormData, Blob, File, TextEncoder, TextDecoder,
+    AbortController, AbortSignal, DOMException,
+    __fetchDone(...args) {
+      const done = requests.get(args[0]);
+      if (!done) return;
+      requests.delete(args[0]);
+      done(args);
+    },
+  });
+
   // ---- hooks for the host ----------------------------------------------
 
   Object.assign(window, {
@@ -1024,6 +1367,20 @@
       const n = wrap(id);
       if (!n) return false;
       const ev = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+      ev.isTrusted = true;
+      return !n.dispatchEvent(ev);
+    },
+    __dispatchChecked(id, checked) {
+      const n = wrap(id);
+      if (!n) return;
+      if (checked) n.setAttribute("checked", ""); else n.removeAttribute("checked");
+      n.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      n.dispatchEvent(new Event("change", { bubbles: true }));
+    },
+    __dispatchSubmit(id) {
+      const n = wrap(id);
+      if (!n) return false;
+      const ev = new Event("submit", { bubbles: true, cancelable: true });
       ev.isTrusted = true;
       return !n.dispatchEvent(ev);
     },

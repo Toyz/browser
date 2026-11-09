@@ -280,6 +280,14 @@ impl Tab {
                     self.submit(form, None, window, cx);
                 }
             }
+            // Scripts read field values (and hear `input`).
+            InputEvent::Change => {
+                if let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref())
+                    && let Some(field) = self.forms.fields.get(&node)
+                {
+                    host.send(js::ToJs::Input { node, value: field.value(cx) });
+                }
+            }
             InputEvent::Focus => {
                 self.forms.focused = Some(node);
                 self.interaction_changed(window, cx);
@@ -334,9 +342,11 @@ impl Tab {
                     }
                     self.forms.last_toggle = Some((node, now));
                     let set = self.checked_mut(&doc);
-                    if !set.remove(&node) {
+                    let checked = !set.remove(&node);
+                    if checked {
                         set.insert(node);
                     }
+                    self.tell_scripts_checked(node, checked);
                     self.form_state_changed(window, cx);
                 }
                 "radio" => {
@@ -359,6 +369,7 @@ impl Tab {
                         set.remove(&n);
                     }
                     set.insert(node);
+                    self.tell_scripts_checked(node, true);
                     self.form_state_changed(window, cx);
                 }
                 _ => {}
@@ -454,8 +465,34 @@ impl Tab {
         out
     }
 
-    /// Submit a form (GET: as the query string; POST: urlencoded body).
+    fn tell_scripts_checked(&self, node: NodeId, checked: bool) {
+        if let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref()) {
+            host.send(js::ToJs::Checked { node, checked });
+        }
+    }
+
+    /// Submit a form: scripts' `submit` handlers first (they may cancel it,
+    /// usually to send it themselves), then the browser's way.
     fn submit(&mut self, form: NodeId, submitter: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else {
+            self.submit_native(form, submitter, window, cx);
+            return;
+        };
+        let page_gen = self.page_gen;
+        cx.spawn_in(window, async move |this, cx| {
+            let go = cx.background_spawn(async move { host.may_submit(form, Duration::from_millis(500)) }).await;
+            this.update_in(cx, |this, window, cx| {
+                if go && this.page_gen == page_gen {
+                    this.submit_native(form, submitter, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Submit a form (GET: as the query string; POST: urlencoded body).
+    pub(super) fn submit_native(&mut self, form: NodeId, submitter: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(doc) = self.doc() else { return };
         let Some(page_url) = self.page.as_ref().map(|p| p.url.clone()) else { return };
         let attr = |name: &str| {

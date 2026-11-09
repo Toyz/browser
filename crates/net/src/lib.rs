@@ -148,6 +148,105 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// An agent with its own (empty) cookie jar: requests that mustn't carry
+/// the user's cookies (cross-origin `fetch` without credentials).
+fn anonymous_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .user_agent(USER_AGENT)
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build()
+            .into()
+    })
+}
+
+/// A request from a page's scripts (`fetch`, `XMLHttpRequest`).
+#[derive(Debug, Clone)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: Url,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    /// Send (and keep) the user's cookies.
+    pub cookies: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    /// After redirects.
+    pub url: Url,
+    pub status: u16,
+    pub status_text: String,
+    /// Lowercase names.
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Make an HTTP request as a page's script asked (any method, headers and
+/// body). `data:` URLs work too.
+pub fn request(req: &HttpRequest) -> Result<HttpResponse> {
+    if req.url.scheme() == "data" {
+        let body = decode_data_url(req.url.as_str())?;
+        let mime = req.url.path().split([',', ';']).next().unwrap_or("text/plain").to_owned();
+        return Ok(HttpResponse { url: req.url.clone(), status: 200, status_text: "OK".into(), headers: vec![("content-type".into(), mime)], body });
+    }
+    if req.url.scheme() == "file" {
+        let body = file::read(&req.url)?;
+        return Ok(HttpResponse { url: req.url.clone(), status: 200, status_text: "OK".into(), headers: Vec::new(), body });
+    }
+    if !matches!(req.url.scheme(), "http" | "https") {
+        bail!("unsupported scheme: {}", req.url.scheme());
+    }
+    let mut builder = ureq::http::Request::builder().method(req.method.as_str()).uri(req.url.as_str());
+    for (k, v) in &req.headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
+    let has = |name: &str| req.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+    if !has("accept") {
+        builder = builder.header("accept", "*/*");
+    }
+    if !has("accept-language") {
+        builder = builder.header("accept-language", ACCEPT_LANGUAGE);
+    }
+    if req.cookies && !has("authorization")
+        && let Some(a) = auth::header(&req.url)
+    {
+        builder = builder.header("authorization", a);
+    }
+    let agent = if req.cookies { agent() } else { anonymous_agent() };
+    let result = match &req.body {
+        Some(body) => agent.run(builder.body(body.as_slice())?),
+        None => agent.run(builder.body(())?),
+    };
+    let mut response = result.with_context(|| format!("failed to fetch {}", req.url))?;
+    let final_url = Url::parse(&ureq::ResponseExt::get_uri(&response).to_string()).unwrap_or_else(|_| req.url.clone());
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_ascii_lowercase(), v.to_str().unwrap_or_default().to_owned()))
+        .collect();
+    let body = response.body_mut().with_config().limit(MAX_BODY_BYTES).read_to_vec().context("reading the response")?;
+    if req.cookies {
+        save_cookies();
+    }
+    Ok(HttpResponse {
+        url: final_url,
+        status: status.as_u16(),
+        status_text: status.canonical_reason().unwrap_or("").to_owned(),
+        headers,
+        body,
+    })
+}
+
 /// Fetch a URL, following redirects. Non-2xx responses still return their body
 /// (error pages are documents too).
 pub fn fetch(url: &Url) -> Result<Response> {

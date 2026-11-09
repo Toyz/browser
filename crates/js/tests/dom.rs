@@ -123,3 +123,49 @@ fn probe_text() {
     let doc = run(&html);
     println!("{}", text_of(&doc, "o"));
 }
+
+/// Real network: `cargo test -p js cors -- --ignored`.
+#[test]
+#[ignore]
+fn cors_fetch_and_xhr() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const out = [];
+        const log = (s) => { out.push(s); document.getElementById("o").textContent = out.join(" | "); };
+        (async () => {
+          const r = await fetch("https://httpbin.org/get?x=1");
+          const j = await r.json();
+          log("get " + r.status + " " + r.type + " " + j.args.x);
+          const p = await fetch("https://httpbin.org/anything", { method: "PUT", headers: { "X-Test": "yes", "Content-Type": "application/json" }, body: JSON.stringify({ a: 1 }) });
+          const pj = await p.json();
+          log("preflighted " + p.status + " " + pj.headers["X-Test"] + " " + pj.json.a);
+          const c = await fetch("https://httpbin.org/cookies", { credentials: "include" });
+          log("credentials " + c.status);
+          try { await fetch("https://news.ycombinator.com/"); log("blocked? no"); } catch (e) { log("blocked " + e.name); }
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "https://httpbin.org/post");
+          xhr.responseType = "json";
+          xhr.onload = () => log("xhr " + xhr.status + " " + xhr.response.form.k);
+          const f = new FormData(); f.append("k", "v");
+          xhr.send(new URLSearchParams(f));
+        })();
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(30), debug: true };
+    let (doc, host) = js::start(doc, opts);
+    // The first paint waits for quick requests; the rest come as updates.
+    let mut text = text_of(&doc, "o");
+    if let Some(host) = &host {
+        while !text.contains("xhr") {
+            match host.updates.recv_blocking() {
+                Ok(js::FromJs::Document(d)) => text = text_of(&d, "o"),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    println!("{text}");
+    assert_eq!(text, "get 200 cors 1 | preflighted 200 yes 1 | credentials 200 | blocked TypeError | xhr 200 v");
+}

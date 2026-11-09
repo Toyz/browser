@@ -48,11 +48,17 @@ pub(crate) struct Dom {
     pending_scripts: Vec<NodeId>,
     ran: HashSet<NodeId>,
     navigate: Option<Url>,
+    /// `form.submit()` for the tab to carry out.
+    submit: Option<NodeId>,
     /// Form field values from the page (by node).
     values: HashMap<NodeId, String>,
     debug: bool,
     dark: bool,
     started: Instant,
+    /// Where finished requests report back.
+    fetch_tx: mpsc::Sender<ToJs>,
+    /// Requests in flight.
+    fetches: usize,
 }
 
 type Shared = Rc<RefCell<Dom>>;
@@ -75,16 +81,20 @@ impl Runtime {
         doc: Document,
         opts: Options,
         rx: mpsc::Receiver<ToJs>,
+        fetch_tx: mpsc::Sender<ToJs>,
         updates: async_channel::Sender<FromJs>,
         listening: Arc<RwLock<HashSet<NodeId>>>,
     ) -> Runtime {
         let dom = Rc::new(RefCell::new(Dom {
+            fetch_tx,
+            fetches: 0,
             doc,
             dirty: false,
             timers: Vec::new(),
             pending_scripts: Vec::new(),
             ran: HashSet::new(),
             navigate: None,
+            submit: None,
             values: HashMap::new(),
             debug: opts.debug,
             dark: opts.dark,
@@ -284,9 +294,23 @@ impl Runtime {
 
     /// Send the tab the DOM if it changed (at most every `SNAPSHOT_EVERY`).
     fn flush(&mut self) {
-        if let Some(url) = self.dom.borrow_mut().navigate.take() {
+        let navigate = self.dom.borrow_mut().navigate.take();
+        if let Some(url) = navigate {
             self.updates.send_blocking(FromJs::Navigate(url)).ok();
         }
+        let submit = self.dom.borrow_mut().submit.take();
+        if let Some(form) = submit {
+            // The tab reads the fields from the DOM it has: send that first.
+            self.dom.borrow_mut().dirty = true;
+            self.last_sent = Instant::now() - SNAPSHOT_EVERY;
+            self.flush_doc();
+            self.updates.send_blocking(FromJs::Submit(form)).ok();
+            return;
+        }
+        self.flush_doc();
+    }
+
+    fn flush_doc(&mut self) {
         if !self.dom.borrow().dirty {
             self.flush_at = None;
             return;
@@ -321,11 +345,65 @@ impl Runtime {
                         reply.send(prevented.to_boolean()).ok();
                     }
                 }
+                Ok(ToJs::FetchDone { id, result }) => self.fetch_done(id, result),
+                Ok(ToJs::Checked { node, checked }) => {
+                    self.call_global("__dispatchChecked", &[JsValue::from(node_to_number(node)), JsValue::from(checked)]);
+                }
+                Ok(ToJs::Submit { form, reply }) => {
+                    let prevented = self.call_global("__dispatchSubmit", &[JsValue::from(node_to_number(form))]);
+                    reply.send(prevented.to_boolean()).ok();
+                }
                 Ok(ToJs::Input { node, value }) => {
                     self.dom.borrow_mut().values.insert(node, value);
                     self.call_global("__dispatchInput", &[JsValue::from(node_to_number(node))]);
                 }
                 Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Hand a finished request to its promise (or XHR).
+    fn fetch_done(&mut self, id: u32, result: Result<crate::cors::ScriptResponse, String>) {
+        self.dom.borrow_mut().fetches -= 1;
+        let args = response_args(id, result, &mut self.cx);
+        self.call_global("__fetchDone", &args);
+    }
+
+    /// Before the first paint: keep running timers and requests for up to
+    /// `budget` (or until nothing's pending).
+    pub fn drain_for(&mut self, budget: Duration) {
+        let deadline = Instant::now() + budget;
+        loop {
+            self.settle_quiet();
+            let soon = self.dom.borrow().timers.iter().any(|(t, _)| *t < deadline);
+            if self.dom.borrow().fetches == 0 && !soon {
+                return;
+            }
+            let next_timer = self.dom.borrow().timers.iter().map(|(t, _)| *t).min();
+            let wait = next_timer.map_or(deadline, |t| t.min(deadline));
+            if Instant::now() >= deadline {
+                return;
+            }
+            match self.rx.recv_timeout(until(Some(wait))) {
+                Ok(ToJs::FetchDone { id, result }) => self.fetch_done(id, result),
+                Ok(ToJs::Click { reply: Some(reply), .. }) => {
+                    reply.send(false).ok();
+                }
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
+    /// `settle` without sending anything.
+    fn settle_quiet(&mut self) {
+        for _ in 0..32 {
+            let timers = self.run_due_timers();
+            let scripts = !self.dom.borrow().pending_scripts.is_empty();
+            self.run_pending_scripts();
+            self.cx.run_jobs().ok();
+            if !timers && !scripts && self.dom.borrow().pending_scripts.is_empty() {
+                break;
             }
         }
     }
@@ -619,6 +697,11 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsValue::undefined())
     }));
     add("url", 0, Box::new(|d, _, _| Ok(js_str(d.borrow().doc.url.as_str()))));
+    add("submitForm", 1, Box::new(|d, a, _| {
+        let mut dom = d.borrow_mut();
+        dom.submit = arg_node(&dom, a, 0);
+        Ok(JsValue::undefined())
+    }));
     add("navigate", 1, Box::new(|d, a, cx| {
         let href = arg_string(a, 0, cx)?;
         let mut dom = d.borrow_mut();
@@ -688,7 +771,102 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         }
         Ok(JsValue::undefined())
     }));
+    // fetch(id, method, url, [[name, value]...], body|null, mode, credentials):
+    // runs on its own thread, answers through `__fetchDone`.
+    add("fetch", 7, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let req = script_request(d, a, cx)?;
+        let mut dom = d.borrow_mut();
+        let page = dom.doc.url.clone();
+        let tx = dom.fetch_tx.clone();
+        dom.fetches += 1;
+        let debug = dom.debug;
+        drop(dom);
+        let Some(req) = req else {
+            tx.send(ToJs::FetchDone { id, result: Err("invalid URL".into()) }).ok();
+            return Ok(JsValue::undefined());
+        };
+        std::thread::Builder::new()
+            .name("feather-fetch".into())
+            .spawn(move || {
+                let t = Instant::now();
+                let what = format!("{} {}", req.method, req.url);
+                let result = crate::cors::fetch(&page, req);
+                if debug {
+                    match &result {
+                        Ok(r) => eprintln!("js: fetch {what} → {} ({} bytes) in {:?}", r.status, r.body.len(), t.elapsed()),
+                        Err(e) => eprintln!("js: fetch {what} failed: {e}"),
+                    }
+                }
+                tx.send(ToJs::FetchDone { id, result }).ok();
+            })
+            .ok();
+        Ok(JsValue::undefined())
+    }));
+    // The same, blocking (synchronous XMLHttpRequest): the response arguments.
+    add("fetchSync", 7, Box::new(|d, a, cx| {
+        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+        let page = d.borrow().doc.url.clone();
+        let result = match script_request(d, a, cx)? {
+            Some(req) => crate::cors::fetch(&page, req),
+            None => Err("invalid URL".into()),
+        };
+        let args = response_args(id, result, cx);
+        Ok(JsArray::from_iter(args, cx).into())
+    }));
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
+}
+
+/// The request in a `fetch`/`fetchSync` call's arguments (`None`: bad URL).
+fn script_request(d: &Shared, a: &[JsValue], cx: &mut Context) -> JsResult<Option<crate::cors::ScriptRequest>> {
+    let method = arg_string(a, 1, cx)?;
+    let href = arg_string(a, 2, cx)?;
+    let mut headers = Vec::new();
+    if let Some(list) = a.get_or_undefined(3).as_object().and_then(|o| JsArray::from_object(o).ok()) {
+        let len = list.length(cx)?;
+        for i in 0..len {
+            let pair = list.get(i, cx)?;
+            if let Some(pair) = pair.as_object() {
+                let k = pair.get(0, cx)?.to_string(cx)?.to_std_string_escaped();
+                let v = pair.get(1, cx)?.to_string(cx)?.to_std_string_escaped();
+                headers.push((k, v));
+            }
+        }
+    }
+    let body = match a.get_or_undefined(4) {
+        v if v.is_null_or_undefined() => None,
+        v => Some(v.to_string(cx)?.to_std_string_escaped().into_bytes()),
+    };
+    let mode = arg_string(a, 5, cx)?;
+    let credentials = arg_string(a, 6, cx)?;
+    let url = d.borrow().doc.resolve_url(&href);
+    Ok(url.map(|url| crate::cors::ScriptRequest { method, url, headers, body, mode, credentials }))
+}
+
+/// `__fetchDone`'s arguments: (id, error|null, status, statusText, url,
+/// [[name, value]...], body text, type, redirected).
+fn response_args(id: u32, result: Result<crate::cors::ScriptResponse, String>, cx: &mut Context) -> Vec<JsValue> {
+    match result {
+        Err(e) => vec![JsValue::from(id), js_str(&e)],
+        Ok(r) => {
+            let headers: Vec<JsValue> = r
+                .headers
+                .iter()
+                .map(|(k, v)| JsArray::from_iter([js_str(k), js_str(v)], cx).into())
+                .collect();
+            vec![
+                JsValue::from(id),
+                JsValue::null(),
+                JsValue::from(r.status),
+                js_str(&r.status_text),
+                js_str(r.url.as_str()),
+                JsArray::from_iter(headers, cx).into(),
+                js_str(&String::from_utf8_lossy(&r.body)),
+                js_str(r.kind),
+                JsValue::from(r.redirected),
+            ]
+        }
+    }
 }
 
 fn set_attr(e: &mut ElementData, name: &str, value: String) {

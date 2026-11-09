@@ -12,6 +12,7 @@
 //! native functions taking node ids (`dom.rs`): wrappers, listeners and
 //! timers live in the JS heap, where Boa's GC can see them.
 
+pub mod cors;
 mod dom;
 
 use std::sync::Arc;
@@ -45,6 +46,12 @@ pub enum ToJs {
     Click { node: NodeId, reply: Option<mpsc::Sender<bool>> },
     /// A form field's value changed (and fire `input`).
     Input { node: NodeId, value: String },
+    /// A checkbox or radio button was toggled (fire `input` and `change`).
+    Checked { node: NodeId, checked: bool },
+    /// A form is being submitted: answers whether a handler cancelled it.
+    Submit { form: NodeId, reply: mpsc::Sender<bool> },
+    /// A request a script made finished (from its network thread).
+    FetchDone { id: u32, result: Result<cors::ScriptResponse, String> },
     Shutdown,
 }
 
@@ -54,6 +61,8 @@ pub enum FromJs {
     Document(Arc<Document>),
     /// `location.href = ...` and friends.
     Navigate(Url),
+    /// `form.submit()`: submit it as the browser does (no `submit` event).
+    Submit(NodeId),
 }
 
 /// The tab's handle on a page's script thread.
@@ -74,6 +83,14 @@ impl ScriptHost {
     pub fn hears_click(&self, path: &[NodeId]) -> bool {
         let set = self.listening.read().unwrap_or_else(|e| e.into_inner());
         path.iter().any(|n| set.contains(n))
+    }
+
+    /// Ask scripts whether a form may be submitted (`false`: a `submit`
+    /// handler cancelled it; waits at most `timeout`).
+    pub fn may_submit(&self, form: NodeId, timeout: Duration) -> bool {
+        let (reply, rx) = mpsc::channel();
+        self.send(ToJs::Submit { form, reply });
+        !rx.recv_timeout(timeout).unwrap_or(false)
     }
 
     /// Ask scripts about a click; `true` if a handler called
@@ -104,6 +121,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         return (doc, None);
     }
     let (tx, rx) = mpsc::channel::<ToJs>();
+    let fetch_tx = tx.clone();
     let (updates_tx, updates) = async_channel::unbounded();
     let (first_tx, first_rx) = mpsc::channel::<Document>();
     let listening = Arc::new(std::sync::RwLock::new(Default::default()));
@@ -114,8 +132,11 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         .name("feather-js".into())
         .stack_size(256 << 20)
         .spawn(move || {
-            let mut rt = dom::Runtime::new(doc, opts, rx, updates_tx, shared_listening);
+            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening);
             rt.run_initial_scripts();
+            // Data the page fetched while loading makes the first paint
+            // too, if it's quick.
+            rt.drain_for(budget / 2);
             first_tx.send(rt.snapshot_doc()).ok();
             rt.event_loop();
         });
