@@ -1588,6 +1588,20 @@ mod tests {
     }
 
     #[test]
+    fn css_nesting() {
+        let (doc, s) = styled(
+            r#"<div class="a"><p class="b">x</p><em>y</em></div><section class="e"><i class="d">z</i></section>"#,
+            ".a { color: red; & .b { width: 11px } em { width: 22px } &:hover { width: 1px } } .d { .e & { width: 33px } } \
+             .a { @media (min-width: 1px) { & > .b { height: 44px } } }",
+        );
+        assert_eq!(style_of(&doc, &s, "p").width, Length::Px(11.0));
+        assert_eq!(style_of(&doc, &s, "p").height, Length::Px(44.0));
+        assert_eq!(style_of(&doc, &s, "em").width, Length::Px(22.0));
+        assert_eq!(style_of(&doc, &s, "i").width, Length::Px(33.0));
+        assert_eq!(style_of(&doc, &s, "div").color, Color::Rgba(0xff0000ff));
+    }
+
+    #[test]
     fn container_query_units() {
         let (doc, s) = styled(
             r#"<section><div><span><p>x</p></span></div></section>"#,

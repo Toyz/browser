@@ -200,26 +200,30 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
 }
 
 impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
-    type Prelude = SelectorList<Simple>;
+    /// The selectors, and their text (for rules nested inside).
+    type Prelude = (SelectorList<Simple>, String);
     type QualifiedRule = ();
     type Error = SelectorParseErrorKind;
 
     fn parse_prelude(
         &mut self,
         input: &mut Parser<'i>,
-    ) -> Result<SelectorList<Simple>, ParseError<Self::Error>> {
+    ) -> Result<(SelectorList<Simple>, String), ParseError<Self::Error>> {
         self.seen_rule = true;
-        SelectorList::parse(&SelectorParser, input, ParseRelative::No)
+        let start = input.position();
+        let selectors = SelectorList::parse(&SelectorParser, input, ParseRelative::No)?;
+        Ok((selectors, input.slice_from(start).trim().to_owned()))
     }
 
     fn parse_block(
         &mut self,
-        selectors: SelectorList<Simple>,
+        (selectors, text): (SelectorList<Simple>, String),
         _start: &ParserState,
         input: &mut Parser<'i>,
     ) -> Result<(), ParseError<Self::Error>> {
-        let mut decls = Declarations::default();
-        for _ in RuleBodyParser::new(input, &mut decls) {}
+        let mut body = NestedBody { parent: text, media: self.media.clone(), decls: Declarations::default(), nested: Vec::new() };
+        for _ in RuleBodyParser::new(input, &mut body) {}
+        let decls = body.decls;
         if !decls.normal.is_empty() || !decls.important.is_empty() {
             self.sheet.rules.push(StyleRule {
                 selectors,
@@ -228,7 +232,154 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
                 media: self.media.clone().into(),
             });
         }
+        // Nested rules (CSS nesting) follow, as plain rules.
+        self.sheet.rules.append(&mut body.nested);
         Ok(())
+    }
+}
+
+/// `parent` composed into a nested rule's selector: `&` stands for it, and
+/// a selector without one is a descendant of it (`> a` a child).
+fn nest_selector(parent: &str, nested: &str) -> String {
+    let parent = parent.trim();
+    // A list goes in `:is()`; one selector can be spliced in as it is
+    // (`:is()` can't hold pseudo-elements).
+    let one = split_top_level_commas(parent).len() == 1;
+    let whole = if one { parent.to_owned() } else { format!(":is({parent})") };
+    split_top_level_commas(nested)
+        .into_iter()
+        .map(|part| {
+            let part = part.trim();
+            if part.contains('&') { part.replace('&', &whole) } else { format!("{whole} {part}") }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let (mut out, mut depth, mut start) = (Vec::new(), 0i32, 0);
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// A style rule's block with nesting: its declarations, and the rules
+/// nested in it (flattened, with composed selectors).
+struct NestedBody {
+    parent: String,
+    media: Vec<Arc<str>>,
+    decls: Declarations,
+    nested: Vec<StyleRule>,
+}
+
+impl NestedBody {
+    /// A nested block (`& .b { ... }`, or `@media` inside a rule).
+    fn child(&mut self, selector: String, media: Vec<Arc<str>>, input: &mut Parser<'_>) {
+        let mut body = NestedBody { parent: selector.clone(), media: media.clone(), decls: Declarations::default(), nested: Vec::new() };
+        for _ in RuleBodyParser::new(input, &mut body) {}
+        let decls = body.decls;
+        if !decls.normal.is_empty() || !decls.important.is_empty() {
+            let mut parser = Parser::new(&selector);
+            if let Ok(selectors) = SelectorList::parse(&SelectorParser, &mut parser, ParseRelative::No) {
+                self.nested.push(StyleRule {
+                    selectors,
+                    normal: decls.normal.into(),
+                    important: decls.important.into(),
+                    media: media.into(),
+                });
+            }
+        }
+        self.nested.append(&mut body.nested);
+    }
+}
+
+impl<'i> DeclarationParser<'i> for NestedBody {
+    type Declaration = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_value(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i>,
+        start: &ParserState,
+    ) -> Result<(), ParseError<Self::Error>> {
+        self.decls.parse_value(name, input, start)
+    }
+}
+
+impl<'i> AtRuleParser<'i> for NestedBody {
+    /// `@media` (its query) or another group rule that applies (`None`).
+    type Prelude = Option<Option<Arc<str>>>;
+    type AtRule = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_prelude(
+        &mut self,
+        name: CowRcStr<'i>,
+        input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<Self::Error>> {
+        let query = consume_rest(input);
+        Ok(match name.to_ascii_lowercase().as_str() {
+            "media" => Some(Some(query.trim().into())),
+            "supports" | "layer" | "container" | "scope" => Some(None),
+            _ => None,
+        })
+    }
+
+    fn parse_block(
+        &mut self,
+        prelude: Self::Prelude,
+        _start: &ParserState,
+        input: &mut Parser<'i>,
+    ) -> Result<(), ParseError<Self::Error>> {
+        let Some(query) = prelude else { return Ok(()) };
+        let mut media = self.media.clone();
+        media.extend(query);
+        // Its declarations belong to the enclosing rule's selector.
+        let selector = self.parent.clone();
+        self.child(selector, media, input);
+        Ok(())
+    }
+}
+
+impl<'i> QualifiedRuleParser<'i> for NestedBody {
+    type Prelude = String;
+    type QualifiedRule = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_prelude(&mut self, input: &mut Parser<'i>) -> Result<String, ParseError<Self::Error>> {
+        Ok(nest_selector(&self.parent, &consume_rest(input)))
+    }
+
+    fn parse_block(
+        &mut self,
+        selector: String,
+        _start: &ParserState,
+        input: &mut Parser<'i>,
+    ) -> Result<(), ParseError<Self::Error>> {
+        let media = self.media.clone();
+        self.child(selector, media, input);
+        Ok(())
+    }
+}
+
+impl<'i> RuleBodyItemParser<'i, (), SelectorParseErrorKind> for NestedBody {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        true
     }
 }
 
