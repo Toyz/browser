@@ -335,6 +335,8 @@ pub struct InlineStyle {
     pub cursor: style::Cursor,
     /// Gradient text: glyph colors across the span (instead of `color`).
     pub gradient: Option<Arc<style::TextGradient>>,
+    /// `pointer-events: none` (or hidden): the mouse goes through.
+    pub inert: bool,
 }
 
 impl InlineStyle {
@@ -355,6 +357,7 @@ impl InlineStyle {
             node: None,
             cursor: s.cursor,
             gradient: s.text_gradient.clone().filter(|_| s.visible),
+            inert: s.pointer_events_none || !s.visible,
         }
     }
 }

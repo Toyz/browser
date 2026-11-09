@@ -601,7 +601,8 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         Some(c) => el.cursor(c),
         None => el,
     };
-    let hover = block.node.filter(|_| cx.track_hover);
+    // `pointer-events: none` and hidden boxes aren't under the mouse.
+    let hover = block.node.filter(|_| cx.track_hover && !s.pointer_events_none && s.visible);
     if !scrolls && hover.is_none() {
         return el.into_any_element();
     }

@@ -280,6 +280,7 @@
     }
     dispatchEvent(ev) {
       ev.target = this;
+      ev._origin = this;
       const path = [];
       for (let n = this; n; n = parentForEvents(n)) path.push(n);
       ev._path = path;
@@ -296,10 +297,41 @@
     if (n === window) return null;
     if (n === document) return window;
     if (n instanceof ShadowRoot) return n.host;
+    // Slotted content's events go through the slot it's shown in.
+    const slot = assignedSlotOf(n);
+    if (slot) return slot;
     return n.parentNode;
+  }
+  // The <slot> in its parent's shadow tree that shows `n`, if any.
+  function assignedSlotOf(n) {
+    const host = n.parentNode;
+    const root = host && host._shadow;
+    if (!root) return null;
+    const name = n.nodeType === 1 ? (n.getAttribute("slot") || "") : "";
+    if (n.nodeType === 3 && !/\S/.test(n.data || "")) return null;
+    for (const slot of root.querySelectorAll("slot")) {
+      if ((slot.getAttribute("name") || "") === name) return slot;
+    }
+    return null;
+  }
+  // What `target` looks like from `node`: listeners outside a shadow tree
+  // see its host, not what's inside.
+  function retarget(target, node) {
+    for (let t = target; t; ) {
+      let root = t;
+      while (root.parentNode) root = root.parentNode;
+      if (!(root instanceof ShadowRoot)) return t;
+      for (let x = node; x; x = x instanceof ShadowRoot ? x.host : x.parentNode) {
+        if (x === root) return t;
+      }
+      t = root.host;
+    }
+    return target;
   }
   function invoke(node, ev, phase, capture) {
     ev.currentTarget = node;
+    if (ev._origin && node !== window && node !== document) ev.target = retarget(ev._origin, node);
+    else if (ev._origin) ev.target = retarget(ev._origin, document.documentElement);
     ev.eventPhase = phase;
     const list = node._listeners && node._listeners[ev.type];
     if (list) {
@@ -370,6 +402,17 @@
   const nodeList = (arr) => { const l = new NodeList(); for (const x of arr) l.push(x); return l; };
 
   class Node extends EventTarget {
+    get assignedSlot() { return assignedSlotOf(this); }
+    // On a <slot>: the light nodes shown in it.
+    assignedNodes(opts) {
+      if (this.localName !== "slot") return [];
+      const root = this.getRootNode();
+      if (!(root instanceof ShadowRoot)) return [];
+      const shown = Array.from(root.host.childNodes).filter((n) => assignedSlotOf(n) === this);
+      if (shown.length || !(opts && opts.flatten)) return shown;
+      return Array.from(this.childNodes);
+    }
+    assignedElements(opts) { return this.assignedNodes(opts).filter((n) => n.nodeType === 1); }
     get nodeType() { return N.nodeType(this.__id); }
     get nodeName() { const t = N.tag(this.__id); return t ? t.toUpperCase() : (this.nodeType === 3 ? "#text" : this.nodeType === 9 ? "#document" : "#node"); }
     get parentNode() { return wrap(N.parent(this.__id)); }
@@ -1265,16 +1308,60 @@
   for (const k of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
     Object.defineProperty(location, k, {
       get() { return new URL(N.url())[k]; },
-      set(v) { const u = new URL(N.url()); u[k] = v; if (k !== "hash") N.navigate(u.href); },
+      set(v) {
+        const u = new URL(N.url());
+        u[k] = v;
+        if (k !== "hash") return N.navigate(u.href);
+        // A new entry in this document, then hashchange.
+        const from = N.url();
+        history.pushState(null, "", u.href);
+        const hc = new Event("hashchange");
+        hc.oldURL = from; hc.newURL = u.href;
+        window.dispatchEvent(hc);
+      },
     });
   }
 
-  const history = {
-    length: 1, state: null,
-    pushState(state) { this.state = state; },
-    replaceState(state) { this.state = state; },
-    back() {}, forward() {}, go() {},
+  // Session history for this document: pushState entries live here (with
+  // their state); the tab keeps the list of URLs and asks us to traverse.
+  const historyEntries = [{ url: N.url(), state: null }];
+  let historyIndex = 0;
+  const cloneState = (state) => {
+    if (state === undefined || state === null) return null;
+    try { return structuredClone(state); } catch (_) { return state; }
   };
+  const history = {
+    get length() { return historyEntries.length; },
+    get state() { return historyEntries[historyIndex].state; },
+    scrollRestoration: "auto",
+    pushState(state, _title, url) {
+      const href = url === undefined || url === null ? N.setUrl(N.url(), 1) : N.setUrl(String(url), 1);
+      historyEntries.length = historyIndex + 1;
+      historyEntries.push({ url: href, state: cloneState(state) });
+      historyIndex++;
+    },
+    replaceState(state, _title, url) {
+      const href = url === undefined || url === null ? N.url() : N.setUrl(String(url), 2);
+      historyEntries[historyIndex] = { url: href, state: cloneState(state) };
+    },
+    back() { N.traverse(-1); },
+    forward() { N.traverse(1); },
+    go(n) { n = Number(n) || 0; if (n) N.traverse(n); else location.reload(); },
+  };
+  function traverse(delta) {
+    const from = historyEntries[historyIndex].url;
+    historyIndex = Math.max(0, Math.min(historyEntries.length - 1, historyIndex + delta));
+    const entry = historyEntries[historyIndex];
+    N.setUrl(entry.url, 0);
+    const ev = new Event("popstate");
+    ev.state = entry.state;
+    window.dispatchEvent(ev);
+    if (from.split("#")[0] === entry.url.split("#")[0] && from !== entry.url) {
+      const hc = new Event("hashchange");
+      hc.oldURL = from; hc.newURL = entry.url;
+      window.dispatchEvent(hc);
+    }
+  }
 
   function matchMedia(query) {
     const q = String(query);
@@ -2056,6 +2143,7 @@
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
     __fireTimer: fireTimer,
     __imageEvent: imageEvent,
+    __traverse: traverse,
     __dispatchClick(id) {
       const n = wrap(id);
       if (!n) return false;
@@ -2086,7 +2174,11 @@
       const out = [];
       for (const id of clickListeners) {
         const w = wrappers.get(id);
-        if (w && ((w._listeners && w._listeners.click && w._listeners.click.length) || w._onclick)) out.push(id);
+        if (w && ((w._listeners && w._listeners.click && w._listeners.click.length) || w._onclick)) {
+          // The tab sees shadow trees flattened into their hosts.
+          const host = w instanceof ShadowRoot ? N.shadowHost(id) : null;
+          out.push(host !== null && host !== undefined ? host : id);
+        }
       }
       for (const n of N.query(N.root(), "[onclick]", true)) out.push(n);
       return out;

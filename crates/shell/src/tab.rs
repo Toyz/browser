@@ -68,6 +68,10 @@ pub struct Tab {
     focus_handle: FocusHandle,
     palette: Palette,
     history: Vec<Url>,
+    /// Which document made each history entry: `pushState` entries share
+    /// their page's, and moving between those doesn't load anything.
+    history_doc: Vec<u64>,
+    next_doc: u64,
     history_ix: usize,
     /// Pages we navigated away from, kept so back/forward is instant
     /// (history index → page and where it was scrolled to).
@@ -173,6 +177,8 @@ impl Tab {
             focus_handle: cx.focus_handle(),
             palette,
             history: Vec::new(),
+            history_doc: Vec::new(),
+            next_doc: 0,
             history_ix: 0,
             page_cache: HashMap::new(),
             page_ix: 0,
@@ -274,9 +280,12 @@ impl Tab {
     pub fn navigate(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
         if !self.history.is_empty() {
             self.history.truncate(self.history_ix + 1);
+            self.history_doc.truncate(self.history_ix + 1);
             self.page_cache.retain(|&ix, _| ix <= self.history_ix);
         }
         self.history.push(url.clone());
+        self.next_doc += 1;
+        self.history_doc.push(self.next_doc);
         self.history_ix = self.history.len() - 1;
         self.show(url, false, window, cx);
     }
@@ -302,6 +311,19 @@ impl Tab {
     /// Back/forward: restore the page from memory if we still have it.
     fn go_to_history(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let url = self.history[ix].clone();
+        // An entry the page made with pushState: its scripts move there.
+        let same_doc = self.history_doc.get(ix).is_some_and(|d| Some(d) == self.history_doc.get(self.page_ix));
+        if same_doc && let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) {
+            let delta = ix as i32 - self.history_ix as i32;
+            self.history_ix = ix;
+            self.page_ix = ix;
+            if let Some(page) = &mut self.page {
+                page.url = url;
+            }
+            host.send(js::ToJs::Traverse { delta });
+            cx.notify();
+            return;
+        }
         let same_page = self.page.as_ref().is_some_and(|p| same_document(&p.url, &url));
         self.history_ix = ix;
         if same_page {
@@ -507,6 +529,30 @@ impl Tab {
         // The page being replaced isn't kept for Back.
         self.page_ix = self.history_ix;
         self.show(url, true, window, cx);
+    }
+
+    /// The page's scripts changed its address (`history.pushState`, or
+    /// `replaceState` when `replace`): a history entry of the same document.
+    pub(super) fn script_url_changed(&mut self, url: Url, replace: bool, cx: &mut Context<Self>) {
+        if self.history.is_empty() {
+            return;
+        }
+        let doc = self.history_doc.get(self.history_ix).copied().unwrap_or(0);
+        if replace {
+            self.history[self.history_ix] = url.clone();
+        } else {
+            self.history.truncate(self.history_ix + 1);
+            self.history_doc.truncate(self.history_ix + 1);
+            self.page_cache.retain(|&ix, _| ix <= self.history_ix);
+            self.history.push(url.clone());
+            self.history_doc.push(doc);
+            self.history_ix += 1;
+            self.page_ix = self.history_ix;
+        }
+        if let Some(page) = &mut self.page {
+            page.url = url;
+        }
+        cx.notify();
     }
 
     /// Fetch the page's web fonts, register them, then re-lay out its text.

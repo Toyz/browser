@@ -660,10 +660,13 @@ fn place(
             let m = measured[ix];
             let area = Bounds::new(point(dx + x, y), size(m.width, line.extent.height()));
             let span_style = &para.spans[piece.span as usize].style;
-            if cx.track_hover {
+            // `pointer-events: none` text isn't under the mouse.
+            if cx.track_hover && !span_style.inert {
                 out.areas.push((area, span_style.node));
             }
-            if let Some(c) = cursor_style(span_style.cursor) {
+            if !span_style.inert
+                && let Some(c) = cursor_style(span_style.cursor)
+            {
                 out.cursors.push((window.insert_hitbox(area, HitboxBehavior::Normal), c));
             }
             if let PieceKind::Object(oi) = piece.kind {

@@ -29,6 +29,14 @@ impl Tab {
                         js::FromJs::Document(doc) => this.script_dom(doc, window, cx),
                         js::FromJs::Navigate(url) => this.navigate(url, window, cx),
                         js::FromJs::Submit(form) => this.submit_native(form, None, window, cx),
+                        js::FromJs::UrlChanged { url, replace } => this.script_url_changed(url, replace, cx),
+                        js::FromJs::Traverse(delta) => {
+                            if delta < 0 {
+                                this.go_back(window, cx)
+                            } else if delta > 0 {
+                                this.go_forward(window, cx)
+                            }
+                        }
                     }
                     true
                 });
@@ -108,6 +116,9 @@ impl Tab {
         cx: &mut Context<Self>,
     ) {
         let Some((host, target)) = self.heard_click() else {
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("click: no script listening (target {:?})", self.click_target());
+            }
             act(self, window, cx);
             return;
         };
@@ -115,6 +126,9 @@ impl Tab {
         let page_gen = self.page_gen;
         cx.spawn_in(window, async move |this, cx| {
             let prevented = cx.background_spawn(async move { host.click(target, CLICK_TIMEOUT) }).await;
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("click: scripts {}", if prevented { "handled it" } else { "let it through" });
+            }
             this.update_in(cx, |this, window, cx| {
                 if this.page_gen == page_gen && !prevented {
                     act(this, window, cx);

@@ -105,6 +105,10 @@ pub(crate) struct Dom {
     pending_scripts: Vec<NodeId>,
     ran: HashSet<NodeId>,
     navigate: Option<Url>,
+    /// `pushState` / `replaceState` since the last flush: (url, replace).
+    url_changes: Vec<(Url, bool)>,
+    /// `history.go(n)` asked of the tab.
+    traverse: Option<i32>,
     /// `form.submit()` for the tab to carry out.
     submit: Option<NodeId>,
     /// Form field values from the page (by node).
@@ -170,6 +174,8 @@ impl Runtime {
             pending_scripts: Vec::new(),
             ran: HashSet::new(),
             navigate: None,
+            url_changes: Vec::new(),
+            traverse: None,
             submit: None,
             values: HashMap::new(),
             debug: opts.debug,
@@ -406,6 +412,14 @@ impl Runtime {
 
     /// Send the tab the DOM if it changed (at most every `SNAPSHOT_EVERY`).
     fn flush(&mut self) {
+        let changes = std::mem::take(&mut self.dom.borrow_mut().url_changes);
+        for (url, replace) in changes {
+            self.updates.send_blocking(FromJs::UrlChanged { url, replace }).ok();
+        }
+        let traverse = self.dom.borrow_mut().traverse.take();
+        if let Some(delta) = traverse {
+            self.updates.send_blocking(FromJs::Traverse(delta)).ok();
+        }
         let navigate = self.dom.borrow_mut().navigate.take();
         if let Some(url) = navigate {
             self.updates.send_blocking(FromJs::Navigate(url)).ok();
@@ -462,7 +476,11 @@ impl Runtime {
         match msg {
             ToJs::Shutdown => {}
             ToJs::Click { node, reply } => {
+                let t = Instant::now();
                 let prevented = self.call_global("__dispatchClick", &[JsValue::from(node_to_number(node))]);
+                if self.opts.debug {
+                    eprintln!("js: click on {node:?}: prevented {} in {:?}", prevented.to_boolean(), t.elapsed());
+                }
                 if let Some(reply) = reply {
                     reply.send(prevented.to_boolean()).ok();
                 }
@@ -479,6 +497,9 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Traverse { delta } => {
+                self.call_global("__traverse", &[JsValue::from(delta)]);
+            }
             ToJs::Image { id, size } => {
                 {
                     let mut dom = self.dom.borrow_mut();
@@ -899,6 +920,32 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         if let Some(url) = dom.doc.resolve_url(&href) {
             dom.navigate = Some(url);
         }
+        Ok(JsValue::undefined())
+    }));
+    // setUrl(href, mode): the document's address becomes `href` (same
+    // origin only); mode 1 tells the tab it's a new history entry, 2 that
+    // it replaces the current one, 0 nothing (popstate). Returns the URL.
+    add("setUrl", 2, Box::new(|d, a, cx| {
+        let href = arg_string(a, 0, cx)?;
+        let mode = a.get_or_undefined(1).as_number().unwrap_or(0.0) as u8;
+        let mut dom = d.borrow_mut();
+        let Some(url) = dom.doc.url.join(&href).ok() else {
+            return Err(boa_engine::JsNativeError::typ().with_message(format!("invalid URL {href}")).into());
+        };
+        if url.origin() != dom.doc.url.origin() {
+            return Err(boa_engine::JsNativeError::typ()
+                .with_message(format!("SecurityError: {url} isn't same-origin with {}", dom.doc.url))
+                .into());
+        }
+        dom.doc.url = url.clone();
+        if mode != 0 {
+            dom.url_changes.push((url.clone(), mode == 2));
+        }
+        Ok(js_str(url.as_str()))
+    }));
+    add("traverse", 1, Box::new(|d, a, _| {
+        let delta = a.get_or_undefined(0).as_number().unwrap_or(0.0) as i32;
+        d.borrow_mut().traverse = Some(delta);
         Ok(JsValue::undefined())
     }));
     add("resolve", 1, Box::new(|d, a, cx| {

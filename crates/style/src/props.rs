@@ -191,6 +191,8 @@ pub enum Decl {
     VerticalAlign(VAlignSpec),
     BorderBox(bool),
     Cursor(Cursor),
+    /// `pointer-events: none` (`true`) or anything else.
+    PointerEventsNone(bool),
     /// `color-scheme` allows dark.
     ColorScheme(bool),
     TextDecoration { underline: bool, strikethrough: bool },
@@ -534,6 +536,10 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 dark |= id.eq_ignore_ascii_case("dark");
             }
             out.push(D::ColorScheme(dark));
+        }
+        "pointer-events" => {
+            let v = ident(p)?;
+            out.push(D::PointerEventsNone(v.eq_ignore_ascii_case("none")));
         }
         "cursor" => {
             // `cursor: url(x.cur), pointer`: skip images, take the first keyword we know.

@@ -473,3 +473,65 @@ fn images_load_with_their_size() {
     assert!(text.contains("load 3x2 true"), "{text}");
     assert!(text.contains("error"), "{text}");
 }
+
+#[test]
+fn slotted_clicks_reach_shadow_listeners_and_push_state() {
+    let doc = html::parse_scripted(
+        r##"<body><x-link><span id="label">Go</span></x-link><p id="o"></p><script>
+        class XLink extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: "open" });
+            root.innerHTML = '<a href="/next"><slot></slot></a>';
+            root.addEventListener("click", (e) => {
+              e.preventDefault();
+              history.pushState({ page: 2 }, "", "/next?x=1");
+              document.getElementById("o").textContent =
+                location.pathname + location.search + " " + history.length + " " + history.state.page + " " + e.target.id;
+            });
+          }
+        }
+        customElements.define("x-link", XLink);
+        window.addEventListener("popstate", (e) => { document.getElementById("o").textContent = "pop " + location.pathname + " " + e.state; });
+        </script></body>"##,
+        Url::parse("https://example.com/start").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let label = doc
+        .descendants(doc.root())
+        .find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("label"))
+        .unwrap();
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    assert!(host.click(label, Duration::from_secs(5)), "the shadow root's listener prevented the default");
+    let mut changed = None;
+    let mut latest = None;
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < until && (changed.is_none() || latest.is_none()) {
+        match host.updates.try_recv() {
+            Ok(js::FromJs::UrlChanged { url, replace }) => changed = Some((url.to_string(), replace)),
+            Ok(js::FromJs::Document(d)) => latest = Some(d),
+            _ => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert_eq!(changed, Some(("https://example.com/next?x=1".to_owned(), false)));
+    // Wait for the snapshot with the handler's output.
+    let mut text = latest.map(|d| text_of(&d, "o")).unwrap_or_default();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.starts_with("/next") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "/next?x=1 2 2 label");
+    host.send(js::ToJs::Traverse { delta: -1 });
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.starts_with("pop") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "pop /start null");
+}

@@ -105,6 +105,8 @@ pub struct ComputedStyle {
     /// Gradient text: the colors the glyphs take across the box (inherited,
     /// like the transparent fill that lets it show).
     pub text_gradient: Option<Arc<TextGradient>>,
+    /// `pointer-events: none` (inherited): the mouse goes through it.
+    pub pointer_events_none: bool,
     /// `-webkit-text-fill-color` (inherited).
     pub text_fill: Option<Color>,
     /// SVG paint properties from CSS (`fill`, `stroke`...): inherited, and
@@ -205,6 +207,7 @@ impl ComputedStyle {
             clip_text: false,
             bg_clip_border: None,
             text_gradient: None,
+            pointer_events_none: false,
             aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),
@@ -264,6 +267,7 @@ impl ComputedStyle {
             svg_paint: parent.svg_paint.clone(),
             text_fill: parent.text_fill,
             text_gradient: parent.text_gradient.clone(),
+            pointer_events_none: parent.pointer_events_none,
             ..Self::initial()
         }
     }
