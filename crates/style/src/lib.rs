@@ -26,6 +26,9 @@ pub use values::*;
 /// Custom properties (`--foo`), inherited by sharing.
 pub type CustomProps = Arc<HashMap<Arc<str>, Arc<str>>>;
 
+/// An SVG paint property as written (`("stroke", "currentColor")`).
+pub type SvgPaint = (Arc<str>, Arc<str>);
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     // ---- not inherited ----
@@ -89,6 +92,13 @@ pub struct ComputedStyle {
     pub translate: (Offset, Offset),
     /// `transform: rotate()` / `rotate`: degrees, clockwise, about the center.
     pub rotate: f32,
+    /// `background-clip: text` (gradient text).
+    pub clip_text: bool,
+    /// `-webkit-text-fill-color` (inherited).
+    pub text_fill: Option<Color>,
+    /// SVG paint properties from CSS (`fill`, `stroke`...): inherited, and
+    /// written into inline SVGs.
+    pub svg_paint: Option<Arc<[SvgPaint]>>,
     /// `transform: scale()` / `scale`: (x, y), about the center.
     pub scale: (f32, f32),
     /// `mask-image` is set: the background is a stencil (usually an icon).
@@ -179,6 +189,9 @@ impl ComputedStyle {
             opacity: 1.0,
             translate: (Offset { px: 0.0, pct: 0.0 }, Offset { px: 0.0, pct: 0.0 }),
             rotate: 0.0,
+            svg_paint: None,
+            clip_text: false,
+            text_fill: None,
             scale: (1.0, 1.0),
             shadows: None,
             transitions: None,
@@ -233,6 +246,8 @@ impl ComputedStyle {
             cursor: parent.cursor,
             dark: parent.dark,
             custom: parent.custom.clone(),
+            svg_paint: parent.svg_paint.clone(),
+            text_fill: parent.text_fill,
             ..Self::initial()
         }
     }

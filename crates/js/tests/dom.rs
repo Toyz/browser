@@ -319,6 +319,41 @@ fn probe_tree() {
     let mut out = String::new();
     show(&doc, doc.body().unwrap(), 0, &mut out);
     println!("{out}");
+    // PROBE_OUT=file.html: the flattened page as static HTML (to compare
+    // renderings of exactly what the tab gets).
+    if let Ok(path) = std::env::var("PROBE_OUT") {
+        fn ser(doc: &page::Document, n: page::NodeId, out: &mut String) {
+            match &doc.node(n).data {
+                page::NodeData::Text(t) => {
+                    let raw = doc.parent(n).and_then(|p| doc.element(p)).is_some_and(|e| matches!(&*e.name.local, "style" | "script"));
+                    if raw { out.push_str(t) } else { out.push_str(&t.replace('&', "&amp;").replace('<', "&lt;")) }
+                }
+                page::NodeData::Element(e) => {
+                    if &*e.name.local == "script" {
+                        return;
+                    }
+                    out.push('<');
+                    out.push_str(&e.name.local);
+                    for a in &e.attrs {
+                        out.push_str(&format!(" {}=\"{}\"", a.name.local, a.value.replace('&', "&amp;").replace('"', "&quot;")));
+                    }
+                    out.push('>');
+                    for &c in doc.children(n) {
+                        ser(doc, c, out);
+                    }
+                    out.push_str(&format!("</{}>", e.name.local));
+                }
+                _ => {
+                    for &c in doc.children(n) {
+                        ser(doc, c, out);
+                    }
+                }
+            }
+        }
+        let mut html = String::from("<!doctype html>");
+        ser(&doc, doc.root(), &mut html);
+        std::fs::write(path, html).unwrap();
+    }
 }
 
 #[test]

@@ -486,11 +486,16 @@ fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow:
 fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
     // A rotated/scaled box with nothing in it (arrows, notches, spinners)
     // is drawn as a transformed shape instead of a GPUI box.
-    let shape = transform::box_shape(block, cx);
+    // `visibility: hidden`: the box keeps its place but paints nothing.
+    let shape = if block.style.visible { transform::box_shape(block, cx) } else { None };
     let stripped;
     let s = match &shape {
         Some((plain, _)) => {
             stripped = plain.clone();
+            &stripped
+        }
+        None if !block.style.visible => {
+            stripped = invisible(&block.style);
             &stripped
         }
         None => &*block.style,
@@ -601,6 +606,21 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
 
 /// An `<img>`: sized from CSS, then its attributes, then its intrinsic size,
 /// keeping the aspect ratio when only one dimension is known.
+/// A style that paints nothing (for `visibility: hidden` boxes).
+fn invisible(s: &ComputedStyle) -> ComputedStyle {
+    let mut s = s.clone();
+    s.background = None;
+    s.background_image = None;
+    s.background_url = None;
+    s.gradients = None;
+    s.shadows = None;
+    s.masked = false;
+    for side in style::Side::ALL {
+        s.border_color.set(side, style::Color::TRANSPARENT);
+    }
+    s
+}
+
 fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElement {
     let s = &*i.style;
     let state = cx.images.borrow().get(&*i.src).cloned();
@@ -640,6 +660,7 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     }
 
     let content = match state {
+        _ if !s.visible => div().into_any_element(),
         Some(ImageState::Ready { image, padded, width, height }) => {
             transform::image(i, cx).unwrap_or_else(|| crate::images::picture(&image, &padded, width, height))
         }

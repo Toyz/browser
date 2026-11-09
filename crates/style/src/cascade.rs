@@ -19,7 +19,7 @@ use crate::props::{Decl, FontSizeSpec, GridCols, LineHeightSpec, WeightSpec, Wid
 use crate::selector::{ElementRef, ElementState};
 use crate::sheet::{FontFace, Keyframes, StyleRule, Stylesheet, parse_style_attribute, parse_stylesheet};
 use crate::values::*;
-use crate::{ComputedStyle, CustomProps};
+use crate::{ComputedStyle, CustomProps, SvgPaint};
 
 const UA_CSS: &str = include_str!("ua.css");
 /// Extra UA rules for quirks-mode documents (HTML spec, rendering § quirks).
@@ -836,6 +836,14 @@ impl Styler {
                 s.translate = (offset(x), offset(y));
             }
             Decl::Rotate(v) => s.rotate = *v,
+            Decl::ClipText(v) => s.clip_text = *v,
+            Decl::TextFill(c) => s.text_fill = Some(*c),
+            Decl::SvgPaint(name, value) => {
+                let mut list: Vec<SvgPaint> = s.svg_paint.as_deref().map(<[_]>::to_vec).unwrap_or_default();
+                list.retain(|(n, _)| n != name);
+                list.push((name.clone(), value.clone()));
+                s.svg_paint = Some(list.into());
+            }
             Decl::Scale(x, y) => s.scale = (*x, *y),
             Decl::TransitionProperty(v) => Arc::make_mut(s.transitions.get_or_insert_default()).properties = v.clone(),
             Decl::TransitionDuration(v) => Arc::make_mut(s.transitions.get_or_insert_default()).durations = v.clone(),
@@ -1120,6 +1128,23 @@ fn finalize(s: &mut ComputedStyle) {
     }
     if s.background_image == Some(Color::CurrentColor) {
         s.background_image = Some(s.color);
+    }
+    // Gradient text: one color per text run is all text gets, so the
+    // background's first color fills the glyphs and the box shows none.
+    if s.clip_text {
+        let fill = s.text_fill.unwrap_or(s.color);
+        if fill.is_transparent() {
+            let first = s.gradients.as_ref().and_then(|g| g.first()).and_then(|g| g.stops.first()).map(|st| st.color);
+            if let Some(c) = first.or(s.background_image).or(s.background) {
+                s.color = scheme_color(c, s.dark);
+                s.text_fill = None;
+            }
+        }
+        s.background = None;
+        s.background_image = None;
+        s.gradients = None;
+    } else if let Some(fill) = s.text_fill.filter(|c| !c.is_transparent()) {
+        s.color = fill;
     }
     if let Some(layers) = &s.gradients {
         let (color, dark) = (s.color, s.dark);

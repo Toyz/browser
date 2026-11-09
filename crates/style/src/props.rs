@@ -169,6 +169,10 @@ pub enum Decl {
     AnimationFill(Vec<(bool, bool)>),
     /// `transform` / `translate`: just the translation (x, y).
     Translate(LenSpec, LenSpec),
+    ClipText(bool),
+    TextFill(Color),
+    /// An SVG paint property and its value as written.
+    SvgPaint(Arc<str>, Arc<str>),
     /// Degrees.
     Rotate(f32),
     Scale(f32, f32),
@@ -221,6 +225,9 @@ pub fn contains_var(value: &str) -> bool {
 }
 
 /// Parse one declaration. Invalid declarations produce nothing (CSS's error recovery).
+/// SVG presentation properties, passed through to inline SVGs.
+pub const SVG_PAINT: &[&str] = &["fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin", "fill-opacity", "stroke-opacity", "fill-rule"];
+
 pub fn parse_declaration(name: &str, value: &str, out: &mut Vec<Decl>) {
     if name.starts_with("--") {
         out.push(Decl::Custom(name.into(), value.trim().into()));
@@ -240,6 +247,11 @@ pub fn parse_declaration(name: &str, value: &str, out: &mut Vec<Decl>) {
     };
     if let Some(wide) = wide {
         out.push(Decl::Wide(name.into(), wide));
+        return;
+    }
+    // SVG paint: kept as written, for the SVG renderer to read.
+    if SVG_PAINT.contains(&name.as_str()) {
+        out.push(Decl::SvgPaint(name.into(), trimmed.into()));
         return;
     }
     let start = out.len();
@@ -394,6 +406,17 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
 
         "color" => out.push(D::Color(parse_color(p)?)),
         "background-color" => out.push(D::BackgroundColor(parse_color(p)?)),
+        // `text`: the background shows through the glyphs (gradient text).
+        "background-clip" | "-webkit-background-clip" => {
+            let mut text = false;
+            while !p.is_exhausted() {
+                if let Ok(Token::Ident(id)) = p.next() {
+                    text |= id.eq_ignore_ascii_case("text");
+                }
+            }
+            out.push(D::ClipText(text));
+        }
+        "-webkit-text-fill-color" => out.push(D::TextFill(parse_color(p)?)),
         "background" => parse_background(p, out)?,
         "background-image" => {
             let layer = parse_image_layer(p)?;

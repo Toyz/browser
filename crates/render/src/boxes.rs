@@ -346,7 +346,7 @@ impl InlineStyle {
             font_names: s.font_names.clone(),
             color: if s.visible { s.color } else { Color::TRANSPARENT },
             // Block backgrounds are painted by the block; only inline ones go on text runs.
-            background: if is_inline_box { s.painted_background() } else { None },
+            background: if is_inline_box && s.visible { s.painted_background() } else { None },
             underline: s.underline,
             strikethrough: s.strikethrough,
             baseline_shift: 0.0,
@@ -1232,9 +1232,55 @@ impl Builder<'_> {
 
     /// An inline `<svg>`: serialized back to markup (with `currentColor`
     /// resolved) and drawn as an image from a `data:` URL.
-    fn build_svg(&mut self, id: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+    fn build_svg(
+        &mut self,
+        id: NodeId,
+        element: &page::ElementData,
+        style: Arc<ComputedStyle>,
+        parent: &ComputedStyle,
+        c: &mut Container,
+        link: Option<&Arc<Url>>,
+    ) {
         let mut markup = String::new();
-        serialize_svg(self.doc, id, &color_hex(style.color), true, &mut markup);
+        let current = color_hex(style.color);
+        serialize_svg(self.doc, id, &current, true, &mut markup);
+        // CSS paint (`svg { fill: none; stroke: currentColor }`) beats the
+        // root's attributes, and its children inherit it.
+        if let Some(paint) = &style.svg_paint
+            && let Some(rest) = markup.strip_prefix("<svg")
+        {
+            let mut root = String::from("<svg");
+            for (name, value) in paint.iter() {
+                let v = if value.eq_ignore_ascii_case("currentcolor") { current.clone() } else { value.replace("currentColor", &current) };
+                root.push_str(&format!(" {name}=\"{}\"", v.replace('"', "'")));
+            }
+            // Drop the root's own attributes for those (the first wins in XML parsers that tolerate repeats).
+            let (open, after) = rest.split_once('>').unwrap_or((rest, ""));
+            let mut kept = String::new();
+            for part in split_attrs(open) {
+                let name = part.split('=').next().unwrap_or("").trim();
+                if !paint.iter().any(|(n, _)| &**n == name) {
+                    kept.push(' ');
+                    kept.push_str(part.trim());
+                }
+            }
+            markup = format!("{root}{kept}>{after}");
+        }
+        // `width: 100%` of a sized parent (icon wrappers).
+        let mut style = style;
+        if let (Length::Percent(pw), Length::Px(w)) = (style.width, parent.width) {
+            Arc::make_mut(&mut style).width = Length::Px(w * pw / 100.0);
+        }
+        if let (Length::Percent(ph), Length::Px(h)) = (style.height, parent.height) {
+            Arc::make_mut(&mut style).height = Length::Px(h * ph / 100.0);
+        }
+        // One side known, the other a percentage of something unsized: keep
+        // the viewBox's shape (icons are square).
+        match (style.width, style.height) {
+            (Length::Percent(_), Length::Px(h)) => Arc::make_mut(&mut style).width = Length::Px(h * viewbox_ratio(element)),
+            (Length::Px(w), Length::Percent(_)) => Arc::make_mut(&mut style).height = Length::Px(w / viewbox_ratio(element)),
+            _ => {}
+        }
         // Sized only by CSS: give the standalone document that size (else its
         // viewport defaults to 300x150 and the drawing lands wrong).
         let px = |l: Length| match l {
@@ -1538,7 +1584,7 @@ impl Builder<'_> {
                 continue;
             }
             if tag == "svg" && !element.is_html() {
-                self.build_svg(child, element, style, c, link);
+                self.build_svg(child, element, style, parent_style, c, link);
                 continue;
             }
 
@@ -2040,6 +2086,38 @@ fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: 
         out.push_str(&fragment);
     }
     true
+}
+
+/// An SVG's width / height from its viewBox (1 if it has none).
+fn viewbox_ratio(e: &page::ElementData) -> f32 {
+    let vb: Vec<f32> = e.attr("viewBox").or_else(|| e.attr("viewbox")).unwrap_or("").split([' ', ',']).filter_map(|v| v.parse().ok()).collect();
+    match vb.as_slice() {
+        [_, _, w, h] if *h > 0.0 => w / h,
+        _ => 1.0,
+    }
+}
+
+/// The attributes in an opening tag's text (` a="1" b='2' c`), split.
+fn split_attrs(open: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quote) = (0, None);
+    for (i, ch) in open.char_indices() {
+        match (quote, ch) {
+            (None, '"' | '\'') => quote = Some(ch),
+            (Some(q), c) if c == q => quote = None,
+            (None, ' ' | '\n' | '\t') => {
+                if i > start {
+                    out.push(&open[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if start < open.len() {
+        out.push(&open[start..]);
+    }
+    out.into_iter().filter(|s| !s.trim().is_empty()).collect()
 }
 
 /// If an SVG paints in one color only: `Some(None)` when that's the
