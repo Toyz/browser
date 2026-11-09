@@ -50,3 +50,4 @@ opt-level = 2
 # See vendor/README.md.
 [patch.crates-io]
 boa_ast = { path = "vendor/boa_ast" }
+boa_gc = { path = "vendor/boa_gc" }

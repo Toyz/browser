@@ -100,7 +100,15 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
             scripts: None,
         });
     }
+    let debug = std::env::var_os("BROWSER_DEBUG").is_some();
+    let started = std::time::Instant::now();
+    let lap = |what: &str| {
+        if debug {
+            eprintln!("load: {what} at {:?}", started.elapsed());
+        }
+    };
     let response = net::fetch_document(url, referer, post)?;
+    lap("fetched");
     let auth_realm = response.auth_realm.clone();
     let is_html = match &response.content_type {
         Some(ct) => ct.contains("html"),
@@ -123,6 +131,8 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
     }
     let scripting = std::env::var_os("FEATHER_NO_JS").is_none();
     let doc = html::parse_scripted(&response.body, response.url.clone(), scripting);
+    lap("parsed");
+    net::prefetch(subresources(&doc, scripting));
     // Scripts run first: the first paint shows what they built.
     let (doc, scripts) = if scripting {
         let page_url = response.url.clone();
@@ -139,11 +149,14 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
     } else {
         (doc, None)
     };
+    lap("scripts ran");
     let styles = styles_for(&doc);
+    lap("styled");
     // `:target` from the requested URL's fragment.
     let target = url.fragment().and_then(|f| find_id(&doc, f));
     let state = Arc::new(ElementState { target, ..Default::default() });
     let layout = render::build(&doc, &styles.styler_with_state(env, state));
+    lap("built");
     Ok(LoadedPage {
         favicon: favicon(&doc).or_else(|| default_favicon(&response.url)),
         refresh: meta_refresh(&doc),
@@ -157,6 +170,38 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
         styles: Some(styles),
         scripts: scripts.map(Arc::new),
     })
+}
+
+/// The scripts and stylesheets the document will load, to fetch them all
+/// at once rather than each when its turn comes.
+fn subresources(doc: &page::Document, scripting: bool) -> Vec<Url> {
+    let mut urls = Vec::new();
+    for n in doc.descendants(doc.root()) {
+        let Some(e) = doc.element(n) else { continue };
+        let href = match &**e.local_name() {
+            "script" if scripting => {
+                let kind = e.attr("type").map(|t| t.trim().to_ascii_lowercase()).unwrap_or_default();
+                let js = kind.is_empty() || kind == "module" || kind.contains("javascript") || kind.contains("ecmascript");
+                e.attr("src").filter(|_| js)
+            }
+            "link" => {
+                let rel = e.attr("rel").unwrap_or_default().to_ascii_lowercase();
+                let rels: Vec<&str> = rel.split_ascii_whitespace().collect();
+                let as_ = e.attr("as").unwrap_or_default().to_ascii_lowercase();
+                let wanted = rels.contains(&"stylesheet")
+                    || (scripting && rels.contains(&"modulepreload"))
+                    || (rels.contains(&"preload") && (as_ == "style" || (scripting && as_ == "script")));
+                e.attr("href").filter(|_| wanted && !rels.contains(&"alternate"))
+            }
+            _ => None,
+        };
+        if let Some(url) = href.and_then(|h| doc.resolve_url(h))
+            && !urls.contains(&url)
+        {
+            urls.push(url);
+        }
+    }
+    urls
 }
 
 /// The document's stylesheets, parsed (external ones fetched, cached).

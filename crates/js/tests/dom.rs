@@ -739,14 +739,37 @@ fn document_all_is_falsy_but_not_undefined() {
 }
 
 #[test]
-fn intersection_observer_reports_a_visible_rect() {
-    let doc = run(r##"<body><img id="i"><p id="o"></p><script>
-        new IntersectionObserver((entries) => {
-            const e = entries[0];
-            document.getElementById("o").textContent = [e.isIntersecting, e.intersectionRect.height > 0, e.rootBounds.width > 0, "intersectionRatio" in IntersectionObserverEntry.prototype, e instanceof IntersectionObserverEntry].join(" ");
-        }).observe(document.getElementById("i"));
-        </script></body>"##);
-    assert_eq!(text_of(&doc, "o"), "true true true true true");
+fn intersection_observer_follows_layout() {
+    let doc = html::parse_scripted(
+        r##"<body><div id="a"></div><div id="b"></div><div id="c"></div><p id="o"></p><script>
+        const seen = {};
+        const show = () => { document.getElementById("o").textContent = ["a", "b", "c"].map((k) => k + "=" + seen[k]).join(" ") + " |"; };
+        const io = new IntersectionObserver((entries) => {
+          for (const e of entries) seen[e.target.id] = e.isIntersecting + (e.isIntersecting ? ":" + (e.intersectionRect.height > 0) : "");
+          show();
+        }, { rootMargin: "0px 0px 100px 0px" });
+        for (const id of ["a", "b", "c"]) io.observe(document.getElementById(id));
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let id = |doc: &page::Document, name: &str| doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(name)).unwrap();
+    let (a, b) = (id(&doc, "a"), id(&doc, "b"));
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    // `a` is in view, `b` far below it (even with the margin), `c` never painted.
+    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], viewport: (1024.0, 700.0) });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    // (The settle check before the layout reports everything as out of view.)
+    while !text.contains("a=true") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "a=true:true b=false c=false |");
 }
 
 #[test]

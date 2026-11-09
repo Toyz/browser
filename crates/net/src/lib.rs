@@ -5,6 +5,7 @@
 use anyhow::{Context as _, Result, bail};
 use ureq::ResponseExt as _;
 use url::Url;
+use std::sync::Arc;
 
 /// Largest document body we'll read, to keep a hostile page from eating memory.
 const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
@@ -477,9 +478,58 @@ pub fn fetch_bytes(url: &Url) -> Result<Vec<u8>> {
     if let Some(hit) = cache::get(url.as_str()) {
         return Ok((*hit).clone());
     }
-    let body = fetch_bytes_uncached(url)?;
-    cache::put(url.as_str(), std::sync::Arc::new(body.clone()));
-    Ok(body)
+    // One request per URL at a time: a second caller (the page's scripts
+    // asking for one `prefetch` already started) waits for the first.
+    let cell = in_flight().lock().unwrap_or_else(|e| e.into_inner()).entry(url.to_string()).or_default().clone();
+    let result = cell.get_or_init(|| {
+        let r = fetch_bytes_uncached(url).map(Arc::new).map_err(|e| format!("{e:#}"));
+        if let Ok(body) = &r {
+            cache::put(url.as_str(), body.clone());
+        }
+        r
+    });
+    {
+        let mut map = in_flight().lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(url.as_str()).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+            map.remove(url.as_str());
+        }
+    }
+    match result {
+        Ok(body) => Ok((**body).clone()),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    }
+}
+
+type InFlight = std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::OnceLock<Result<Arc<Vec<u8>>, String>>>>>;
+
+fn in_flight() -> &'static InFlight {
+    static MAP: std::sync::OnceLock<InFlight> = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+/// Start fetching subresources a page will ask for (its scripts and
+/// stylesheets), several at once, into the cache. Pages list a dozen
+/// scripts that otherwise load one after another as each one runs.
+pub fn prefetch(urls: Vec<Url>) {
+    const AT_ONCE: usize = 6;
+    let urls: Vec<Url> = urls.into_iter().filter(|u| matches!(u.scheme(), "http" | "https") && cache::get(u.as_str()).is_none()).collect();
+    if urls.is_empty() {
+        return;
+    }
+    let queue = Arc::new(std::sync::Mutex::new(urls.into_iter()));
+    for _ in 0..AT_ONCE {
+        let queue = queue.clone();
+        std::thread::Builder::new()
+            .name("feather-prefetch".into())
+            .spawn(move || {
+                loop {
+                    let next = queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+                    let Some(url) = next else { break };
+                    fetch_bytes(&url).ok();
+                }
+            })
+            .ok();
+    }
 }
 
 fn fetch_bytes_uncached(url: &Url) -> Result<Vec<u8>> {

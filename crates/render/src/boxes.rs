@@ -1365,8 +1365,27 @@ impl Builder<'_> {
 
     fn build_image(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
         let Some(image) = self.image_box(node, element, style.clone(), link) else {
-            if let Some(alt) = element.attr("alt").map(str::trim).filter(|a| !a.is_empty()) {
+            let alt = element.attr("alt").map(str::trim).filter(|a| !a.is_empty());
+            let sized = !style.width.is_auto() || !style.height.is_auto();
+            if let (Some(alt), false) = (alt, sized) {
                 c.inline.push_text(alt, &style, link);
+            } else {
+                // No picture yet (lazy loaders set `src` once it's in view):
+                // an empty box its CSS size, so it's somewhere to be seen.
+                let empty = Block {
+                    id: self.next_id(),
+                    node: Some(node),
+                    style,
+                    kind: BlockKind::Normal,
+                    children: Vec::new(),
+                    anchors: Vec::new(),
+                    min_content: 0.0,
+                    max_content: 0.0,
+                    colspan: 1,
+                    cell: None,
+                    heading: false,
+                };
+                Generated::place(Some(empty), c, link);
             }
             return;
         };

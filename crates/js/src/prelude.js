@@ -2006,6 +2006,7 @@
     viewport = [vw, vh];
     for (let i = 0; i + 4 < flat.length; i += 5) layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
     deliverResizes();
+    deliverIntersections();
     if (resized) window.dispatchEvent(new Event("resize"));
   }
 
@@ -2072,22 +2073,86 @@
   }
   const observer = (name) => class {
     constructor(cb) { this._cb = cb; }
-    observe(target) {
-      // Everything is visible right away (lazy loaders show their content).
-      if (name === "IntersectionObserver") {
-        const cb = this._cb, self = this;
-        setTimeout(() => {
-          const r = target.getBoundingClientRect();
-          // Visible means a non-empty intersection (loaders check its size),
-          // even before layout has measured the target.
-          const seen = new DOMRect(r.x, r.y, Math.max(r.width, 1), Math.max(r.height, 1));
-          const rootBounds = new DOMRect(0, 0, window.innerWidth, window.innerHeight);
-          cb([new IntersectionObserverEntry({ target, isIntersecting: true, intersectionRatio: 1, boundingClientRect: r, intersectionRect: seen, rootBounds, time: N.now() })], self);
-        }, 0);
-      }
-    }
+    observe() {}
     unobserve() {} disconnect() {} takeRecords() { return []; }
   };
+
+  // IntersectionObserver from the tab's layout: a target intersects when the
+  // box it was last painted in overlaps the viewport (grown by rootMargin).
+  // One never painted is off-screen: the page list only draws what's in view
+  // (and measured elements always get a box). Without this, everything was
+  // "visible", and infinite feeds loaded page after page in the background.
+  const intersectionObservers = new Set();
+  const NEAR_ANCESTORS = 4;
+  function paintedRect(el) {
+    for (let n = el, i = 0; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) {
+      const r = layoutRects.get(n.__id);
+      if (r) return r;
+    }
+    return undefined;
+  }
+  class IntersectionObserver {
+    constructor(cb, opts = {}) {
+      this._cb = cb;
+      this._targets = new Map(); // element -> last isIntersecting (undefined: not reported yet)
+      this.root = opts.root || null;
+      this.rootMargin = opts.rootMargin || "0px";
+      const t = opts.threshold;
+      this.thresholds = Array.isArray(t) ? t.slice() : [typeof t === "number" ? t : 0];
+      const parts = String(this.rootMargin).trim().split(/\s+/).map((v) => ({ n: parseFloat(v) || 0, pct: /%$/.test(v) }));
+      const [top, right = top, bottom = top, left = right] = parts;
+      this._margin = { top, right, bottom, left };
+    }
+    observe(target) {
+      if (!target || target.__id === undefined || this._targets.has(target)) return;
+      this._targets.set(target, undefined);
+      intersectionObservers.add(this);
+      // Its nearest ancestors too: a box with nothing in it yet (an <img>
+      // waiting for its `src`) may not be painted, but where they are, it is.
+      for (let n = target, i = 0; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) measure(n);
+      setTimeout(() => this._check(false), 0);
+      // Never painted in that time: say so (callers wait for a first entry).
+      setTimeout(() => this._check(target), 500);
+    }
+    unobserve(target) { this._targets.delete(target); }
+    disconnect() { this._targets.clear(); intersectionObservers.delete(this); }
+    takeRecords() { return []; }
+    // `settle`: the target whose wait for a first paint is over (it's
+    // reported even if it never got one).
+    _check(settle) {
+      const [vw, vh] = viewport;
+      const rootRect = this.root && this.root.__id !== undefined ? layoutRects.get(this.root.__id) : null;
+      const [rx, ry, rw, rh] = rootRect || [0, 0, vw, vh];
+      const px = (m, size) => (m.pct ? (m.n * size) / 100 : m.n);
+      const m = this._margin;
+      const box = { left: rx - px(m.left, rw), top: ry - px(m.top, rh), right: rx + rw + px(m.right, rw), bottom: ry + rh + px(m.bottom, rh) };
+      const entries = [];
+      for (const [target, last] of this._targets) {
+        const r = paintedRect(target);
+        if (settle && settle !== target) continue;
+        if (!r && !settle) continue;
+        const [x, y, w, h] = r || [0, 0, 0, 0];
+        const ix = Math.max(x, box.left), iy = Math.max(y, box.top);
+        const ax = Math.min(x + w, box.right), ay = Math.min(y + h, box.bottom);
+        const inside = !!r && N.connected(target.__id) && ax >= ix && ay >= iy;
+        const area = w * h;
+        const ratio = !inside ? 0 : area > 0 ? ((ax - ix) * (ay - iy)) / area : 1;
+        const visible = inside && this.thresholds.some((t) => (t === 0 ? true : ratio >= t));
+        if (last === visible) continue;
+        this._targets.set(target, visible);
+        entries.push(new IntersectionObserverEntry({
+          target, isIntersecting: visible, intersectionRatio: ratio, time: N.now(),
+          boundingClientRect: new DOMRect(x, y, w, h),
+          intersectionRect: inside ? new DOMRect(ix, iy, ax - ix, ay - iy) : new DOMRect(0, 0, 0, 0),
+          rootBounds: new DOMRect(rx, ry, rw, rh),
+        }));
+      }
+      if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
+    }
+  }
+  function deliverIntersections() {
+    for (const io of intersectionObservers) io._check(false);
+  }
 
   // Text selection: there's none we know of (the tab owns it).
   const selection = {
@@ -2210,7 +2275,7 @@
     matchMedia,
     getComputedStyle: (el) => el.style,
     MutationObserver, MutationRecord: class MutationRecord {},
-    IntersectionObserver: observer("IntersectionObserver"), IntersectionObserverEntry,
+    IntersectionObserver, IntersectionObserverEntry,
     ResizeObserver, NodeFilter, TreeWalker,
     PerformanceObserver: observer("PerformanceObserver"),
     outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
