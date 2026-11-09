@@ -110,12 +110,12 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] Table layout: column-shared sizing (basis = column max-content, grow ∝ it, min = column min-content), `colspan`
 - [x] Quirks mode (no doctype): tables reset `text-align`/fonts (HN's `<center>`)
 - [x] **Inline layout engine** ([inline.rs](crates/render/src/inline.rs)): our own GPUI element. Words measured with GPUI's shaper, greedy line breaking, CSS line boxes (per-run font sizes, line-height, `vertical-align`), inline-box decorations (`<code>` chips, `<mark>`), images in the line, real min/max-content answers, link hit-testing.
-- [ ] Inline layout, still missing: text wrapping *under* floats, inline-blocks containing blocks (GPUI's layout engine can't be re-entered from a measure callback), `inline-flex`, `text-indent`, justify, breaking overlong words, text selection
+- [ ] Inline layout, still missing: text wrapping *under* floats, `inline-flex`/`inline-grid` in the line, `text-indent`, justify, breaking overlong words, text selection
 - [ ] Tables (approximate with grid)
 - [ ] Forms: text inputs, buttons, GET form submission
 - [ ] Find in page, text selection & copy, zoom
 - [x] `position: relative` (offsets), `absolute` (relative to the parent box, painted on top via GPUI `deferred()`), `fixed` (viewport overlay layer). Absolute boxes with no positioned ancestor (besides html/body) stay hidden; `sticky` is static for now.
-- [x] Real `inline-block`: atomic inline objects laid out as nested inline flows (shrink-to-fit, margins, borders, radius, `vertical-align: middle`); inline-blocks with block content fall back to block boxes
+- [x] Real `inline-block`: with inline content, atomic objects laid out as nested inline flows; with block content, real GPUI subtrees laid out as absolute children of the inline element, measured with last frame's sizes and moved into their line slot (one extra frame to settle). Shrink-to-fit, margins, borders, radius, `vertical-align: top/middle/bottom`
 - [ ] `position: sticky`; absolute boxes anchored to a non-parent ancestor; `z-index`; inline `position: relative` offsets
 
 **Done when:** you'd actually use it for reading.

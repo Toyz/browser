@@ -324,6 +324,11 @@ fn apply_position(d: Div, s: &ComputedStyle) -> Div {
     style::Side::ALL.into_iter().fold(d, inset)
 }
 
+/// An inline-block's subtree (its margins are handled by the line it sits in).
+pub(crate) fn render_block_box(block: &Block, cx: &RenderCx) -> AnyElement {
+    render_block(block, cx, Edges::all(CssLength::ZERO), false)
+}
+
 /// A `position: fixed` box, for the viewport overlay layer.
 pub fn render_fixed(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
     render_box(b, cx, b.margin(), false)

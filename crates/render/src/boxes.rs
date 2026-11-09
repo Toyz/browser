@@ -207,6 +207,9 @@ pub enum InlineObject {
     /// An `inline-block` whose content is itself inline (buttons, badges, nav
     /// items): a box laid out as a nested inline flow.
     Block(AtomicBox),
+    /// An `inline-block` containing blocks: rendered as a real GPUI subtree
+    /// and placed in the line (see `inline.rs` for how that works).
+    BlockBox(Arc<Block>),
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +228,7 @@ impl InlineObject {
                     p.objects.iter().for_each(|o| o.images(out));
                 }
             }
+            InlineObject::BlockBox(b) => collect_images(&LayoutBox::Block((**b).clone()), out),
         }
     }
 }
@@ -808,15 +812,11 @@ impl Builder<'_> {
                         [LayoutBox::Paragraph(p)] => Some(Some(p.clone())),
                         _ => None,
                     };
-                    match content {
-                        Some(content) => {
-                            c.inline.push_object(InlineObject::Block(AtomicBox { style: style.clone(), content }), &style, link);
-                        }
-                        None => {
-                            self.flush(c);
-                            c.push(LayoutBox::Block(block));
-                        }
-                    }
+                    let object = match content {
+                        Some(content) => InlineObject::Block(AtomicBox { style: style.clone(), content }),
+                        None => InlineObject::BlockBox(Arc::new(block)),
+                    };
+                    c.inline.push_object(object, &style, link);
                 }
                 Display::Inline => match tag {
                     "br" => c.inline.push_break(),
@@ -933,6 +933,10 @@ fn paragraph_intrinsic(p: &Paragraph) -> (f32, f32) {
                         _ => i.attr_width.unwrap_or(16.0),
                     };
                     (w, w)
+                }
+                InlineObject::BlockBox(b) => {
+                    let m = b.style.margin.left.px_or_zero() + b.style.margin.right.px_or_zero();
+                    (b.min_content + m, b.max_content + m)
                 }
                 InlineObject::Block(b) => match b.style.outer_width(b.style.width) {
                     Length::Px(w) => (w, w),
@@ -1955,13 +1959,13 @@ mod tests {
             ".btn { display: inline-block; padding: 4px 8px; border: 1px solid } .box { display: inline-block }",
         );
         let p = paragraph(&tree.rows[0]);
-        assert_eq!(&*p.text, "Go \u{FFFC} now");
+        assert_eq!(&*p.text, "Go \u{FFFC} now \u{FFFC}");
         let InlineObject::Block(btn) = &p.objects[0] else { panic!() };
         assert_eq!(&*btn.content.as_ref().unwrap().text, "Start");
         assert_eq!(p.links.len(), 1, "the button sits inside the link");
-        // An inline-block with block content falls back to a block box (here
-        // a plain one, so it's flattened into the rows like any other block).
-        assert_eq!(&*paragraph(&tree.rows[1]).text, "block inside");
+        // An inline-block with block content stays in the line as a block object.
+        assert_eq!(p.objects.len(), 2);
+        assert!(matches!(&p.objects[1], InlineObject::BlockBox(_)));
     }
 
     #[test]

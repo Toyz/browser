@@ -40,6 +40,11 @@ pub struct InlineFlow {
     para: Arc<Paragraph>,
     cx: RenderCx,
     state: Rc<RefCell<FlowState>>,
+    /// Inline-blocks containing blocks: real GPUI subtrees, laid out as
+    /// absolutely positioned children, then moved into their line slot.
+    blocks: Vec<(u32, AnyElement, LayoutId)>,
+    /// The text's own layout node (when there are block children).
+    leaf: Option<LayoutId>,
 }
 
 impl InlineFlow {
@@ -49,9 +54,15 @@ impl InlineFlow {
             para,
             cx: cx.clone(),
             state: Rc::default(),
+            blocks: Vec::new(),
+            leaf: None,
         }
     }
 }
+
+/// Sizes inline-block subtrees got last frame (they can't be laid out from
+/// inside text measurement, so lines are broken with these and corrected).
+type BlockSizes = Rc<RefCell<HashMap<u32, (Pixels, Pixels)>>>;
 
 /// Vertical extent of something on a line, relative to the baseline.
 #[derive(Clone, Copy, Default)]
@@ -100,6 +111,7 @@ struct FlowState {
     lines: Option<LaidOut>,
     /// Inline-block content flows, by object index, with their content width.
     nested: HashMap<u32, (Rc<RefCell<FlowState>>, Pixels)>,
+    block_sizes: BlockSizes,
 }
 
 fn font_for(style: &InlineStyle, cx: &RenderCx) -> Font {
@@ -157,6 +169,19 @@ fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
     }
 }
 
+/// Baseline-relative extent of an inline object `h` tall, per `vertical-align`.
+/// `top`/`bottom` align with the line's strut (the block's own font box),
+/// which is right whenever the object is the tallest thing on the line.
+fn object_extent(valign: VerticalAlign, h: Pixels, strut: Extent, font_size: f32, shift: Pixels) -> Extent {
+    let above = match valign {
+        VerticalAlign::Middle => h / 2.0 + px(font_size * 0.3),
+        VerticalAlign::Top | VerticalAlign::TextTop => strut.above,
+        VerticalAlign::Bottom | VerticalAlign::TextBottom => h - strut.below,
+        _ => h,
+    } + shift;
+    Extent { above, below: h - above }
+}
+
 /// Padding + border on each side of an inline-block, px.
 fn edges(s: &style::ComputedStyle) -> (Pixels, Pixels, Pixels, Pixels) {
     let p = |l: style::Length| l.px_or_zero();
@@ -198,16 +223,20 @@ impl FlowState {
                     InlineObject::Image(image) => {
                         let (w, h) = image_size(image, cx);
                         let (w, h) = (px(w), px(h));
-                        let extent = if image.style.vertical_align == VerticalAlign::Middle {
-                            // Centered on the middle of lowercase letters.
-                            let mid = px(block.font_size * 0.3);
-                            Extent { above: h / 2.0 + mid + shift, below: h / 2.0 - mid - shift }
-                        } else {
-                            Extent { above: h + shift, below: -shift }
-                        };
+                        let extent = object_extent(image.style.vertical_align, h, self.strut, block.font_size, shift);
                         Measured { width: w, extent, ascent: h, descent: px(0.) }
                     }
                     InlineObject::Block(atomic) => self.measure_atomic(i, atomic, shift, None, cx, window),
+                    InlineObject::BlockBox(block) => {
+                        let s = &block.style;
+                        let (ml, mr) = atomic_margins(s);
+                        let (w, h) = self.block_sizes.borrow().get(&i).copied().unwrap_or_else(|| {
+                            // First frame: a guess, corrected next frame.
+                            (px(block.max_content), px(block.style.font_size * 1.4 + s.vertical_edges()))
+                        });
+                        let extent = object_extent(s.vertical_align, h, self.strut, s.font_size, shift);
+                        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.) }
+                    }
                 },
                 kind => {
                     let text = &para.text[piece.range.clone()];
@@ -284,13 +313,14 @@ impl FlowState {
             _ => inner_h + top + bottom,
         };
         let (ml, mr) = atomic_margins(s);
-        let above = if s.vertical_align == VerticalAlign::Middle {
-            height / 2.0 + px(s.font_size * 0.3) + shift
-        } else if atomic.content.as_ref().is_none_or(|c| c.text.is_empty()) {
-            // No line box inside: the bottom margin edge sits on the baseline.
-            height + shift
-        } else {
-            top + first_above + shift
+        let above = match s.vertical_align {
+            VerticalAlign::Baseline | VerticalAlign::Sub | VerticalAlign::Super | VerticalAlign::Shift(_)
+                if atomic.content.as_ref().is_some_and(|c| !c.text.is_empty()) =>
+            {
+                // Baseline-aligned on its own first line.
+                top + first_above + shift
+            }
+            valign => object_extent(valign, height, self.strut, s.font_size, shift).above,
         };
         Measured {
             width: inner_w + left + right + ml + mr,
@@ -435,6 +465,8 @@ type PieceAreas = Vec<(Bounds<Pixels>, Option<page::NodeId>)>;
 /// What prepaint collects while walking the flow (and nested flows).
 #[derive(Default)]
 struct Placement {
+    /// Where each block object's box goes: (paragraph id, object index) → origin.
+    blocks: HashMap<(usize, u32), Point<Pixels>>,
     objects: Vec<AnyElement>,
     links: Vec<(Hitbox, Arc<Url>)>,
     areas: PieceAreas,
@@ -503,6 +535,10 @@ fn place(
                             let (ml, _) = atomic_margins(&atomic.style);
                             place(content, &nested, point(dx + x + ml + l, top + t), inner_w, cx, out, window, app);
                         }
+                    }
+                    InlineObject::BlockBox(block) => {
+                        let (ml, _) = atomic_margins(&block.style);
+                        out.blocks.insert((para.id, oi), point(dx + x + ml, top));
                     }
                 }
             }
@@ -665,6 +701,9 @@ fn paint_flow(
 
 pub struct Prepainted {
     placement: Placement,
+    placed_blocks: Vec<u32>,
+    /// Where the text flow is (the whole element, unless it has block children).
+    text: Bounds<Pixels>,
     /// The whole paragraph, for `:hover` reporting.
     hover: Option<Hitbox>,
 }
@@ -699,16 +738,37 @@ impl Element for InlineFlow {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
+        id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         window: &mut Window,
-        _cx: &mut App,
+        cx: &mut App,
     ) -> (LayoutId, ()) {
+        // Block subtrees, as absolutely positioned children: GPUI lays them out
+        // (shrink-to-fit, flex, everything) without affecting our size.
+        self.blocks.clear();
+        for (oi, object) in self.para.objects.iter().enumerate() {
+            if let InlineObject::BlockBox(block) = object {
+                let content = crate::view::render_block_box(block, &self.cx);
+                let mut el = div().absolute().top_0().left_0().child(content).into_any_element();
+                let layout_id = el.request_layout(window, cx);
+                self.blocks.push((oi as u32, el, layout_id));
+            }
+        }
+        if !self.blocks.is_empty()
+            && let Some(id) = id
+        {
+            let sizes = window.with_element_state(id, |sizes: Option<BlockSizes>, _| {
+                let sizes = sizes.unwrap_or_default();
+                (sizes.clone(), sizes)
+            });
+            self.state.borrow_mut().block_sizes = sizes;
+        }
+
         let para = self.para.clone();
         let rcx = self.cx.clone();
         let state = self.state.clone();
         let wraps = para.style.white_space.wraps();
-        let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, _cx| {
+        let leaf = window.request_measured_layout(Style::default(), move |known, available, window, _cx| {
             let wrap = if !wraps {
                 None
             } else {
@@ -724,7 +784,13 @@ impl Element for InlineFlow {
             let height = lines.iter().map(|l| l.extent.height()).fold(px(0.), |a, b| a + b);
             size(known.width.unwrap_or(width), height)
         });
-        (layout_id, ())
+        if self.blocks.is_empty() {
+            self.leaf = None;
+            return (leaf, ());
+        }
+        self.leaf = Some(leaf);
+        let children = std::iter::once(leaf).chain(self.blocks.iter().map(|(_, _, id)| *id)).collect::<Vec<_>>();
+        (window.request_layout(Style::default(), children, cx), ())
     }
 
     fn prepaint(
@@ -736,10 +802,36 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepainted {
+        let text = match self.leaf {
+            Some(leaf) => window.layout_bounds(leaf),
+            None => bounds,
+        };
         let mut placement = Placement::default();
-        place(&self.para, &self.state, bounds.origin, bounds.size.width, &self.cx, &mut placement, window, cx);
+        place(&self.para, &self.state, text.origin, text.size.width, &self.cx, &mut placement, window, cx);
+
+        // Move each block subtree into its slot in the line. If its real size
+        // differs from what the lines were broken with, try again next frame.
+        let sizes = self.state.borrow().block_sizes.clone();
+        let mut changed = false;
+        let mut placed = Vec::new();
+        for (oi, el, layout_id) in &mut self.blocks {
+            let actual = window.layout_bounds(*layout_id);
+            let size = (actual.size.width, actual.size.height);
+            if sizes.borrow().get(oi) != Some(&size) {
+                sizes.borrow_mut().insert(*oi, size);
+                changed = true;
+            }
+            if let Some(target) = placement.blocks.get(&(self.para.id, *oi)) {
+                let delta = *target - actual.origin;
+                window.with_element_offset(delta, |window| el.prepaint(window, cx));
+                placed.push(*oi);
+            }
+        }
+        if changed {
+            window.request_animation_frame();
+        }
         let hover = self.cx.track_hover.then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
-        Prepainted { placement, hover }
+        Prepainted { placement, hover, placed_blocks: placed, text }
     }
 
     fn paint(
@@ -752,9 +844,16 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) {
-        paint_flow(&self.para, &self.state, bounds.origin, bounds.size.width, &self.cx, window, cx);
+        let text = prepainted.text;
+        let _ = bounds;
+        paint_flow(&self.para, &self.state, text.origin, text.size.width, &self.cx, window, cx);
         for object in &mut prepainted.placement.objects {
             object.paint(window, cx);
+        }
+        for (oi, el, _) in &mut self.blocks {
+            if prepainted.placed_blocks.contains(oi) {
+                el.paint(window, cx);
+            }
         }
 
         // Cursors, links (click/hover), and `:hover` reporting.
