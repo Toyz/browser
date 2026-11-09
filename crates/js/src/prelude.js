@@ -895,9 +895,9 @@
     animate() { return { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} }; }
     // Geometry from the tab's layout (once it has reported this element;
     // the root element is the viewport).
-    get clientWidth() { return this === document.documentElement ? viewport[0] : Math.round(measure(this)?.[2] || 0); }
+    get clientWidth() { return this === document.documentElement ? viewport[0] : Math.round(measure(this)?.[2] || rootSize(this, 0)); }
     get clientHeight() { return this === document.documentElement ? viewport[1] : Math.round(measure(this)?.[3] || 0); }
-    get offsetWidth() { return Math.round(measure(this)?.[2] || 0); }
+    get offsetWidth() { return Math.round(measure(this)?.[2] || rootSize(this, 0)); }
     get offsetHeight() { return Math.round(measure(this)?.[3] || 0); }
     get offsetTop() { const r = measure(this); return r ? Math.round(r[1] + pageScroll()) : 0; }
     get offsetLeft() { return Math.round(measure(this)?.[0] || 0); }
@@ -1909,6 +1909,10 @@
   let viewport = [1280, 800];
   const pageScroll = () => 0;
   const domRect = (x, y, width, height) => ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height, toJSON() { return this; } });
+  // <html> and <body> have no box of their own here: they span the viewport.
+  function rootSize(el, axis) {
+    return el === document.documentElement || el === document.body ? viewport[axis] : 0;
+  }
   function measure(el) {
     if (!el || el.__id === undefined) return null;
     if (!measuredIds.has(el.__id)) { measuredIds.add(el.__id); N.touch(); }
