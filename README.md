@@ -42,11 +42,11 @@ It is deeply cursed, and it renders Wikipedia.
 
 Pages' scripts run in [Boa](https://github.com/boa-dev/boa), a JavaScript engine written in Rust, on a thread per page that owns the page's DOM. Every task that changes the DOM sends the tab a snapshot, which is restyled and laid out like any page. The DOM API is mostly JavaScript (a [prelude](crates/js/src/prelude.js) over a few dozen native functions that take node ids), so wrappers and listeners live where the garbage collector can see them.
 
-What's there: the DOM (queries through our own selector engine, `innerHTML` through html5ever, events with capture/bubble/`preventDefault`, inline handlers), timers, promises and `async`, ES modules (static and dynamic `import`), custom elements and shadow DOM (slots, scoped and constructed stylesheets), `fetch` and `XMLHttpRequest` with real CORS (preflights, credentials, exposed headers) and streamed bodies (`ReadableStream`, NDJSON), `EventSource`, `WebSocket`, `crypto.subtle`, `localStorage`/`sessionStorage` and `document.cookie` on the real cookie jar, `FormData`, `Intl` (ICU, with time zones from Temporal), form fields and `submit` events, `location`, storage. Wikipedia gets its JavaScript layout, blizztrack's search works, and badgedirectory.com (a web-component app on WebSockets and signed RPC) renders.
+What's there: the DOM (queries through our own selector engine, `innerHTML` through html5ever, events with capture/bubble/`preventDefault` and shadow-DOM retargeting, inline handlers), timers, promises and `async`, ES modules (static and dynamic `import`, imports prefetched in parallel), custom elements and shadow DOM (slots, declarative `<template shadowrootmode>`, scoped and constructed stylesheets), the CSSOM (`insertRule`, so CSS-in-JS works), `fetch` and `XMLHttpRequest` with real CORS (preflights, credentials, exposed headers) and streamed bodies (`ReadableStream`, NDJSON), `EventSource`, `WebSocket`, `crypto.subtle`, `localStorage`/`sessionStorage` and `document.cookie` on the real cookie jar, `FormData`, `Intl` (ICU, with time zones from Temporal), `history.pushState` with `popstate`, `new Image()` and load events, `<canvas>` 2D drawing (tiny-skia), layout reads (`getBoundingClientRect`, `ResizeObserver`, from the tab's real layout), mouse, wheel and keyboard events with coordinates, form fields and `submit` events. Wikipedia gets its JavaScript layout, blizztrack's search works, crates.io (SvelteKit) and BBC News (styled-components) render, and badgedirectory.com — a web-component single-page app on WebSockets and signed RPC — works throughout, down to its animated canvas graph.
 
 ## What doesn't (yet)
 
-Layout queries (`getBoundingClientRect` is zeros), rotating text and photos, `conic-gradient`, `position: sticky`, text wrapping around floats, text selection. See [PLAN.md](PLAN.md). `FEATHER_NO_JS=1` turns scripts off.
+Canvas text (`fillText`), `getImageData`, an `IntersectionObserver` that knows what's on screen, rotating text and photos, `position: sticky`, text wrapping around floats, text selection, iframes. Google Search and Cloudflare-protected sites show their bot checks. See [PLAN.md](PLAN.md). `FEATHER_NO_JS=1` turns scripts off.
 
 ## Running it
 
@@ -76,7 +76,8 @@ cargo run --example dump -- https://news.ycombinator.com 20
 # Offscreen screenshots: render, save PNGs, quit
 cargo run --features screenshot -- https://example.com --screenshot out.png \
     [--pages 3] [--size 1100x800] [--dark|--light] [--mouse "X,Y;X,Y"] \
-    [--click X,Y] [--keys 'typed text\n'] [--type "omnibox text"] [--bench FRAMES]
+    [--click X,Y] [--keys 'typed text\n'] [--type "omnibox text"] [--bench FRAMES] \
+    [--wait MS] [--frames N --interval MS]
 ```
 
 `--bench` scrolls a row per frame and prints frame times, `--mouse` times each hover, and `BROWSER_DEBUG=1` logs prerenders, hover patches and page loads.
