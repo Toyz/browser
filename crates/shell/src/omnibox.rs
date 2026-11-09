@@ -93,6 +93,8 @@ impl Omnibox {
                 cx.notify();
             }
         });
+        // Redraw (the caret blinking) when the field changes.
+        let redraw = cx.observe(&input, |_, _, cx| cx.notify());
         Self {
             input,
             url: None,
@@ -100,7 +102,7 @@ impl Omnibox {
             selected: 0,
             typed: String::new(),
             setting: false,
-            _subscriptions: vec![sub],
+            _subscriptions: vec![sub, redraw],
         }
     }
 

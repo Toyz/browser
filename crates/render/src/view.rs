@@ -277,7 +277,7 @@ pub(crate) fn box_shadows(shadows: &[style::Shadow], palette: &Palette) -> Vec<B
 /// lay blocks out with, auto margins shrink-wrap instead, so ask for full width.
 /// Tables are the exception: they shrink-to-fit in CSS too.
 fn fills_with_auto_margins(s: &ComputedStyle, in_flow: bool) -> bool {
-    in_flow && s.width.is_auto() && (s.margin.left.is_auto() || s.margin.right.is_auto())
+    in_flow && s.width.is_auto() && !s.fit_width && (s.margin.left.is_auto() || s.margin.right.is_auto())
 }
 
 /// The box's own visuals: margin, padding, border, background, size, flex-item props.
@@ -319,6 +319,9 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .flex_grow(s.flex_grow)
         .flex_shrink(s.flex_shrink)
         .when(!s.flex_basis.is_auto(), |d| d.flex_basis(len(s.flex_basis)))
+        // `width: fit-content` in a column: don't stretch across it (auto
+        // margins still center it).
+        .when(s.fit_width && s.align_self.is_none(), |d| d.self_start())
         .map(|d| match s.align_self {
             Some(Align::Start) => d.self_start(),
             Some(Align::Center) => d.self_center(),

@@ -31,6 +31,9 @@ use crate::loader::{self, LoadedPage, same_document};
 const IMAGE_CONCURRENCY: usize = 8;
 /// Don't fetch more than this many images for one page (lazy loading comes later).
 const MAX_IMAGES: usize = 300;
+/// How far a swipe must go (px of scroll) to navigate, and how far it can.
+const SWIPE_GO: f32 = 140.0;
+const SWIPE_MAX: f32 = 200.0;
 /// How long the pointer rests on a link before we start loading it.
 const PRERENDER_DWELL: Duration = Duration::from_millis(60);
 
@@ -81,6 +84,8 @@ pub struct Tab {
     /// The inline element under the pointer, per paragraph.
     hover_inline: Option<(usize, NodeId)>,
     mouse_down: bool,
+    /// A two-finger horizontal swipe in progress (px; positive: back).
+    swipe: f32,
     /// Hover restyles wait until scrolling stops (like Chrome): otherwise
     /// every element passing under the pointer restyles the page.
     scrolling_until: Option<std::time::Instant>,
@@ -92,6 +97,7 @@ pub struct Tab {
     /// and whether it shows the pretty-printed version.
     source_editor: Option<Entity<gpui_kit::component::input::EditorState>>,
     source_pretty: bool,
+    _source_redraw: Option<Subscription>,
     /// Running CSS transitions and animations.
     animations: animations::Animations,
     /// Form controls' widgets and state.
@@ -149,6 +155,7 @@ impl Tab {
             hover_inline: None,
             mouse_down: false,
             scrolling_until: None,
+            swipe: 0.0,
             _scroll_end: None,
             page_gen: 0,
             hover_styler: None,
@@ -156,6 +163,7 @@ impl Tab {
             animations: Default::default(),
             source_editor: None,
             source_pretty: false,
+            _source_redraw: None,
             pending_post: None,
             element_state: Arc::default(),
             capture: None,
@@ -374,6 +382,9 @@ impl Tab {
             let text = SharedString::from(text.to_string());
             cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx).language(source.language).default_value(text))
         });
+        // Drawn inside this view: redraw when it changes (highlighting
+        // finishing in the background, the caret).
+        self._source_redraw = self.source_editor.as_ref().map(|e| cx.observe(e, |_, _, cx| cx.notify()));
         // Images the new page shares with the last one (logos, icons, sprites)
         // stay loaded: they appear in the first frame instead of popping in.
         {
@@ -855,6 +866,30 @@ impl Tab {
                 cx.background_executor().timer(Duration::from_millis(2500)).await;
                 wait_for_images(cx).await;
             }
+            if let Some((dx, end)) = job.swipe {
+                cx.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    let position = point(px(500.), px(300.));
+                    let event = |delta: f32, touch_phase| {
+                        PlatformInput::Scroll(ScrollEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(point(px(delta), px(0.))),
+                            modifiers: Modifiers::default(),
+                            touch_phase,
+                            source: Default::default(),
+                        })
+                    };
+                    window.dispatch_event(event(0.0, TouchPhase::Started), cx);
+                    for _ in 0..10 {
+                        window.dispatch_event(event(dx / 10.0, TouchPhase::Moved), cx);
+                    }
+                    if end {
+                        window.dispatch_event(event(0.0, TouchPhase::Ended), cx);
+                    }
+                })
+                .ok();
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+            }
             if let Some(text) = job.typing.clone() {
                 this.update(cx, |_, cx| cx.emit(TabEvent::TypeInOmnibox(text))).ok();
                 cx.background_executor().timer(Duration::from_millis(300)).await;
@@ -1084,6 +1119,65 @@ impl Tab {
             .into_any_element()
     }
 
+    /// Two-finger swipes go back and forward (Safari-style): a sideways
+    /// gesture slides an arrow in from the edge; let go past the line to go.
+    fn track_swipe(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(px(20.));
+        let (dx, dy) = (f32::from(delta.x), f32::from(delta.y));
+        match event.touch_phase {
+            TouchPhase::Started => self.swipe = 0.0,
+            TouchPhase::Moved => {
+                // Mostly sideways, and somewhere to go that way.
+                if dx.abs() > dy.abs() * 1.5 || self.swipe != 0.0 {
+                    let next = self.swipe + dx;
+                    if (next > 0.0 && self.can_go_back()) || (next < 0.0 && self.can_go_forward()) {
+                        self.swipe = next.clamp(-SWIPE_MAX, SWIPE_MAX);
+                        cx.notify();
+                    }
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                let swipe = std::mem::take(&mut self.swipe);
+                if event.touch_phase == TouchPhase::Ended {
+                    if swipe >= SWIPE_GO {
+                        self.go_back(window, cx);
+                    } else if swipe <= -SWIPE_GO {
+                        self.go_forward(window, cx);
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// The arrow that follows a swipe in from the edge.
+    fn render_swipe(&self, cx: &App) -> Option<AnyElement> {
+        if self.swipe == 0.0 {
+            return None;
+        }
+        let theme = cx.theme();
+        let back = self.swipe > 0.0;
+        let progress = (self.swipe.abs() / SWIPE_GO).min(1.0);
+        let armed = progress >= 1.0;
+        let size = 44.0;
+        let offset = px(-size + progress * (size + 24.0));
+        let arrow = div()
+            .absolute()
+            .top(relative(0.5))
+            .mt(px(-size / 2.0))
+            .size(px(size))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .shadow_md()
+            .bg(if armed { theme.primary } else { theme.secondary })
+            .text_color(if armed { theme.primary_foreground } else { theme.foreground })
+            .opacity(0.4 + 0.6 * progress)
+            .child(Icon::new(if back { Lucide::ArrowLeft } else { Lucide::ArrowRight }).size(px(20.)));
+        Some(if back { arrow.left(offset) } else { arrow.right(offset) }.into_any_element())
+    }
+
     /// Switch a source page between pretty-printed and raw.
     fn toggle_pretty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(source) = self.page.as_ref().and_then(|p| p.source.clone()) else { return };
@@ -1216,8 +1310,9 @@ impl Render for Tab {
                     this.interaction_changed(window, cx);
                 }),
             )
-            .on_scroll(cx.listener(|this, _, _, _| {
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 this.scrolling_until = Some(std::time::Instant::now() + Duration::from_millis(150));
+                this.track_swipe(event, window, cx);
             }))
             .child(self.render_content(cx))
             .when(self.loading.is_some(), |d| {
@@ -1237,5 +1332,6 @@ impl Render for Tab {
                 )
             })
             .children(status)
+            .children(self.render_swipe(cx))
     }
 }

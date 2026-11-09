@@ -254,14 +254,18 @@ impl Tab {
             let sub = cx.subscribe_in(&state, window, move |this, _, event: &InputEvent, window, cx| {
                 this.field_event(node, event, window, cx)
             });
-            self.forms._subscriptions.push(sub);
+            // The field is drawn inside the page (not as a view of its own):
+            // redraw the page when it changes (typing, the caret blinking).
+            let redraw = cx.observe(&state, |_, _, cx| cx.notify());
+            self.forms._subscriptions.extend([sub, redraw]);
             Field::Area(state)
         } else {
             let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value).masked(password));
             let sub = cx.subscribe_in(&state, window, move |this, _, event: &InputEvent, window, cx| {
                 this.field_event(node, event, window, cx)
             });
-            self.forms._subscriptions.push(sub);
+            let redraw = cx.observe(&state, |_, _, cx| cx.notify());
+            self.forms._subscriptions.extend([sub, redraw]);
             Field::Line(state)
         }
     }

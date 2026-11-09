@@ -37,6 +37,8 @@ pub struct CaptureJob {
     pub mouse: Vec<(f32, f32)>,
     /// Scroll-and-draw this many frames, timing each, and print stats.
     pub bench: Option<usize>,
+    /// A two-finger sideways swipe after the click: (px, released?).
+    pub swipe: Option<(f32, bool)>,
     /// Keystrokes to send after the click (`enter` ends with Enter).
     pub keys: Option<String>,
     /// Click here (window coordinates) before capturing, then let it settle.
@@ -70,6 +72,7 @@ impl Args {
         let mut typing = None;
         let mut click = None;
         let mut keys = None;
+        let mut swipe = None;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -81,6 +84,13 @@ impl Args {
                 "--row" => row = it.next().and_then(|n| n.parse().ok()),
                 "--type" => typing = it.next(),
                 "--keys" => keys = it.next(),
+                // `--swipe 160` (held) or `--swipe 160,end` (released).
+                "--swipe" => {
+                    swipe = it.next().and_then(|s| {
+                        let (n, end) = s.split_once(',').map_or((s.as_str(), false), |(n, e)| (n, e == "end"));
+                        Some((n.parse().ok()?, end))
+                    })
+                }
                 "--click" => {
                     click = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
                         Some((x.parse().ok()?, y.parse().ok()?))
@@ -111,7 +121,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

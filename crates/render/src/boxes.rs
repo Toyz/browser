@@ -1313,10 +1313,16 @@ impl Builder<'_> {
             // Grid tracks are `minmax(0, 1fr)`: items shrink to their column
             // whatever their content (CSS's automatic minimum is 0 there).
             for child in &mut children {
-                if let LayoutBox::Block(b) = child
-                    && b.style.min_width.is_auto()
-                {
-                    b.min_content = 0.0;
+                if let LayoutBox::Block(b) = child {
+                    if b.style.min_width.is_auto() {
+                        b.min_content = 0.0;
+                    }
+                    // Taffy sizes a clipping grid item with an automatic
+                    // height to nothing. Its content fits it by definition,
+                    // so the clip can go.
+                    if b.style.overflow != Overflow::Visible && b.style.height.is_auto() && b.style.max_height.is_auto() {
+                        Arc::make_mut(&mut b.style).overflow = Overflow::Visible;
+                    }
                 }
             }
         }

@@ -144,6 +144,8 @@ pub enum Decl {
     GridAreas(Option<GridAreas>),
     GridArea(Option<Arc<str>>),
     GridRowStart(Option<i16>),
+    /// `width: fit-content` and friends.
+    FitWidth(bool),
     GridColumnStart(Option<i16>),
     GridColumn(Option<GridSpan>),
     Overflow(Overflow),
@@ -353,7 +355,32 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
             out.push(D::Inset(sides[0], first));
             out.push(D::Inset(sides[1], second));
         }
-        "width" | "inline-size" => out.push(D::Width(parse_len(p)?)),
+        "width" | "inline-size" => {
+            // `fit-content` / `max-content` / `min-content`: shrink to the content.
+            let fit = p
+                .try_parse(|p| match p.next()?.clone() {
+                    Token::Ident(id)
+                        if matches!(
+                            &*id.to_ascii_lowercase(),
+                            "fit-content" | "max-content" | "min-content" | "-moz-fit-content" | "-webkit-fit-content" | "-moz-max-content" | "-webkit-max-content"
+                        ) =>
+                    {
+                        Ok(())
+                    }
+                    Token::Function(f) if f.eq_ignore_ascii_case("fit-content") => p.parse_nested_block(|p| {
+                        while p.next().is_ok() {}
+                        Ok(())
+                    }),
+                    _ => err(p),
+                })
+                .is_ok();
+            if fit {
+                out.push(D::Width(LenSpec::Auto));
+                out.push(D::FitWidth(true));
+            } else {
+                out.push(D::Width(parse_len(p)?));
+            }
+        }
         "height" | "block-size" => out.push(D::Height(parse_len(p)?)),
         "min-width" | "min-inline-size" => out.push(D::MinWidth(parse_len(p)?)),
         "min-height" | "min-block-size" => out.push(D::MinHeight(parse_len(p)?)),

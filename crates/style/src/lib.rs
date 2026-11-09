@@ -71,6 +71,9 @@ pub struct ComputedStyle {
     pub grid_areas: Option<GridAreas>,
     /// `grid-area: <name>` on a grid item.
     pub grid_area: Option<Arc<str>>,
+    /// `width: fit-content` (or min/max-content): shrink to the content
+    /// instead of filling the line.
+    pub fit_width: bool,
     /// Explicit grid lines (`grid-row-start: 1`): items can share a cell.
     pub grid_row_start: Option<i16>,
     pub grid_column_start: Option<i16>,
@@ -160,6 +163,7 @@ impl ComputedStyle {
             grid_tracks: None,
             grid_areas: None,
             grid_area: None,
+            fit_width: false,
             grid_row_start: None,
             grid_column_start: None,
             overflow: Overflow::Visible,

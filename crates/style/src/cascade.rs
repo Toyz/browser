@@ -722,7 +722,11 @@ impl Styler {
             Decl::MaskUrl(u) => s.mask_url = u.clone(),
             Decl::MaskSize(v) => s.mask_size = resolve_bg_size(v, &cx),
             Decl::MaskPosition(v) => s.mask_position = *v,
-            Decl::Width(v) => s.width = len(v),
+            Decl::Width(v) => {
+                s.width = len(v);
+                // (`width: fit-content` follows this with `FitWidth(true)`.)
+                s.fit_width = false;
+            }
             Decl::Height(v) => s.height = len(v),
             Decl::MinWidth(v) => s.min_width = len(v),
             Decl::MinHeight(v) => s.min_height = len(v),
@@ -774,6 +778,7 @@ impl Styler {
             Decl::GridAreas(v) => s.grid_areas = v.clone(),
             Decl::GridArea(v) => s.grid_area = v.clone(),
             Decl::GridRowStart(v) => s.grid_row_start = *v,
+            Decl::FitWidth(v) => s.fit_width = *v,
             Decl::GridColumnStart(v) => s.grid_column_start = *v,
             Decl::Overflow(v) => s.overflow = *v,
             Decl::Opacity(v) => s.opacity = *v,

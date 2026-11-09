@@ -37,7 +37,9 @@ pub struct Source {
 
 impl Source {
     fn new(language: &'static str, raw: &str) -> Self {
-        let pretty = crate::pretty::looks_minified(raw).then(|| crate::pretty::pretty(language, raw).into());
+        // JSON reads best formatted however it came (like Chrome's viewer).
+        let format = crate::pretty::looks_minified(raw) || (language == "json" && raw.lines().count() < 3);
+        let pretty = format.then(|| crate::pretty::pretty(language, raw).into());
         Self { language, raw: raw.into(), pretty }
     }
 }
