@@ -171,8 +171,9 @@ fn definite(l: CssLength) -> DefiniteLength {
 fn radius(l: CssLength) -> Pixels {
     match l {
         CssLength::Px(v) => px(v),
-        // Percent radii are mostly `50%` circles/pills.
-        CssLength::Percent(p) if p >= 50.0 => px(9999.),
+        // Percent radii are mostly `50%` circles/pills; GPUI clamps (we hope) —
+        // keep it to a size that can't overflow small boxes into nothing.
+        CssLength::Percent(p) if p >= 50.0 => px(500.),
         CssLength::Percent(p) => px(p),
         CssLength::Auto => px(0.),
     }

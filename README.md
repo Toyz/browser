@@ -16,6 +16,7 @@ It is cursed. It also kind of works.
 - **Floats are a lie.** Real floats let text wrap *around* the floated box. Ours take the float and the next few paragraphs (until a heading) and put them in a two-column flex row. Wikipedia's infobox doesn't seem to mind.
 - **Tables are flex rows that agree on column widths.** We estimate every column's minimum and maximum content width *before layout*, from character counts. Then we hand every cell in a column the same flex basis and a grow factor proportional to its content, so all the rows independently land on the same column widths. It's table layout with no table layout.
 - **Inline layout is hand-rolled.** GPUI's text element does one font size per block of text. The web puts superscripts in the middle of sentences. So there's [our own GPUI element](crates/render/src/inline.rs) that measures every word with GPUI's text shaper, breaks lines itself, builds CSS line boxes from ascent, descent and line-height, and paints each run at its own baseline.
+- **Inline-blocks are paragraphs inside paragraphs.** A button in a sentence is an "atomic object" whose content is laid out by a nested copy of the same inline engine, because GPUI's layout engine can't be re-entered from inside a text measurement. Inline-blocks containing real blocks give up and become blocks.
 - **Inline margins are space characters.** `<b style="margin-right: 5px">` gets an en space and a thin space appended. They're breakable, they survive whitespace collapsing, and they're about the right width.
 - **Long pages are virtualized by tearing them apart.** Any container that could be sliced horizontally without anyone noticing (no top/bottom borders, no fixed height…) gets dissolved into top-level rows of a GPUI `list()`, and each row re-creates the containers around it as "wrappers". Wikipedia's article becomes roughly 480 independently rendered rows.
 - **`position: absolute` is "absolute to your parent, probably".** CSS says the nearest positioned ancestor; Taffy only knows the parent. Usually the same box. Absolute boxes anchored to the page itself stay hidden, which mostly hides "skip to content" links and modals, which is honestly an improvement.
@@ -39,7 +40,7 @@ It is cursed. It also kind of works.
 
 ## What doesn't (yet)
 
-JavaScript. Forms. `position: sticky`. Real `inline-block`. Text wrapping under floats. Text selection. Transitions. Web fonts. Dark mode. Tabs (the plan is a Chrome-style tab strip in the window frame). See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt QuickJS onto a DOM that was never meant to exist.
+JavaScript. Forms. `position: sticky`. Inline-blocks that contain blocks. Text wrapping under floats. Text selection. Transitions. Web fonts. Dark mode. Tabs (the plan is a Chrome-style tab strip in the window frame). See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt QuickJS onto a DOM that was never meant to exist.
 
 ## Running it
 

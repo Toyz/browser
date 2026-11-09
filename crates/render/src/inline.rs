@@ -3,28 +3,37 @@
 //! GPUI's `StyledText` lays out one font size per block of text, with nothing
 //! but text in it. Web inline content mixes sizes (`<sup>`, `<small>`), raises
 //! and lowers baselines (`vertical-align`), draws boxes behind spans (`<code>`
-//! chips, `<mark>`) and puts images in the line. So this element:
+//! chips, `<mark>`), and puts images and inline-blocks (buttons, badges) in
+//! the line. So this element:
 //!
 //! 1. measures each piece (word / space / object) with GPUI's text shaper
 //!    (results are cached frame to frame by GPUI's line layout cache),
 //! 2. breaks lines greedily at the allowed break points, sizing each line from
 //!    the ascent/descent/line-height of everything on it (CSS's line box model),
-//! 3. paints inline-box decorations, then text grouped into runs, then images,
+//! 3. paints inline-box decorations, then text grouped into runs, then
+//!    inline-blocks (recursively: their content is a nested flow), then images,
 //! 4. hit-tests links itself (hand cursor, click, hover).
 //!
 //! It answers min-content (longest word) and max-content (unwrapped) queries
 //! for real, so flex items and table cells size like they do in CSS.
+//!
+//! Inline-blocks can't be GPUI subtrees here: GPUI's layout engine isn't
+//! available re-entrantly inside a measure callback. So only inline-blocks
+//! with inline content are atomic objects (laid out by this same engine);
+//! the box builder turns the rest into block boxes.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::*;
 use style::{LineHeight, TextAlign as CssTextAlign, VerticalAlign};
+use url::Url;
 
-use crate::boxes::{ImageBox, InlineStyle, Paragraph, PieceKind};
+use crate::boxes::{AtomicBox, ImageBox, InlineObject, InlineStyle, Paragraph, PieceKind};
 use crate::images::ImageState;
-use crate::view::{RenderCx, text_run};
+use crate::view::{RenderCx, cursor_style, text_run};
 
 pub struct InlineFlow {
     id: ElementId,
@@ -55,13 +64,17 @@ impl Extent {
     fn max(self, o: Extent) -> Extent {
         Extent { above: self.above.max(o.above), below: self.below.max(o.below) }
     }
+
+    fn height(self) -> Pixels {
+        self.above + self.below
+    }
 }
 
 #[derive(Clone, Copy)]
 struct Measured {
     width: Pixels,
     extent: Extent,
-    /// The piece's own font ascent/descent (for decorations and painting).
+    /// Text: the font's ascent/descent. Objects: the box height / 0.
     ascent: Pixels,
     descent: Pixels,
 }
@@ -74,12 +87,19 @@ struct Line {
     extent: Extent,
 }
 
+/// (wrap width, lines, wrap-adjusted piece measurements)
+type LaidOut = (Option<Pixels>, Rc<Vec<Line>>, Rc<Vec<Measured>>);
+
+/// Layout state for one paragraph (and, nested, its inline-blocks' content).
 #[derive(Default)]
 struct FlowState {
-    pieces: Option<Rc<Vec<Measured>>>,
+    measured: Option<Rc<Vec<Measured>>>,
     strut: Extent,
-    /// Lines for the last wrap width asked for.
-    lines: Option<(Option<Pixels>, Rc<Vec<Line>>)>,
+    /// Lines for the last wrap width asked for, with piece measurements
+    /// adjusted for it (inline-blocks shrink to fit the available width).
+    lines: Option<LaidOut>,
+    /// Inline-block content flows, by object index, with their content width.
+    nested: HashMap<u32, (Rc<RefCell<FlowState>>, Pixels)>,
 }
 
 fn font_for(style: &InlineStyle, cx: &RenderCx) -> Font {
@@ -109,7 +129,7 @@ fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
 }
 
 /// An inline image's natural size, CSS px.
-fn object_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
+fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
     let s = &image.style;
     let intrinsic = match cx.images.borrow().get(&*image.src) {
         Some(ImageState::Ready { width, height, .. }) => Some((width / image.density, height / image.density)),
@@ -137,9 +157,24 @@ fn object_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
     }
 }
 
+/// Padding + border on each side of an inline-block, px.
+fn edges(s: &style::ComputedStyle) -> (Pixels, Pixels, Pixels, Pixels) {
+    let p = |l: style::Length| l.px_or_zero();
+    (
+        px(p(s.padding.top) + s.border_width.top),
+        px(p(s.padding.right) + s.border_width.right),
+        px(p(s.padding.bottom) + s.border_width.bottom),
+        px(p(s.padding.left) + s.border_width.left),
+    )
+}
+
 impl FlowState {
+    fn nested(&mut self, ix: u32) -> Rc<RefCell<FlowState>> {
+        self.nested.entry(ix).or_insert_with(|| (Rc::default(), px(0.))).0.clone()
+    }
+
     fn measure(&mut self, para: &Paragraph, cx: &RenderCx, window: &mut Window) -> Rc<Vec<Measured>> {
-        if let Some(m) = &self.pieces {
+        if let Some(m) = &self.measured {
             return m.clone();
         }
         let ts = window.text_system().clone();
@@ -149,7 +184,7 @@ impl FlowState {
         let block_font = ts.resolve_font(&font_for(&block, cx));
         let size = px(block.font_size);
         self.strut = extent_for(
-            &InlineStyle { baseline_shift: 0.0, ..block },
+            &InlineStyle { baseline_shift: 0.0, ..block.clone() },
             ts.ascent(block_font, size),
             ts.descent(block_font, size),
         );
@@ -157,21 +192,23 @@ impl FlowState {
         let mut out = Vec::with_capacity(para.pieces.len());
         for piece in &para.pieces {
             let style = &para.spans[piece.span as usize].style;
+            let shift = px(style.baseline_shift);
             let m = match piece.kind {
-                PieceKind::Object(i) => {
-                    let image = &para.objects[i as usize];
-                    let (w, h) = object_size(image, cx);
-                    let (w, h) = (px(w), px(h));
-                    let shift = px(style.baseline_shift);
-                    let extent = if image.style.vertical_align == VerticalAlign::Middle {
-                        // Centered on the middle of lowercase letters.
-                        let mid = px(block.font_size * 0.3);
-                        Extent { above: h / 2.0 + mid + shift, below: h / 2.0 - mid - shift }
-                    } else {
-                        Extent { above: h + shift, below: -shift }
-                    };
-                    Measured { width: w, extent, ascent: h, descent: px(0.) }
-                }
+                PieceKind::Object(i) => match &para.objects[i as usize] {
+                    InlineObject::Image(image) => {
+                        let (w, h) = image_size(image, cx);
+                        let (w, h) = (px(w), px(h));
+                        let extent = if image.style.vertical_align == VerticalAlign::Middle {
+                            // Centered on the middle of lowercase letters.
+                            let mid = px(block.font_size * 0.3);
+                            Extent { above: h / 2.0 + mid + shift, below: h / 2.0 - mid - shift }
+                        } else {
+                            Extent { above: h + shift, below: -shift }
+                        };
+                        Measured { width: w, extent, ascent: h, descent: px(0.) }
+                    }
+                    InlineObject::Block(atomic) => self.measure_atomic(i, atomic, shift, None, cx, window),
+                },
                 kind => {
                     let text = &para.text[piece.range.clone()];
                     let size = px(style.font_size);
@@ -192,20 +229,115 @@ impl FlowState {
             out.push(m);
         }
         let out = Rc::new(out);
-        self.pieces = Some(out.clone());
+        self.measured = Some(out.clone());
         out
     }
 
+    /// An inline-block: shrink-to-fit (or its CSS size) around a nested flow,
+    /// sitting on the baseline of its first line.
+    /// `available`: the line width it must fit in (`None`: unconstrained).
+    fn measure_atomic(
+        &mut self,
+        ix: u32,
+        atomic: &AtomicBox,
+        shift: Pixels,
+        available: Option<Pixels>,
+        cx: &RenderCx,
+        window: &mut Window,
+    ) -> Measured {
+        let s = &atomic.style;
+        let (top, right, bottom, left) = edges(s);
+        let (ml, mr) = atomic_margins(s);
+        let css_width = match s.width {
+            style::Length::Px(w) if s.border_box => Some(px(w) - left - right),
+            style::Length::Px(w) => Some(px(w)),
+            _ => None,
+        };
+        let (inner_w, inner_h, first_above) = match &atomic.content {
+            Some(content) => {
+                let nested = self.nested(ix);
+                let mut st = nested.borrow_mut();
+                let width_of = |lines: &[Line]| lines.iter().map(|l| l.width).fold(px(0.), Pixels::max);
+                let natural = width_of(&st.lines(content, cx, None, window));
+                // Shrink-to-fit: min(max(min-content, available), max-content).
+                let w = css_width.unwrap_or_else(|| match available {
+                    Some(avail) => {
+                        let min = width_of(&st.lines(content, cx, Some(px(0.)), window));
+                        natural.min((avail - left - right - ml - mr).max(min))
+                    }
+                    None => natural,
+                });
+                let w = w.max(px(0.));
+                let lines = st.lines(content, cx, Some(w), window);
+                let h = lines.iter().map(|l| l.extent.height()).fold(px(0.), |a, b| a + b);
+                let first = lines.first().map(|l| l.extent.above).unwrap_or_default();
+                (w, h, first)
+            }
+            None => (css_width.unwrap_or_default(), px(0.), px(0.)),
+        };
+        if let Some(entry) = self.nested.get_mut(&ix) {
+            entry.1 = inner_w;
+        }
+        let height = match s.height {
+            style::Length::Px(h) if s.border_box => px(h),
+            style::Length::Px(h) => px(h) + top + bottom,
+            _ => inner_h + top + bottom,
+        };
+        let (ml, mr) = atomic_margins(s);
+        let above = if s.vertical_align == VerticalAlign::Middle {
+            height / 2.0 + px(s.font_size * 0.3) + shift
+        } else if atomic.content.as_ref().is_none_or(|c| c.text.is_empty()) {
+            // No line box inside: the bottom margin edge sits on the baseline.
+            height + shift
+        } else {
+            top + first_above + shift
+        };
+        Measured {
+            width: inner_w + left + right + ml + mr,
+            extent: Extent { above, below: height - above },
+            ascent: height,
+            descent: px(0.),
+        }
+    }
+
     fn lines(&mut self, para: &Paragraph, cx: &RenderCx, wrap: Option<Pixels>, window: &mut Window) -> Rc<Vec<Line>> {
-        if let Some((w, lines)) = &self.lines
+        self.layout(para, cx, wrap, window).0
+    }
+
+    /// Lines and the (wrap-adjusted) piece measurements they were built from.
+    fn layout(
+        &mut self,
+        para: &Paragraph,
+        cx: &RenderCx,
+        wrap: Option<Pixels>,
+        window: &mut Window,
+    ) -> (Rc<Vec<Line>>, Rc<Vec<Measured>>) {
+        if let Some((w, lines, measured)) = &self.lines
             && *w == wrap
         {
-            return lines.clone();
+            return (lines.clone(), measured.clone());
         }
-        let measured = self.measure(para, cx, window);
+        let mut measured = self.measure(para, cx, window);
+        // Inline-blocks without a CSS width shrink to fit the line width.
+        if wrap.is_some() {
+            let mut adjusted: Option<Vec<Measured>> = None;
+            for (ix, piece) in para.pieces.iter().enumerate() {
+                let PieceKind::Object(oi) = piece.kind else { continue };
+                let InlineObject::Block(atomic) = &para.objects[oi as usize] else { continue };
+                if !atomic.style.width.is_auto() {
+                    continue;
+                }
+                let shift = px(para.spans[piece.span as usize].style.baseline_shift);
+                let m = self.measure_atomic(oi, atomic, shift, wrap, cx, window);
+                adjusted.get_or_insert_with(|| measured.to_vec())[ix] = m;
+            }
+            if let Some(adjusted) = adjusted {
+                measured = Rc::new(adjusted);
+            }
+        }
         let lines = Rc::new(break_lines(para, &measured, self.strut, wrap));
-        self.lines = Some((wrap, lines.clone()));
-        lines
+        self.lines = Some((wrap, lines.clone(), measured.clone()));
+        (lines, measured)
     }
 }
 
@@ -278,26 +410,271 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     lines
 }
 
+/// Horizontal margins of an inline-block (they sit outside its box, in the line).
+fn atomic_margins(s: &style::ComputedStyle) -> (Pixels, Pixels) {
+    (px(s.margin.left.px_or_zero()), px(s.margin.right.px_or_zero()))
+}
+
+/// CSS shrinks oversized corner radii to fit; GPUI draws nothing for them.
+fn clamp_radius(r: Pixels, bounds: Bounds<Pixels>) -> Pixels {
+    r.min(bounds.size.width.min(bounds.size.height) / 2.0).max(px(0.))
+}
+
+fn line_offset(para: &Paragraph, line: &Line, width: Pixels) -> Pixels {
+    let free = (width - line.width).max(px(0.));
+    match para.style.text_align {
+        CssTextAlign::Left => px(0.),
+        CssTextAlign::Center => free / 2.0,
+        CssTextAlign::Right => free,
+    }
+}
+
 /// Each laid-out piece's area and the element its text belongs to.
 type PieceAreas = Vec<(Bounds<Pixels>, Option<page::NodeId>)>;
 
-pub struct Prepainted {
-    lines: Rc<Vec<Line>>,
-    measured: Rc<Vec<Measured>>,
+/// What prepaint collects while walking the flow (and nested flows).
+#[derive(Default)]
+struct Placement {
     objects: Vec<AnyElement>,
-    links: Rc<Vec<(Hitbox, usize)>>,
-    /// For `:hover`: the whole paragraph, and each piece's area + element.
-    hover: Option<(Hitbox, Rc<PieceAreas>)>,
-    /// Pieces whose `cursor` isn't auto.
+    links: Vec<(Hitbox, Arc<Url>)>,
+    areas: PieceAreas,
     cursors: Vec<(Hitbox, CursorStyle)>,
+}
+
+/// Lay out a flow at `origin` / `width`: images become child elements, links
+/// and cursors get hitboxes, pieces get hover areas. Recurses into inline-blocks.
+#[allow(clippy::too_many_arguments)]
+fn place(
+    para: &Paragraph,
+    state: &RefCell<FlowState>,
+    origin: Point<Pixels>,
+    width: Pixels,
+    cx: &RenderCx,
+    out: &mut Placement,
+    window: &mut Window,
+    app: &mut App,
+) {
+    let wrap = para.style.white_space.wraps().then_some(width);
+    let (lines, measured) = state.borrow_mut().layout(para, cx, wrap, window);
+    let link_of = |byte: usize| para.links.iter().find(|l| l.range.contains(&byte)).map(|l| l.url.clone());
+
+    let mut y = origin.y;
+    for line in lines.iter() {
+        let baseline = y + line.extent.above;
+        let dx = origin.x + line_offset(para, line, width);
+        let mut run: Option<(Arc<Url>, Pixels, Pixels)> = None;
+        let flush_run = |run: &mut Option<(Arc<Url>, Pixels, Pixels)>, out: &mut Placement, window: &mut Window| {
+            if let Some((url, x0, x1)) = run.take() {
+                let b = Bounds::new(point(dx + x0, y), size(x1 - x0, line.extent.height()));
+                out.links.push((window.insert_hitbox(b, HitboxBehavior::Normal), url));
+            }
+        };
+        for &(ix, x) in &line.items {
+            let piece = &para.pieces[ix];
+            let m = measured[ix];
+            let area = Bounds::new(point(dx + x, y), size(m.width, line.extent.height()));
+            let span_style = &para.spans[piece.span as usize].style;
+            if cx.track_hover {
+                out.areas.push((area, span_style.node));
+            }
+            if let Some(c) = cursor_style(span_style.cursor) {
+                out.cursors.push((window.insert_hitbox(area, HitboxBehavior::Normal), c));
+            }
+            if let PieceKind::Object(oi) = piece.kind {
+                let top = baseline - m.extent.above;
+                match &para.objects[oi as usize] {
+                    InlineObject::Image(image) => {
+                        let (w, h) = (m.width, m.ascent);
+                        let mut el = match cx.images.borrow().get(&*image.src) {
+                            Some(ImageState::Ready { image, .. }) => {
+                                img(image.clone()).w(w).h(h).object_fit(ObjectFit::Fill).into_any_element()
+                            }
+                            _ => div().w(w).h(h).into_any_element(),
+                        };
+                        el.layout_as_root(size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)), window, app);
+                        el.prepaint_at(point(dx + x, top), window, app);
+                        out.objects.push(el);
+                    }
+                    InlineObject::Block(atomic) => {
+                        if let (Some(content), Some((nested, inner_w))) =
+                            (&atomic.content, state.borrow().nested.get(&oi).cloned())
+                        {
+                            let (t, _, _, l) = edges(&atomic.style);
+                            let (ml, _) = atomic_margins(&atomic.style);
+                            place(content, &nested, point(dx + x + ml + l, top + t), inner_w, cx, out, window, app);
+                        }
+                    }
+                }
+            }
+            // Link hit areas: merge neighbouring pieces of the same link.
+            match (link_of(piece.range.start), &mut run) {
+                (Some(url), Some((current, _, x1))) if Arc::ptr_eq(&url, current) => *x1 = x + m.width,
+                (url, current) => {
+                    flush_run(current, out, window);
+                    *current = url.map(|u| (u, x, x + m.width));
+                }
+            }
+        }
+        flush_run(&mut run, out, window);
+        y += line.extent.height();
+    }
+}
+
+/// Paint a flow's decorations, text and inline-block boxes. Recurses into
+/// inline-blocks. (Images are painted separately, as child elements.)
+#[allow(clippy::too_many_arguments)]
+fn paint_flow(
+    para: &Paragraph,
+    state: &RefCell<FlowState>,
+    origin: Point<Pixels>,
+    width: Pixels,
+    cx: &RenderCx,
+    window: &mut Window,
+    app: &mut App,
+) {
+    let wrap = para.style.white_space.wraps().then_some(width);
+    let (lines, measured) = state.borrow_mut().layout(para, cx, wrap, window);
+    let palette = &cx.palette;
+    let ts = window.text_system().clone();
+
+    let mut y = origin.y;
+    for line in lines.iter() {
+        let baseline = y + line.extent.above;
+        let dx = origin.x + line_offset(para, line, width);
+
+        // 1. Inline box decorations, behind the text.
+        for b in &para.boxes {
+            let mut span = None::<(Pixels, Pixels, usize)>;
+            for &(ix, x) in &line.items {
+                let r = &para.pieces[ix].range;
+                if r.start >= b.range.start && r.end <= b.range.end {
+                    let x1 = x + measured[ix].width;
+                    span = Some(match span {
+                        Some((x0, _, first)) => (x0, x1, first),
+                        None => (x, x1, ix),
+                    });
+                }
+            }
+            let Some((x0, x1, first)) = span else { continue };
+            let m = measured[first];
+            let shift = px(para.spans[para.pieces[first].span as usize].style.baseline_shift);
+            let top = baseline - shift - m.ascent - px(b.pad_top);
+            let bottom = baseline - shift + m.descent + px(b.pad_bottom);
+            let bg = b.background.map(|c| palette.color(c)).unwrap_or_default();
+            let bounds = Bounds::from_corners(point(dx + x0, top), point(dx + x1, bottom));
+            window.paint_quad(quad(
+                bounds,
+                clamp_radius(px(b.radius), bounds),
+                bg,
+                Edges {
+                    top: px(b.border_width.top),
+                    right: px(b.border_width.right),
+                    bottom: px(b.border_width.bottom),
+                    left: px(b.border_width.left),
+                },
+                palette.color(b.border_color),
+                BorderStyle::Solid,
+            ));
+        }
+
+        // 2. Inline-blocks: their box, then their content.
+        for &(ix, x) in &line.items {
+            let PieceKind::Object(oi) = para.pieces[ix].kind else { continue };
+            let InlineObject::Block(atomic) = &para.objects[oi as usize] else { continue };
+            let m = measured[ix];
+            let top = baseline - m.extent.above;
+            let s = &atomic.style;
+            let (ml, mr) = atomic_margins(s);
+            let x = x + ml;
+            let bounds = Bounds::new(point(dx + x, top), size(m.width - ml - mr, m.ascent));
+            let border = s.border_width;
+            if s.painted_background().is_some() || s.has_border() {
+                let corner = |l: style::Length| {
+                    let r = match l {
+                        style::Length::Percent(p) => bounds.size.width.min(bounds.size.height) * (p / 100.0),
+                        other => px(other.px_or_zero()),
+                    };
+                    clamp_radius(r, bounds)
+                };
+                window.paint_quad(quad(
+                    bounds,
+                    Corners {
+                        top_left: corner(s.border_radius[0]),
+                        top_right: corner(s.border_radius[1]),
+                        bottom_right: corner(s.border_radius[2]),
+                        bottom_left: corner(s.border_radius[3]),
+                    },
+                    s.painted_background().map(|c| palette.color(c)).unwrap_or_default(),
+                    Edges {
+                        top: px(border.top),
+                        right: px(border.right),
+                        bottom: px(border.bottom),
+                        left: px(border.left),
+                    },
+                    palette.color(s.border_color.top),
+                    BorderStyle::Solid,
+                ));
+            }
+            if let (Some(content), Some((nested, inner_w))) = (&atomic.content, state.borrow().nested.get(&oi).cloned()) {
+                let (t, _, _, l) = edges(s);
+                paint_flow(content, &nested, point(dx + x + l, top + t), inner_w, cx, window, app);
+            }
+        }
+
+        // 3. Text, in runs of consecutive same-span pieces.
+        let items = &line.items;
+        let mut k = 0;
+        while k < items.len() {
+            let (ix, x) = items[k];
+            let piece = &para.pieces[ix];
+            if matches!(piece.kind, PieceKind::Object(_) | PieceKind::Newline) {
+                k += 1;
+                continue;
+            }
+            let mut end = k + 1;
+            while end < items.len() {
+                let next = &para.pieces[items[end].0];
+                let prev = &para.pieces[items[end - 1].0];
+                if next.span != piece.span
+                    || next.range.start != prev.range.end
+                    || matches!(next.kind, PieceKind::Object(_) | PieceKind::Newline)
+                {
+                    break;
+                }
+                end += 1;
+            }
+            // Don't paint (underline) trailing spaces at the end of a line.
+            let mut last = end;
+            while last > k + 1 && para.pieces[items[last - 1].0].kind == PieceKind::Space && end == items.len() {
+                last -= 1;
+            }
+            let start = piece.range.start;
+            let stop = para.pieces[items[last - 1].0].range.end;
+            let text: SharedString = para.text[start..stop].to_owned().into();
+            let style = &para.spans[piece.span as usize].style;
+            let run = text_run(text.len(), style, palette);
+            let shaped = ts.shape_line(text, px(style.font_size), &[run], None);
+            let m = measured[ix];
+            let origin = point(dx + x, baseline - px(style.baseline_shift) - m.ascent);
+            shaped.paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, app).ok();
+            k = end;
+        }
+        y += line.extent.height();
+    }
+}
+
+pub struct Prepainted {
+    placement: Placement,
+    /// The whole paragraph, for `:hover` reporting.
+    hover: Option<Hitbox>,
 }
 
 /// Per-element interaction state, kept across frames.
 #[derive(Default, Clone)]
 struct LinkState {
-    pressed: Rc<Cell<Option<usize>>>,
-    hovered: Rc<Cell<Option<usize>>>,
-    hovered_node: Rc<Cell<Option<page::NodeId>>>,
+    pressed: Rc<RefCell<Option<Arc<Url>>>>,
+    hovered: Rc<RefCell<Option<Arc<Url>>>>,
+    hovered_node: Rc<RefCell<Option<page::NodeId>>>,
 }
 
 impl IntoElement for InlineFlow {
@@ -305,21 +682,6 @@ impl IntoElement for InlineFlow {
 
     fn into_element(self) -> Self {
         self
-    }
-}
-
-impl InlineFlow {
-    fn wrap_width(&self, width: Pixels) -> Option<Pixels> {
-        self.para.style.white_space.wraps().then_some(width)
-    }
-
-    fn line_offset(&self, line: &Line, width: Pixels) -> Pixels {
-        let free = (width - line.width).max(px(0.));
-        match self.para.style.text_align {
-            CssTextAlign::Left => px(0.),
-            CssTextAlign::Center => free / 2.0,
-            CssTextAlign::Right => free,
-        }
     }
 }
 
@@ -359,7 +721,7 @@ impl Element for InlineFlow {
             };
             let lines = state.borrow_mut().lines(&para, &rcx, wrap, window);
             let width = lines.iter().map(|l| l.width).fold(px(0.), Pixels::max);
-            let height = lines.iter().map(|l| l.extent.above + l.extent.below).fold(px(0.), |a, b| a + b);
+            let height = lines.iter().map(|l| l.extent.height()).fold(px(0.), |a, b| a + b);
             size(known.width.unwrap_or(width), height)
         });
         (layout_id, ())
@@ -374,70 +736,10 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) -> Prepainted {
-        let wrap = self.wrap_width(bounds.size.width);
-        let lines = self.state.borrow_mut().lines(&self.para, &self.cx, wrap, window);
-        let measured = self.state.borrow_mut().measure(&self.para, &self.cx, window);
-        let para = &self.para;
-
-        let link_of = |byte: usize| para.links.iter().position(|l| l.range.contains(&byte));
-        let mut objects = Vec::new();
-        let mut links = Vec::new();
-        let mut piece_areas = Vec::new();
-        let mut cursors = Vec::new();
-        let mut y = bounds.origin.y;
-        for line in lines.iter() {
-            let baseline = y + line.extent.above;
-            let dx = bounds.origin.x + self.line_offset(line, bounds.size.width);
-            let mut current_link: Option<(usize, Pixels, Pixels)> = None; // (link, x0, x1)
-            for &(ix, x) in &line.items {
-                let piece = &para.pieces[ix];
-                let m = measured[ix];
-                let area = Bounds::new(point(dx + x, y), size(m.width, line.extent.above + line.extent.below));
-                let span_style = &para.spans[piece.span as usize].style;
-                if self.cx.track_hover {
-                    piece_areas.push((area, span_style.node));
-                }
-                if let Some(c) = crate::view::cursor_style(span_style.cursor) {
-                    cursors.push((window.insert_hitbox(area, HitboxBehavior::Normal), c));
-                }
-                if let PieceKind::Object(oi) = piece.kind {
-                    let image = &para.objects[oi as usize];
-                    let w = m.width;
-                    let h = m.ascent;
-                    let top = baseline - m.extent.above;
-                    let mut el = match self.cx.images.borrow().get(&*image.src) {
-                        Some(ImageState::Ready { image, .. }) => {
-                            img(image.clone()).w(w).h(h).object_fit(ObjectFit::Fill).into_any_element()
-                        }
-                        _ => div().w(w).h(h).into_any_element(),
-                    };
-                    el.layout_as_root(size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)), window, cx);
-                    el.prepaint_at(point(dx + x, top), window, cx);
-                    objects.push(el);
-                }
-                // Link hit areas: merge neighbouring pieces of the same link.
-                match (link_of(piece.range.start), &mut current_link) {
-                    (Some(l), Some((cl, _, x1))) if *cl == l => *x1 = x + m.width,
-                    (link, current) => {
-                        if let Some((cl, x0, x1)) = current.take() {
-                            let b = Bounds::new(point(dx + x0, y), size(x1 - x0, line.extent.above + line.extent.below));
-                            links.push((window.insert_hitbox(b, HitboxBehavior::Normal), cl));
-                        }
-                        *current = link.map(|l| (l, x, x + m.width));
-                    }
-                }
-            }
-            if let Some((cl, x0, x1)) = current_link {
-                let b = Bounds::new(point(dx + x0, y), size(x1 - x0, line.extent.above + line.extent.below));
-                links.push((window.insert_hitbox(b, HitboxBehavior::Normal), cl));
-            }
-            y += line.extent.above + line.extent.below;
-        }
-        let hover = self
-            .cx
-            .track_hover
-            .then(|| (window.insert_hitbox(bounds, HitboxBehavior::Normal), Rc::new(piece_areas)));
-        Prepainted { lines, measured, objects, links: Rc::new(links), hover, cursors }
+        let mut placement = Placement::default();
+        place(&self.para, &self.state, bounds.origin, bounds.size.width, &self.cx, &mut placement, window, cx);
+        let hover = self.cx.track_hover.then(|| window.insert_hitbox(bounds, HitboxBehavior::Normal));
+        Prepainted { placement, hover }
     }
 
     fn paint(
@@ -450,100 +752,16 @@ impl Element for InlineFlow {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let para = &self.para;
-        let palette = &self.cx.palette;
-        let measured = &prepainted.measured;
-        let ts = window.text_system().clone();
-
-        let mut y = bounds.origin.y;
-        for line in prepainted.lines.iter() {
-            let baseline = y + line.extent.above;
-            let dx = bounds.origin.x + self.line_offset(line, bounds.size.width);
-
-            // 1. Inline box decorations, behind the text.
-            for b in &para.boxes {
-                let mut span = None::<(Pixels, Pixels, usize)>;
-                for &(ix, x) in &line.items {
-                    let r = &para.pieces[ix].range;
-                    if r.start >= b.range.start && r.end <= b.range.end {
-                        let x1 = x + measured[ix].width;
-                        span = Some(match span {
-                            Some((x0, _, first)) => (x0, x1, first),
-                            None => (x, x1, ix),
-                        });
-                    }
-                }
-                let Some((x0, x1, first)) = span else { continue };
-                let m = measured[first];
-                let shift = px(para.spans[para.pieces[first].span as usize].style.baseline_shift);
-                let top = baseline - shift - m.ascent - px(b.pad_top);
-                let bottom = baseline - shift + m.descent + px(b.pad_bottom);
-                let bg = b.background.map(|c| palette.color(c)).unwrap_or_default();
-                window.paint_quad(quad(
-                    Bounds::from_corners(point(dx + x0, top), point(dx + x1, bottom)),
-                    px(b.radius),
-                    bg,
-                    px(b.border_width),
-                    palette.color(b.border_color),
-                    BorderStyle::Solid,
-                ));
-            }
-
-            // 2. Text, in runs of consecutive same-span pieces.
-            let mut k = 0;
-            let items = &line.items;
-            while k < items.len() {
-                let (ix, x) = items[k];
-                let piece = &para.pieces[ix];
-                if matches!(piece.kind, PieceKind::Object(_) | PieceKind::Newline) {
-                    k += 1;
-                    continue;
-                }
-                let mut end = k + 1;
-                while end < items.len() {
-                    let next = &para.pieces[items[end].0];
-                    let prev = &para.pieces[items[end - 1].0];
-                    if next.span != piece.span
-                        || next.range.start != prev.range.end
-                        || matches!(next.kind, PieceKind::Object(_) | PieceKind::Newline)
-                    {
-                        break;
-                    }
-                    end += 1;
-                }
-                // Don't paint (underline) trailing spaces at the end of a line.
-                let mut last = end;
-                while last > k + 1 && para.pieces[items[last - 1].0].kind == PieceKind::Space && end == items.len() {
-                    last -= 1;
-                }
-                let start = piece.range.start;
-                let stop = para.pieces[items[last - 1].0].range.end;
-                let text: SharedString = para.text[start..stop].to_owned().into();
-                if !text.trim().is_empty() || para.boxes.is_empty() {
-                    let style = &para.spans[piece.span as usize].style;
-                    let run = text_run(text.len(), style, palette);
-                    let shaped = ts.shape_line(text, px(style.font_size), &[run], None);
-                    let m = measured[ix];
-                    let origin = point(dx + x, baseline - px(style.baseline_shift) - m.ascent);
-                    shaped
-                        .paint(origin, m.ascent + m.descent, TextAlign::Left, None, window, cx)
-                        .ok();
-                }
-                k = end;
-            }
-            y += line.extent.above + line.extent.below;
-        }
-
-        // 3. Inline images.
-        for object in &mut prepainted.objects {
+        paint_flow(&self.para, &self.state, bounds.origin, bounds.size.width, &self.cx, window, cx);
+        for object in &mut prepainted.placement.objects {
             object.paint(window, cx);
         }
 
-        // 4. Cursors, links (click/hover), and `:hover` reporting.
-        for (hitbox, cursor) in &prepainted.cursors {
+        // Cursors, links (click/hover), and `:hover` reporting.
+        for (hitbox, cursor) in &prepainted.placement.cursors {
             window.set_cursor_style(*cursor, hitbox);
         }
-        for (hitbox, _) in prepainted.links.iter() {
+        for (hitbox, _) in &prepainted.placement.links {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
         let Some(id) = id else { return };
@@ -551,67 +769,69 @@ impl Element for InlineFlow {
             let state = state.unwrap_or_default();
             (state.clone(), state)
         });
-        if let Some((hitbox, areas)) = prepainted.hover.clone() {
+
+        if let Some(hitbox) = prepainted.hover.clone() {
+            let areas = Rc::new(std::mem::take(&mut prepainted.placement.areas));
             let state = state.clone();
             let report = self.cx.on_inline_hover.clone();
-            let para_id = para.id;
+            let para_id = self.para.id;
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
                 }
                 let node = if hitbox.is_hovered(window) {
                     let mouse = window.mouse_position();
-                    areas.iter().find(|(b, _)| b.contains(&mouse)).and_then(|(_, n)| *n)
+                    // Innermost first: nested (inline-block) areas come after their parent's.
+                    areas.iter().rev().find(|(b, _)| b.contains(&mouse)).and_then(|(_, n)| *n)
                 } else {
                     None
                 };
-                if node != state.hovered_node.get() {
-                    state.hovered_node.set(node);
+                if node != *state.hovered_node.borrow() {
+                    *state.hovered_node.borrow_mut() = node;
                     report(para_id, node, window, cx);
                 }
             });
         }
-        if prepainted.links.is_empty() {
+
+        if prepainted.placement.links.is_empty() {
             return;
         }
-        let hit = |links: &[(Hitbox, usize)], window: &Window| {
-            links.iter().find(|(h, _)| h.is_hovered(window)).map(|(_, l)| *l)
+        let links: Rc<Vec<(Hitbox, Arc<Url>)>> = Rc::new(std::mem::take(&mut prepainted.placement.links));
+        let hit = |links: &[(Hitbox, Arc<Url>)], window: &Window| {
+            links.iter().find(|(h, _)| h.is_hovered(window)).map(|(_, u)| u.clone())
         };
         {
-            let links = prepainted.links.clone();
+            let links = links.clone();
             let state = state.clone();
             window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _| {
                 if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                    state.pressed.set(hit(&links, window));
+                    *state.pressed.borrow_mut() = hit(&links, window);
                 }
             });
         }
         {
-            let links = prepainted.links.clone();
+            let links = links.clone();
             let state = state.clone();
-            let urls = para.links.clone();
             let on_click = self.cx.on_link_click.clone();
             window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble && e.button == MouseButton::Left {
-                    let pressed = state.pressed.take();
+                    let pressed = state.pressed.borrow_mut().take();
                     if let Some(over) = hit(&links, window)
-                        && pressed == Some(over)
+                        && pressed.as_deref() == Some(&*over)
                     {
-                        on_click(&urls[over].url, window, cx);
+                        on_click(&over, window, cx);
                     }
                 }
             });
         }
         {
-            let links = prepainted.links.clone();
-            let urls = para.links.clone();
             let on_hover = self.cx.on_link_hover.clone();
             window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble {
                     let over = hit(&links, window);
-                    if over != state.hovered.get() {
-                        state.hovered.set(over);
-                        on_hover(over.map(|l| &*urls[l].url), window, cx);
+                    if over.as_deref() != state.hovered.borrow().as_deref() {
+                        *state.hovered.borrow_mut() = over.clone();
+                        on_hover(over.as_deref(), window, cx);
                     }
                 }
             });

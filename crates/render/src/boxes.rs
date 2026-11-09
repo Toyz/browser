@@ -200,13 +200,42 @@ pub struct Piece {
     pub break_before: bool,
 }
 
+/// Something atomic sitting in a line of text.
+#[derive(Debug, Clone)]
+pub enum InlineObject {
+    Image(ImageBox),
+    /// An `inline-block` whose content is itself inline (buttons, badges, nav
+    /// items): a box laid out as a nested inline flow.
+    Block(AtomicBox),
+}
+
+#[derive(Debug, Clone)]
+pub struct AtomicBox {
+    pub style: Arc<ComputedStyle>,
+    pub content: Option<Arc<Paragraph>>,
+}
+
+impl InlineObject {
+    /// Every image inside (for loading).
+    pub fn images(&self, out: &mut Vec<Arc<Url>>) {
+        match self {
+            InlineObject::Image(i) => out.push(i.src.clone()),
+            InlineObject::Block(b) => {
+                if let Some(p) = &b.content {
+                    p.objects.iter().for_each(|o| o.images(out));
+                }
+            }
+        }
+    }
+}
+
 /// An inline element with a visible box (background and/or border), drawn
 /// behind its text: `<code>` chips, `<mark>`, buttons...
 #[derive(Debug, Clone)]
 pub struct InlineBox {
     pub range: Range<usize>,
     pub background: Option<Color>,
-    pub border_width: f32,
+    pub border_width: Edges<f32>,
     pub border_color: Color,
     pub radius: f32,
     pub pad_top: f32,
@@ -238,8 +267,8 @@ pub struct Paragraph {
     pub anchors: Vec<String>,
     pub pieces: Vec<Piece>,
     pub boxes: Vec<InlineBox>,
-    /// Inline images (each marked by U+FFFC in `text`).
-    pub objects: Vec<ImageBox>,
+    /// Inline images and inline-blocks (each marked by U+FFFC in `text`).
+    pub objects: Vec<InlineObject>,
     /// Estimated min-content width (the longest word), px, for table column
     /// sizing (which needs numbers before layout).
     pub min_content: f32,
@@ -553,7 +582,7 @@ impl Builder<'_> {
             self.flush(c);
             c.push(LayoutBox::Image(image));
         } else {
-            c.inline.push_object(image, &style, link);
+            c.inline.push_object(InlineObject::Image(image), &style, link);
         }
     }
 
@@ -769,7 +798,27 @@ impl Builder<'_> {
             match style.display {
                 Display::None => {}
                 Display::Contents => self.build_children(child, &style, c, link, blockify),
-                Display::Inline | Display::InlineBlock => match tag {
+                Display::InlineBlock => {
+                    // An atomic box in the line. Only inline content can be laid
+                    // out that way; anything else becomes a block-level box.
+                    let generated = self.generated(child, &style);
+                    let block = self.build_block(child, style.clone(), BlockKind::Normal, link, generated);
+                    let content = match block.children.as_slice() {
+                        [] => Some(None),
+                        [LayoutBox::Paragraph(p)] => Some(Some(p.clone())),
+                        _ => None,
+                    };
+                    match content {
+                        Some(content) => {
+                            c.inline.push_object(InlineObject::Block(AtomicBox { style: style.clone(), content }), &style, link);
+                        }
+                        None => {
+                            self.flush(c);
+                            c.push(LayoutBox::Block(block));
+                        }
+                    }
+                }
+                Display::Inline => match tag {
                     "br" => c.inline.push_break(),
                     _ => {
                         // Inline boxes can't have real margins/padding inside a text
@@ -795,14 +844,17 @@ impl Builder<'_> {
                         let box_end = c.inline.text.len();
                         c.inline.shifts.pop();
                         if box_end > box_start && (style.painted_background().is_some() || style.has_border()) {
-                            let border = [style.border_width.top, style.border_width.right, style.border_width.bottom, style.border_width.left]
+                            // GPUI quads have one border color: use the first visible side's.
+                            let w = style.border_width;
+                            let border_color = [(w.top, style.border_color.top), (w.bottom, style.border_color.bottom), (w.left, style.border_color.left), (w.right, style.border_color.right)]
                                 .into_iter()
-                                .fold(0.0, f32::max);
+                                .find(|&(width, _)| width > 0.0)
+                                .map_or(style.border_color.top, |(_, c)| c);
                             c.inline.boxes.push(InlineBox {
                                 range: box_start..box_end,
                                 background: style.painted_background(),
-                                border_width: border,
-                                border_color: style.border_color.top,
+                                border_width: style.border_width,
+                                border_color,
                                 radius: style.border_radius[0].px_or_zero(),
                                 pad_top: style.padding.top.px_or_zero(),
                                 pad_bottom: style.padding.bottom.px_or_zero(),
@@ -873,15 +925,30 @@ fn paragraph_intrinsic(p: &Paragraph) -> (f32, f32) {
     let mut objects = p.objects.iter();
     for ch in p.text.chars() {
         if ch == '\u{FFFC}' {
-            let w = objects.next().map(|o| match o.style.width {
-                Length::Px(w) => w,
-                _ => o.attr_width.unwrap_or(16.0),
+            // (min-content, max-content) of the object.
+            let (min_w, max_w) = objects.next().map_or((0.0, 0.0), |o| match o {
+                InlineObject::Image(i) => {
+                    let w = match i.style.width {
+                        Length::Px(w) => w,
+                        _ => i.attr_width.unwrap_or(16.0),
+                    };
+                    (w, w)
+                }
+                InlineObject::Block(b) => match b.style.outer_width(b.style.width) {
+                    Length::Px(w) => (w, w),
+                    _ => {
+                        let edges = b.style.horizontal_edges()
+                            + b.style.margin.left.px_or_zero()
+                            + b.style.margin.right.px_or_zero();
+                        let (min, max) = b.content.as_ref().map_or((0.0, 0.0), |c| (c.min_content, c.max_content));
+                        (min + edges, max + edges)
+                    }
+                },
             });
-            let w = w.unwrap_or(0.0);
-            line += w;
+            line += max_w;
             longest_word = longest_word.max(word);
             word = 0.0;
-            longest_word = longest_word.max(w.min(240.0));
+            longest_word = longest_word.max(min_w.min(240.0));
             continue;
         }
         if ch == '\n' {
@@ -1184,7 +1251,7 @@ struct InlineBuilder {
     /// Elements we're inside (innermost last).
     nodes: Vec<NodeId>,
     boxes: Vec<InlineBox>,
-    objects: Vec<ImageBox>,
+    objects: Vec<InlineObject>,
 }
 
 impl InlineBuilder {
@@ -1296,13 +1363,13 @@ impl InlineBuilder {
         }
     }
 
-    /// An inline image, flowing with the text.
-    fn push_object(&mut self, image: ImageBox, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+    /// An atomic inline (image, inline-block), flowing with the text.
+    fn push_object(&mut self, object: InlineObject, style: &ComputedStyle, link: Option<&Arc<Url>>) {
         self.started = true;
         let start = self.text.len();
         self.text.push('\u{FFFC}');
         self.after_space = false;
-        self.objects.push(image);
+        self.objects.push(object);
         let mut inline = InlineStyle::of(style, false);
         inline.baseline_shift = self.shifts.iter().sum();
         inline.node = self.nodes.last().copied();
@@ -1554,7 +1621,7 @@ fn collect_images(b: &LayoutBox, out: &mut Vec<Arc<Url>>) {
             block.children.iter().for_each(|c| collect_images(c, out));
         }
         LayoutBox::Image(i) => out.push(i.src.clone()),
-        LayoutBox::Paragraph(p) => out.extend(p.objects.iter().map(|o| o.src.clone())),
+        LayoutBox::Paragraph(p) => p.objects.iter().for_each(|o| o.images(out)),
     }
 }
 
@@ -1775,7 +1842,7 @@ mod tests {
         // Inline images flow with the text as objects.
         let logo = paragraph(&tree.rows[1]);
         assert_eq!(&*logo.text, "\u{FFFC}");
-        let img = &logo.objects[0];
+        let InlineObject::Image(img) = &logo.objects[0] else { panic!() };
         assert_eq!(img.src.as_str(), "https://example.com/dir/a2.png");
         assert_eq!(img.density, 2.0);
         assert_eq!((img.attr_width, img.attr_height), (Some(50.0), Some(40.0)));
@@ -1842,7 +1909,7 @@ mod tests {
         assert!(sup.style.font_size < 16.0);
         // The code chip is a decorated inline box.
         assert_eq!(p.boxes.len(), 1);
-        assert_eq!(p.boxes[0].border_width, 1.0);
+        assert_eq!(p.boxes[0].border_width.top, 1.0);
         assert!(p.text[p.boxes[0].range.clone()].contains(".rs"));
         // Every span knows its element (for :hover): "wor" is inside <b>.
         let b = p.spans.iter().find(|s| s.style.font_weight == 700).unwrap();
@@ -1879,6 +1946,22 @@ mod tests {
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["after"]);
         // The fixed bar is an overlay; the page-anchored skip link stays hidden.
         assert_eq!(tree.fixed.len(), 1);
+    }
+
+    #[test]
+    fn inline_blocks_are_atomic() {
+        let tree = layout_css(
+            r#"<div>Go <a class="btn" href="/go">Start</a> now <span class="box"><div>block inside</div></span></div>"#,
+            ".btn { display: inline-block; padding: 4px 8px; border: 1px solid } .box { display: inline-block }",
+        );
+        let p = paragraph(&tree.rows[0]);
+        assert_eq!(&*p.text, "Go \u{FFFC} now");
+        let InlineObject::Block(btn) = &p.objects[0] else { panic!() };
+        assert_eq!(&*btn.content.as_ref().unwrap().text, "Start");
+        assert_eq!(p.links.len(), 1, "the button sits inside the link");
+        // An inline-block with block content falls back to a block box (here
+        // a plain one, so it's flattened into the rows like any other block).
+        assert_eq!(&*paragraph(&tree.rows[1]).text, "block inside");
     }
 
     #[test]
