@@ -193,6 +193,8 @@ pub enum Decl {
     Cursor(Cursor),
     /// `pointer-events: none` (`true`) or anything else.
     PointerEventsNone(bool),
+    /// `z-index` (`None`: auto).
+    ZIndex(Option<i32>),
     /// `color-scheme` allows dark.
     ColorScheme(bool),
     TextDecoration { underline: bool, strikethrough: bool },
@@ -536,6 +538,10 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 dark |= id.eq_ignore_ascii_case("dark");
             }
             out.push(D::ColorScheme(dark));
+        }
+        "z-index" => {
+            let z = p.try_parse(|p| p.expect_integer()).ok();
+            out.push(D::ZIndex(z));
         }
         "pointer-events" => {
             let v = ident(p)?;

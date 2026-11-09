@@ -1135,6 +1135,11 @@
   const HTMLBRElement = plain("HTMLBRElement"), HTMLHRElement = plain("HTMLHRElement"), HTMLPreElement = plain("HTMLPreElement");
   const HTMLDialogElement = plain("HTMLDialogElement"), HTMLDetailsElement = plain("HTMLDetailsElement");
   const SVGElement = plain("SVGElement", Element);
+  // SVG elements have style, dataset, focus()... too (HTMLOrSVGElement).
+  for (const key of Reflect.ownKeys(HTMLElement.prototype)) {
+    if (key === "constructor" || key in Element.prototype) continue;
+    Object.defineProperty(SVGElement.prototype, key, Object.getOwnPropertyDescriptor(HTMLElement.prototype, key));
+  }
   const SVGSVGElement = plain("SVGSVGElement", SVGElement), SVGPathElement = plain("SVGPathElement", SVGElement), SVGGElement = plain("SVGGElement", SVGElement);
   const elementClasses = {
     a: HTMLAnchorElement, img: HTMLImageElement, script: HTMLScriptElement, link: HTMLLinkElement, style: HTMLStyleElement,
@@ -2818,6 +2823,13 @@
     }),
     ...events,
   });
+
+  // The window's own event methods work without a receiver (a bare
+  // `addEventListener(...)` in strict code), as browsers' do.
+  for (const name of ["addEventListener", "removeEventListener", "dispatchEvent"]) {
+    const method = EventTarget.prototype[name];
+    Object.defineProperty(window, name, { configurable: true, writable: true, value: function (...args) { return method.apply(this == null || this === globalThis ? window : this, args); } });
+  }
 
   // Declarative shadow roots (made from <template shadowrootmode>).
   {

@@ -107,6 +107,9 @@ pub struct ComputedStyle {
     pub text_gradient: Option<Arc<TextGradient>>,
     /// `pointer-events: none` (inherited): the mouse goes through it.
     pub pointer_events_none: bool,
+    /// `z-index` (`None`: auto). Only its sign matters so far: negative
+    /// positioned boxes paint under their in-flow siblings.
+    pub z_index: Option<i32>,
     /// `-webkit-text-fill-color` (inherited).
     pub text_fill: Option<Color>,
     /// SVG paint properties from CSS (`fill`, `stroke`...): inherited, and
@@ -208,6 +211,7 @@ impl ComputedStyle {
             bg_clip_border: None,
             text_gradient: None,
             pointer_events_none: false,
+            z_index: None,
             aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),

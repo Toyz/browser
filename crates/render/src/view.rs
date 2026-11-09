@@ -225,7 +225,10 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
-        .children(row.absolutes.iter().map(|b| clipped_deferred(render_box(b, cx, b.margin(), false))))
+        .children(row.absolutes.iter().map(|b| {
+            let el = render_box(b, cx, b.margin(), false);
+            if behind(b) { el } else { clipped_deferred(el) }
+        }))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
@@ -455,6 +458,25 @@ fn render_box(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, in_flow: b
 
 /// Block flow: stack children vertically, collapsing adjacent vertical margins.
 fn render_flow_children(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
+    behind_first(render_flow_children_in_order(children, cx), children)
+}
+
+/// Negative-`z-index` boxes paint under their siblings: first, since GPUI
+/// paints in order (absolute boxes don't care where they are in the list).
+fn behind_first(mut elements: Vec<AnyElement>, children: &[LayoutBox]) -> Vec<AnyElement> {
+    if !children.iter().any(behind) {
+        return elements;
+    }
+    let mut under = Vec::new();
+    let mut rest = Vec::new();
+    for (el, child) in elements.drain(..).zip(children) {
+        if behind(child) { under.push(el) } else { rest.push(el) }
+    }
+    under.extend(rest);
+    under
+}
+
+fn render_flow_children_in_order(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     let mut prev_bottom = 0.0f32;
     // Absolutely positioned children don't take part in margin collapsing.
     let last = children.iter().rposition(|c| !is_out_of_flow(c)).unwrap_or(0);
@@ -465,7 +487,8 @@ fn render_flow_children(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement
             if is_out_of_flow(child) {
                 // Positioned boxes paint above in-flow content (and their
                 // parent's border, which GPUI paints after children).
-                return clipped_deferred(render_box(child, cx, child.margin(), false));
+                let el = render_box(child, cx, child.margin(), false);
+                return if behind(child) { el } else { clipped_deferred(el) };
             }
             let m = child.margin();
             let top = m.top.px_or_zero();
@@ -490,10 +513,18 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
                 return div().flex_none().child(crate::inline::InlineFlow::new(p.clone(), cx)).into_any_element();
             }
             let el = render_box(child, cx, child.margin(), false);
-            if is_out_of_flow(child) { clipped_deferred(el) } else { el }
+            if is_out_of_flow(child) && !behind(child) { clipped_deferred(el) } else { el }
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .pipe(|els| behind_first(els, children))
 }
+
+trait Pipe: Sized {
+    fn pipe<R>(self, f: impl FnOnce(Self) -> R) -> R {
+        f(self)
+    }
+}
+impl<T> Pipe for T {}
 
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
     // A rotated box rotates the icons inside it (all GPUI can turn).
@@ -1034,6 +1065,12 @@ impl Element for ControlHost {
 /// Like GPUI's `deferred()` (drawn after everything else, so positioned boxes
 /// land on top of later rows), but clipped to where it was placed: the page.
 /// Plain `deferred` draws unclipped, over the browser's own tab strip.
+/// An out-of-flow box behind its siblings (negative `z-index`): painted in
+/// tree order, not deferred above everything.
+fn behind(b: &LayoutBox) -> bool {
+    matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some_and(|z| z < 0))
+}
+
 fn clipped_deferred(child: AnyElement) -> AnyElement {
     ClippedDeferred { child: Some(child) }.into_any_element()
 }

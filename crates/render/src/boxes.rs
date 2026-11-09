@@ -675,6 +675,15 @@ fn content_width(style: &ComputedStyle, avail: f32) -> f32 {
     (width - edges).max(0.0)
 }
 
+/// An absolutely positioned box laid over the whole page from its top-left
+/// (not an off-screen trick or a small overlay).
+fn page_spanning(s: &ComputedStyle) -> bool {
+    let at_zero = |l: Length| matches!(l, Length::Px(v) if v.abs() < 0.5) || matches!(l, Length::Percent(p) if p.abs() < 0.01);
+    let full_width = (at_zero(s.inset.left) && at_zero(s.inset.right)) || matches!(s.width, Length::Percent(p) if p >= 99.0);
+    let top = at_zero(s.inset.top) || (s.inset.top == Length::Auto && s.inset.bottom == Length::Auto);
+    full_width && top && (s.inset.left == Length::Auto || at_zero(s.inset.left))
+}
+
 fn no_radius(r: &Length) -> bool {
     match r {
         Length::Auto => true,
@@ -1731,6 +1740,14 @@ impl Builder<'_> {
             if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && style.opacity <= 0.0 && style.transitions.is_none() {
                 // Invisible and out of the way: nothing to build.
                 continue;
+            }
+            // Anchored to the page itself and spanning it from the top
+            // (`position: absolute; top: 0; left: 0; right: 0`, app shells like
+            // YouTube's): that's where it would be in flow anyway.
+            if style.position == style::Position::Absolute && self.positioned == 0 && page_spanning(&style) {
+                let s = Arc::make_mut(&mut style);
+                s.position = style::Position::Static;
+                s.inset = Edges::all(Length::Auto);
             }
             match style.position {
                 style::Position::Fixed => {

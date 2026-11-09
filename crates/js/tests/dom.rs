@@ -278,7 +278,8 @@ fn probe_tree() {
     let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
     let (mut doc, host) = js::start(doc, opts);
     if let Some(host) = &host {
-        let until = std::time::Instant::now() + Duration::from_secs(6);
+        let wait = std::env::var("PROBE_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+        let until = std::time::Instant::now() + Duration::from_secs(wait);
         while std::time::Instant::now() < until {
             if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
                 doc = (*d).clone();
@@ -731,4 +732,30 @@ fn template_content_persists_and_attributes_are_seen() {
         document.getElementById("o").textContent = out.join(" ");
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "true true false number a");
+}
+
+#[test]
+fn bare_global_event_methods() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        "use strict";
+        let hit = 0;
+        const f = () => { hit++; };
+        addEventListener("ping", f, true);
+        window.dispatchEvent(new Event("ping"));
+        dispatchEvent(new Event("ping"));
+        removeEventListener("ping", f, true);
+        window.dispatchEvent(new Event("ping"));
+        document.getElementById("o").textContent = String(hit);
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "2");
+}
+
+#[test]
+fn svg_elements_have_style() {
+    let doc = run(r##"<body><svg id="s"><path id="p"></path></svg><p id="o"></p><script>
+        const p = document.getElementById("p");
+        p.style.fill = "red";
+        document.getElementById("o").textContent = [p instanceof SVGElement, p instanceof HTMLElement, typeof p.dataset, p.getAttribute("style")].join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true false object fill: red");
 }

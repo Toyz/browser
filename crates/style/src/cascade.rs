@@ -957,6 +957,7 @@ impl Styler {
             Decl::BorderBox(v) => s.border_box = *v,
             Decl::Cursor(v) => s.cursor = *v,
             Decl::PointerEventsNone(v) => s.pointer_events_none = *v,
+            Decl::ZIndex(v) => s.z_index = *v,
             Decl::ColorScheme(v) => s.dark = *v && self.env.dark,
             Decl::VerticalAlign(crate::props::VAlignSpec::Keyword(k)) => s.vertical_align = *k,
             Decl::VerticalAlign(crate::props::VAlignSpec::Len(l)) => {
