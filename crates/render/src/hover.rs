@@ -22,6 +22,10 @@ use crate::boxes::{Block, InlineObject, LayoutBox, LayoutTree, Paragraph, Row};
 
 /// Restyling more elements than this isn't "a hover" any more.
 const MAX_ELEMENTS: usize = 4000;
+/// When state rules reach descendants (`.group:hover .x`), follow them only
+/// into elements this small; bigger ones (the page's `<main>`, which the
+/// pointer leaves all the time) are left to the background restyle.
+const MAX_DESCENDANTS: usize = 400;
 
 /// The result of trying to patch a layout for a new interaction state.
 pub enum Patch {
@@ -29,8 +33,8 @@ pub enum Patch {
     Unchanged,
     /// Paint changed: this is the new layout (same geometry, so no re-measuring).
     Painted(LayoutTree),
-    /// Something that affects layout changed: restyle the page.
-    NeedsRestyle,
+    /// Something that affects layout changed: restyle the page (why).
+    NeedsRestyle(&'static str),
 }
 
 /// The paint-only properties: changing these can't move anything.
@@ -39,6 +43,7 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.background = from.background;
     to.background_image = from.background_image;
     to.border_color = from.border_color;
+    to.border_radius = from.border_radius;
     to.opacity = from.opacity;
     to.translate = from.translate;
     to.underline = from.underline;
@@ -101,12 +106,15 @@ impl<'a> Styles<'a> {
 
 /// Patch `layout` (styled with `old`) for the interaction state `new`.
 /// `styler` is reused between calls (its state is swapped as needed).
+/// `reaches_others`: the page has rules where state affects other elements
+/// (see `StyleData::state_reaches_others`); then descendants restyle too.
 pub fn patch(
     layout: &LayoutTree,
     doc: &Document,
     styler: &mut Styler,
     old: &Arc<ElementState>,
     new: &Arc<ElementState>,
+    reaches_others: bool,
 ) -> Patch {
     let roots: Vec<NodeId> = changed_roots(old, new).into_iter().filter(|&n| doc.element(n).is_some()).collect();
     if roots.is_empty() {
@@ -116,13 +124,19 @@ pub fn patch(
     let mut affected: Vec<NodeId> = Vec::new();
     let mut seen = HashSet::new();
     for &root in &roots {
-        for id in doc.descendants(root) {
-            if doc.element(id).is_some() && seen.insert(id) {
+        let subtree: Vec<NodeId> = if reaches_others {
+            let all: Vec<NodeId> = doc.descendants(root).filter(|&n| doc.element(n).is_some()).take(MAX_DESCENDANTS + 1).collect();
+            if all.len() > MAX_DESCENDANTS { vec![root] } else { all }
+        } else {
+            vec![root]
+        };
+        for id in subtree {
+            if seen.insert(id) {
                 affected.push(id);
-                if affected.len() > MAX_ELEMENTS {
-                    return Patch::NeedsRestyle;
-                }
             }
+        }
+        if affected.len() > MAX_ELEMENTS {
+            return Patch::NeedsRestyle("too many elements");
         }
     }
 
@@ -147,7 +161,10 @@ pub fn patch(
         let mut probe = (*new_style).clone();
         copy_paint(&mut probe, old_style);
         if probe != **old_style {
-            return Patch::NeedsRestyle;
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("hover: layout change on {:?}: {}", doc.element(id).map(|e| e.name.local.to_string()), style_diff(old_style, &probe));
+            }
+            return Patch::NeedsRestyle("layout property changed");
         }
         // Inline boxes' backgrounds and borders are baked into their
         // paragraph's decorations (which don't know their element).
@@ -155,7 +172,7 @@ pub fn patch(
             && (new_style.painted_background() != old_style.painted_background()
                 || (new_style.has_border() && new_style.border_color != old_style.border_color))
         {
-            return Patch::NeedsRestyle;
+            return Patch::NeedsRestyle("inline box background");
         }
         if new_style.painted_background().is_some() != old_style.painted_background().is_some() {
             appearing.push(id);
@@ -170,12 +187,12 @@ pub fn patch(
         }
         layout.fixed.iter().for_each(|b| box_nodes(b, &mut boxes));
         if appearing.iter().any(|n| !boxes.contains(n)) {
-            return Patch::NeedsRestyle;
+            return Patch::NeedsRestyle("background on a split container");
         }
     }
     // `a:hover::after { content: "→" }` and friends.
     if pseudos(&roots, &mut styles) != before_pseudo {
-        return Patch::NeedsRestyle;
+        return Patch::NeedsRestyle("::before/::after changed");
     }
     if changes.is_empty() {
         return Patch::Unchanged;
@@ -210,6 +227,14 @@ fn pseudos(roots: &[NodeId], styles: &mut Styles) -> Vec<Option<ComputedStyle>> 
 }
 
 type Changes = HashMap<NodeId, Arc<ComputedStyle>>;
+
+/// Which fields differ (debugging aid).
+fn style_diff(a: &ComputedStyle, b: &ComputedStyle) -> String {
+    let (a, b) = (format!("{a:?}"), format!("{b:?}"));
+    let fields = |s: &str| s.split(", ").map(str::to_owned).collect::<Vec<_>>();
+    let (fa, fb) = (fields(&a), fields(&b));
+    fa.iter().zip(&fb).filter(|(x, y)| x != y).map(|(x, y)| format!("{x} -> {y}")).take(4).collect::<Vec<_>>().join("; ")
+}
 
 /// Elements that are boxes of their own in the layout (not dissolved into rows).
 fn box_nodes(b: &LayoutBox, out: &mut HashSet<NodeId>) {
@@ -384,7 +409,7 @@ mod tests {
         let layout = crate::build(&doc, &styler);
 
         let over = hovering(&doc, find(&doc, "link"));
-        let Patch::Painted(patched) = patch(&layout, &doc, &mut styler, &idle, &over) else {
+        let Patch::Painted(patched) = patch(&layout, &doc, &mut styler, &idle, &over, true) else {
             panic!("expected a paint-only patch");
         };
         // Same as restyling from scratch.
@@ -400,7 +425,7 @@ mod tests {
         let mut styler = styles.styler_with_state(env, idle.clone());
         let layout = crate::build(&doc, &styler);
         let over = hovering(&doc, find(&doc, "p"));
-        assert!(matches!(patch(&layout, &doc, &mut styler, &idle, &over), Patch::NeedsRestyle));
+        assert!(matches!(patch(&layout, &doc, &mut styler, &idle, &over, true), Patch::NeedsRestyle(_)));
     }
 
     #[test]
@@ -411,6 +436,6 @@ mod tests {
         let mut styler = styles.styler_with_state(env, idle.clone());
         let layout = crate::build(&doc, &styler);
         let over = hovering(&doc, find(&doc, "link"));
-        assert!(matches!(patch(&layout, &doc, &mut styler, &idle, &over), Patch::NeedsRestyle));
+        assert!(matches!(patch(&layout, &doc, &mut styler, &idle, &over, true), Patch::NeedsRestyle(_)));
     }
 }

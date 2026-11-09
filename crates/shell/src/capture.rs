@@ -32,10 +32,13 @@ pub struct CaptureJob {
     pub row: Option<usize>,
     /// Resize the window to this size after loading (exercises live restyling).
     pub resize: Option<(f32, f32)>,
-    /// Move the mouse here (window coordinates) before capturing (`:hover`).
-    pub mouse: Option<(f32, f32)>,
+    /// Move the mouse through these points (window coordinates) before
+    /// capturing (`:hover`); `X,Y;X,Y;...`.
+    pub mouse: Vec<(f32, f32)>,
     /// Scroll-and-draw this many frames, timing each, and print stats.
     pub bench: Option<usize>,
+    /// Keystrokes to send after the click (`enter` ends with Enter).
+    pub keys: Option<String>,
     /// Click here (window coordinates) before capturing, then let it settle.
     pub click: Option<(f32, f32)>,
     /// Type this into the omnibox before capturing (suggestions, autocomplete).
@@ -62,10 +65,11 @@ impl Args {
         let mut scroll = 0.0;
         let mut row = None;
         let mut resize = None;
-        let mut mouse = None;
+        let mut mouse = Vec::new();
         let mut bench = None;
         let mut typing = None;
         let mut click = None;
+        let mut keys = None;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -76,6 +80,7 @@ impl Args {
                 "--scroll" => scroll = it.next().and_then(|n| n.parse().ok()).unwrap_or(0.0),
                 "--row" => row = it.next().and_then(|n| n.parse().ok()),
                 "--type" => typing = it.next(),
+                "--keys" => keys = it.next(),
                 "--click" => {
                     click = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
                         Some((x.parse().ok()?, y.parse().ok()?))
@@ -83,9 +88,13 @@ impl Args {
                 }
                 "--bench" => bench = it.next().and_then(|n| n.parse().ok()).or(Some(120)),
                 "--mouse" => {
-                    mouse = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
-                        Some((x.parse().ok()?, y.parse().ok()?))
-                    })
+                    mouse = it
+                        .next()
+                        .unwrap_or_default()
+                        .split(';')
+                        .filter_map(|p| p.split_once(','))
+                        .filter_map(|(x, y)| Some((x.trim().parse().ok()?, y.trim().parse().ok()?)))
+                        .collect()
                 }
                 "--resize" => {
                     resize = it.next().as_deref().and_then(|s| s.split_once('x')).and_then(|(w, h)| {
@@ -102,7 +111,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

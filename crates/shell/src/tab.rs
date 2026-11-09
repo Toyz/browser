@@ -73,6 +73,7 @@ pub struct Tab {
     _image_task: Option<Task<()>>,
     favicon: Option<Arc<Image>>,
     _favicon_task: Option<Task<()>>,
+    _refresh: Option<Task<()>>,
     _restyle: Option<Task<()>>,
     /// Elements whose blocks report the pointer inside them.
     hover_blocks: HashSet<NodeId>,
@@ -135,6 +136,7 @@ impl Tab {
             _image_task: None,
             favicon: None,
             _favicon_task: None,
+            _refresh: None,
             _restyle: None,
             hover_blocks: HashSet::new(),
             hover_inline: None,
@@ -235,7 +237,7 @@ impl Tab {
         self.error = None;
         self.list_state.reset(page.layout.rows.len());
         self.list_state.scroll_to(scroll);
-        self.install(page, cx);
+        self.install(page, window, cx);
         // The window may have been resized since.
         self.viewport_changed(window, cx);
         cx.notify();
@@ -307,7 +309,7 @@ impl Tab {
                             this.stash_page();
                         }
                         this.page_ix = this.history_ix;
-                        this.install(page, cx);
+                        this.install(page, window, cx);
                         this.scroll_to_fragment(fragment.as_deref());
                         // A prerender was styled for the window and pointer as they were.
                         this.viewport_changed(window, cx);
@@ -339,8 +341,12 @@ impl Tab {
     }
 
     /// Put a loaded page on screen.
-    fn install(&mut self, page: LoadedPage, cx: &mut Context<Self>) {
+    fn install(&mut self, page: LoadedPage, window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            eprintln!("install {} ({} rows, title {:?})", page.url, page.layout.rows.len(), page.title);
+        }
         let favicon = page.favicon.clone();
+        let refresh = page.refresh.clone();
         // Images the new page shares with the last one (logos, icons, sprites)
         // stay loaded: they appear in the first frame instead of popping in.
         {
@@ -357,6 +363,9 @@ impl Tab {
         }
         self.page = Some(page);
         self.page_gen += 1;
+        // Work for the previous page must not land on this one.
+        self._restyle = None;
+        self._scroll_end = None;
         self.hover_styler = None;
         self.forms = Default::default();
         self.hover_blocks.clear();
@@ -365,6 +374,37 @@ impl Tab {
         self.element_state = Arc::default();
         self.load_images(cx);
         self.load_favicon(favicon, cx);
+        self.schedule_refresh(refresh, window, cx);
+    }
+
+    /// Follow a `<meta http-equiv="refresh">` redirect, replacing this
+    /// history entry (so Back doesn't bounce you forward again).
+    fn schedule_refresh(&mut self, refresh: Option<(f32, Url)>, window: &mut Window, cx: &mut Context<Self>) {
+        self._refresh = None;
+        let Some((secs, url)) = refresh else { return };
+        if secs > 30.0 {
+            return;
+        }
+        let page_gen = self.page_gen;
+        self._refresh = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs_f32(secs.max(0.0))).await;
+            this.update_in(cx, |this, window, cx| {
+                if this.page_gen == page_gen {
+                    this.redirect(url, window, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Load `url` in place of the current history entry.
+    fn redirect(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = self.history.get_mut(self.history_ix) {
+            *entry = url.clone();
+        }
+        // The page being replaced isn't kept for Back.
+        self.page_ix = self.history_ix;
+        self.show(url, true, window, cx);
     }
 
     fn load_favicon(&mut self, url: Option<Url>, cx: &mut Context<Self>) {
@@ -398,7 +438,8 @@ impl Tab {
             self._hover_timer = None;
             return;
         };
-        let current = self.page.as_ref().is_some_and(|p| same_document(&p.url, &url));
+        let current = self.page.as_ref().is_some_and(|p| same_document(&p.url, &url))
+            || self.url().is_some_and(|u| same_document(&u, &url));
         let already = self.prerender.as_ref().is_some_and(|p| same_document(&p.url, &url));
         if current || already || !loader::prefetchable(&url) || self.capture.is_some() {
             return;
@@ -577,11 +618,20 @@ impl Tab {
                     eprintln!("hover patched in {:?}", started.elapsed());
                 }
                 cx.notify();
-                // Rules the patch can't see (`:has(:hover)`, `a:hover + b`)
-                // get caught by a full restyle once the pointer settles.
-                self.restyle(Duration::from_millis(600), window, cx);
+                // Rules the patch may not have followed (`:has(:hover)`,
+                // `a:hover + b`, big hovered containers) get caught by a full
+                // restyle once the pointer settles.
+                let reaches = self.page.as_ref().and_then(|p| p.styles.as_ref()).is_some_and(|s| s.state_reaches_others());
+                if reaches {
+                    self.restyle(Duration::from_millis(600), window, cx);
+                }
             }
-            None => self.restyle(Duration::from_millis(16), window, cx),
+            None => {
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("hover needs a full restyle");
+                }
+                self.restyle(Duration::from_millis(16), window, cx)
+            }
         }
     }
 
@@ -599,10 +649,15 @@ impl Tab {
             self.hover_styler = Some((signature, styles.styler_with_state(env, self.element_state.clone())));
         }
         let (_, styler) = self.hover_styler.as_mut()?;
-        match render::hover::patch(&page.layout, doc, styler, &self.element_state, state) {
+        match render::hover::patch(&page.layout, doc, styler, &self.element_state, state, styles.state_reaches_others()) {
             render::hover::Patch::Unchanged => Some(None),
             render::hover::Patch::Painted(layout) => Some(Some(layout)),
-            render::hover::Patch::NeedsRestyle => None,
+            render::hover::Patch::NeedsRestyle(why) => {
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("hover can't patch: {why}");
+                }
+                None
+            }
         }
     }
 
@@ -611,6 +666,7 @@ impl Tab {
     fn restyle(&mut self, delay: Duration, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = &self.page else { return };
         let (Some(doc), Some(styles)) = (page.doc.clone(), page.styles.clone()) else { return };
+        let page_gen = self.page_gen;
         self._restyle = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(delay).await;
             let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
@@ -626,7 +682,10 @@ impl Tab {
                 }
             })
             .await;
-            this.update(cx, |this, cx| {
+            this.update_in(cx, |this, window, cx| {
+                if this.page_gen != page_gen {
+                    return;
+                }
                 let Some(page) = &mut this.page else { return };
                 let same_shape = page.layout.rows.len() == layout.rows.len();
                 page.layout = Arc::new(layout);
@@ -650,6 +709,8 @@ impl Tab {
                 }
                 this.load_images(cx);
                 cx.notify();
+                // The pointer moved on while this was building: catch up.
+                this.interaction_changed(window, cx);
             })
             .ok();
         }));
@@ -686,8 +747,10 @@ impl Tab {
                 .ok();
             }
             cx.background_executor().timer(settle).await;
-            if let Some((x, y)) = job.mouse {
-                // Draw so hitboxes exist, then hover the point and let restyling run.
+            for &(x, y) in &job.mouse {
+                // Draw so hitboxes exist, then hover the point; time until
+                // the frame that shows it is drawn.
+                let t = std::time::Instant::now();
                 cx.update(|window, cx| {
                     window.draw(cx).clear(cx);
                     window.dispatch_event(
@@ -698,9 +761,13 @@ impl Tab {
                         }),
                         cx,
                     );
+                    window.draw(cx).clear(cx);
                 })
                 .ok();
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("hover ({x},{y}): event + frame in {:?}", t.elapsed());
+                }
+                cx.background_executor().timer(Duration::from_millis(300)).await;
             }
             if let Some((x, y)) = job.click {
                 let position = point(px(x), px(y));
@@ -721,6 +788,27 @@ impl Tab {
                     );
                 })
                 .ok();
+                if let Some(keys) = job.keys.clone() {
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                    cx.update(|window, cx| {
+                        let (text, enter) = match keys.strip_suffix("\\n") {
+                            Some(t) => (t.to_owned(), true),
+                            None => (keys.clone(), false),
+                        };
+                        for c in text.chars() {
+                            // (A dev tool: leaking a few short strings is fine.)
+                            let key: &'static str = if c == ' ' { "space" } else { Box::leak(c.to_string().into_boxed_str()) };
+                            if let Ok(k) = Keystroke::parse(key) {
+                                let k = Keystroke { key_char: Some(c.to_string()), ..k };
+                                window.dispatch_keystroke(k, cx);
+                            }
+                        }
+                        if enter && let Ok(k) = Keystroke::parse("enter") {
+                            window.dispatch_keystroke(k, cx);
+                        }
+                    })
+                    .ok();
+                }
                 // Whatever it did (restyle, navigation) gets time to finish.
                 cx.background_executor().timer(Duration::from_millis(2500)).await;
                 wait_for_images(cx).await;
@@ -1021,7 +1109,11 @@ impl Render for Tab {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    this.focus_handle.focus(window, cx);
+                    // A click in a form field focuses the field (it handled
+                    // the event first); don't take focus back from it.
+                    if !this.focus_handle.contains_focused(window, cx) {
+                        this.focus_handle.focus(window, cx);
+                    }
                     this.mouse_down = true;
                     this.interaction_changed(window, cx);
                 }),

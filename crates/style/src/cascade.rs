@@ -272,6 +272,44 @@ pub struct StyleData {
     base: Option<Url>,
     /// Some rule uses `:hover`/`:active`/`:focus`…: interaction can restyle.
     has_state_rules: bool,
+    /// ...and some puts it before a combinator or inside `:has()`.
+    state_reaches_others: bool,
+}
+
+const STATE_PSEUDOS: [&str; 5] = [":hover", ":active", ":focus", ":target", ":checked"];
+
+/// Does a state pseudo-class in this (serialized) selector apply to some
+/// element other than the subject: before a combinator, or in `:has()`?
+fn state_reaches_others_in(css: &str) -> bool {
+    if css.contains(":has(") {
+        return true;
+    }
+    // The start of the last compound: after the last top-level combinator.
+    let mut depth = 0i32;
+    let mut last = 0;
+    for (i, c) in css.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ' ' | '>' | '+' | '~' if depth == 0 => last = i + 1,
+            _ => {}
+        }
+    }
+    STATE_PSEUDOS.iter().any(|p| css.match_indices(p).any(|(i, _)| i < last))
+}
+
+#[cfg(test)]
+mod state_tests {
+    #[test]
+    fn which_state_rules_reach_other_elements() {
+        use super::state_reaches_others_in as reaches;
+        assert!(!reaches("a:hover"));
+        assert!(!reaches("nav .item:hover"));
+        assert!(reaches(".group:not(:hover) > a:hover"));
+        assert!(reaches(".group:hover .title"));
+        assert!(reaches("input:checked ~ .track"));
+        assert!(reaches("div:has(a:hover)"));
+    }
 }
 
 impl StyleData {
@@ -285,18 +323,30 @@ impl StyleData {
                 }
             }
         }
-        let has_state_rules = rules.iter().any(|r| {
-            r.selectors.slice().iter().any(|sel| {
+        let mut has_state_rules = false;
+        let mut state_reaches_others = false;
+        for r in &rules {
+            for sel in r.selectors.slice() {
                 let css = cssparser::ToCss::to_css_string(sel);
-                [":hover", ":active", ":focus", ":target", ":checked"].iter().any(|p| css.contains(p))
-            })
-        });
-        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules }
+                if STATE_PSEUDOS.iter().any(|p| css.contains(p)) {
+                    has_state_rules = true;
+                    state_reaches_others |= state_reaches_others_in(&css);
+                }
+            }
+        }
+        Self { rules: Arc::new(rules), conditions: Arc::new(conditions), base, has_state_rules, state_reaches_others }
     }
 
     /// Does any rule depend on hover/active/focus state?
     pub fn has_state_rules(&self) -> bool {
         self.has_state_rules
+    }
+
+    /// Can an element's hover/focus/checked state restyle *other* elements
+    /// (`.card:hover .title`, `input:checked + label`, `:has(:hover)`)? If
+    /// not, a state change only restyles the elements whose state changed.
+    pub fn state_reaches_others(&self) -> bool {
+        self.state_reaches_others
     }
 
     /// Gather, fetch and parse every stylesheet a document uses. `fetch` is

@@ -20,6 +20,8 @@ pub struct LoadedPage {
     pub signature: Vec<bool>,
     /// Where the tab icon comes from.
     pub favicon: Option<Url>,
+    /// `<meta http-equiv="refresh" content="N;url=...">`: go there after N seconds.
+    pub refresh: Option<(f32, Url)>,
 }
 
 impl LoadedPage {
@@ -53,6 +55,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
     if !is_html {
         return Ok(LoadedPage {
             favicon: default_favicon(&response.url),
+            refresh: None,
             url: response.url,
             title: None,
             layout: Arc::new(render::build_plain_text(&response.body)),
@@ -71,6 +74,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
     let layout = render::build(&doc, &styles.styler_with_state(env, state));
     Ok(LoadedPage {
         favicon: favicon(&doc).or_else(|| default_favicon(&response.url)),
+        refresh: meta_refresh(&doc),
         url: response.url,
         title: doc.title(),
         layout: Arc::new(layout),
@@ -78,6 +82,29 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
         doc: Some(Arc::new(doc)),
         styles: Some(styles),
     })
+}
+
+/// `<meta http-equiv="refresh" content="0;url=https://...">`
+fn meta_refresh(doc: &page::Document) -> Option<(f32, Url)> {
+    let el = doc.descendants(doc.root()).filter_map(|n| doc.element(n)).find(|e| {
+        &**e.local_name() == "meta" && e.attr("http-equiv").is_some_and(|v| v.eq_ignore_ascii_case("refresh"))
+    })?;
+    let content = el.attr("content")?;
+    let (secs, rest) = content.split_once([';', ',']).unwrap_or((content, ""));
+    let secs: f32 = secs.trim().parse().ok()?;
+    let rest = rest.trim();
+    let target = rest
+        .strip_prefix("url=")
+        .or_else(|| rest.strip_prefix("URL="))
+        .or_else(|| rest.strip_prefix("Url="))
+        .unwrap_or(rest)
+        .trim()
+        .trim_matches(['\'', '"']);
+    // No URL: reload the page itself (skip that; it's a loop).
+    if target.is_empty() {
+        return None;
+    }
+    Some((secs, doc.resolve_url(target)?))
 }
 
 /// `<link rel="icon">`, preferring small raster or SVG icons over huge

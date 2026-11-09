@@ -321,8 +321,10 @@ fn apply_position(d: Div, s: &ComputedStyle) -> Div {
         (style::Length::Percent(p), style::Length::Px(w)) => (w + edges) * p / 100.0,
         _ => 0.0,
     };
-    let tx = own(s.translate.0, s.width, s.horizontal_edges());
-    let ty = own(s.translate.1, s.height, s.vertical_edges());
+    // Of the border box: with `box-sizing: border-box` that's the width itself.
+    let (ew, eh) = if s.border_box { (0.0, 0.0) } else { (s.horizontal_edges(), s.vertical_edges()) };
+    let tx = own(s.translate.0, s.width, ew);
+    let ty = own(s.translate.1, s.height, eh);
     let shifted = |side: style::Side, v: style::Length| -> style::Length {
         let delta = match side {
             style::Side::Left => tx,
