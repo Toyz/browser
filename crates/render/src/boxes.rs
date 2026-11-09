@@ -847,7 +847,26 @@ impl Builder<'_> {
             }
             (!text.is_empty()).then_some((text, ps))
         };
-        Generated { before: one(Pseudo::Before), after: one(Pseudo::After), before_box, after_box }
+        let (mut before, mut after) = (one(Pseudo::Before), one(Pseudo::After));
+        // `display: block` text (`content: attr(data-content)` reserving a
+        // tab's bold width at `height: 0`) is a box of its own, stacked
+        // above or below the element's content, not text beside it.
+        let mut as_box = |pseudo: &mut Option<(String, ComputedStyle)>, n: u8| -> Option<Block> {
+            let (_, ps) = pseudo.as_ref()?;
+            let positioned = matches!(ps.position, style::Position::Absolute | style::Position::Fixed);
+            if !ps.display.is_block_level() || positioned {
+                return None;
+            }
+            let (text, ps) = pseudo.take()?;
+            let ps = Arc::new(ps);
+            let mut inline = InlineBuilder::default();
+            inline.push_text(&text, &ps, None);
+            let children: Vec<LayoutBox> = inline.finish(self.next_id(), ps.clone()).map(|p| LayoutBox::Paragraph(Arc::new(p))).into_iter().collect();
+            Some(Block { pseudo: Some((id, n)), ..self.synthetic_block((*ps).clone(), BlockKind::Normal, children) })
+        };
+        let before_box = as_box(&mut before, 1).or(before_box);
+        let after_box = as_box(&mut after, 2).or(after_box);
+        Generated { before, after, before_box, after_box }
     }
 
     /// Approximate floats: a floated box and the content after it (up to the

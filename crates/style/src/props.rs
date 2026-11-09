@@ -1158,7 +1158,12 @@ fn parse_template_columns<'i>(p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResul
     let tracks = parse_tracks(p).ok().flatten();
     p.reset(&start);
     out.push(Decl::GridColumns(parse_grid_columns(p)?));
-    let uniform = tracks.as_ref().is_some_and(|t| t.windows(2).all(|w| w[0] == w[1]));
+    // Equal shares are equal columns; equal `auto` (or `min-content`)
+    // tracks are each as wide as their content (Primer's buttons put an
+    // icon, a label and an icon in `min-content auto min-content`).
+    let uniform = tracks
+        .as_ref()
+        .is_some_and(|t| t.windows(2).all(|w| w[0] == w[1]) && t.iter().all(|t| matches!(t, TrackSpec::Fr(_))));
     out.push(Decl::GridTracks(if uniform { None } else { tracks.map(Into::into) }));
     Ok(())
 }

@@ -122,7 +122,8 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 let condition = consume_rest(input);
                 AtPrelude::Group(!condition.trim_start().to_ascii_lowercase().starts_with("not"))
             }
-            "layer" | "container" | "scope" | "document" | "-moz-document" => {
+            "container" => AtPrelude::Media(media::container_condition(&consume_rest(input)).into()),
+            "layer" | "scope" | "document" | "-moz-document" => {
                 consume_rest(input);
                 AtPrelude::Group(true)
             }
@@ -331,7 +332,8 @@ impl<'i> AtRuleParser<'i> for NestedBody {
         let query = consume_rest(input);
         Ok(match name.to_ascii_lowercase().as_str() {
             "media" => Some(Some(query.trim().into())),
-            "supports" | "layer" | "container" | "scope" => Some(None),
+            "container" => Some(Some(media::container_condition(&query).into())),
+            "supports" | "layer" | "scope" => Some(None),
             _ => None,
         })
     }

@@ -388,9 +388,11 @@ impl FlowState {
                         let (w, h) = image_size(image, cx);
                         // Padding and borders around the picture.
                         let (t, r, b, l) = edges(&image.style);
+                        let (ml, mr) = atomic_margins(&image.style);
                         let (w, h) = (px(w) + l + r, px(h) + t + b);
                         let extent = object_extent(image.style.vertical_align, h, self.strut, block.font_size, shift);
-                        Measured { width: w, extent, ascent: h, descent: px(0.), margin_top: px(0.) }
+                        // The line holds the margin box (icons with `mr-2`).
+                        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.), margin_top: px(0.) }
                     }
                     InlineObject::Block(atomic) => self.measure_atomic(i, atomic, shift, None, cx, window),
                     InlineObject::BlockBox(block) => {
@@ -739,7 +741,8 @@ fn place(
                 let top = baseline - m.extent.above + m.margin_top;
                 match &para.objects[oi as usize] {
                     InlineObject::Image(image) => {
-                        let (w, h) = (m.width, m.ascent);
+                        let (ml, mr) = atomic_margins(&image.style);
+                        let (w, h) = (m.width - ml - mr, m.ascent);
                         let (t, r, b, l) = edges(&image.style);
                         let picture = match &crate::view::shown_image(image, cx) {
                             Some(ImageState::Ready { image: picture, padded, width, height }) => div()
@@ -758,7 +761,7 @@ fn place(
                         el.layout_as_root(size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)), window, app);
                         // Whole pixels: images drawn at fractional positions get
                         // a blurred edge row.
-                        let at = point((dx + x).round(), top.round());
+                        let at = point((dx + x + ml).round(), top.round());
                         el.prepaint_at(at, window, app);
                         out.objects.push(el);
                     }

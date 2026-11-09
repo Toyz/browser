@@ -44,6 +44,9 @@ struct KeyframeRun {
     base: Arc<ComputedStyle>,
     /// (offset, style) per keyframe, computed when the animation starts.
     frames: Vec<(f32, ComputedStyle)>,
+    /// `frames` are samples of the cycle (custom properties), not keyframes:
+    /// step between them linearly.
+    sampled: bool,
     start: Instant,
 }
 
@@ -77,12 +80,15 @@ impl KeyframeRun {
             AnimDirection::Alternate => !(iteration as u64).is_multiple_of(2),
             AnimDirection::AlternateReverse => (iteration as u64).is_multiple_of(2),
         };
-        let p = spec.easing.apply(if reversed { 1.0 - frac } else { frac });
-        // The keyframe segment around p.
+        let p = if reversed { 1.0 - frac } else { frac };
+        // The keyframe segment around p. The timing function applies to
+        // each segment, not the whole cycle (eased over the cycle, a sweep
+        // from 12% to 55% ran in a fraction of its time).
         let i = self.frames.iter().rposition(|(o, _)| *o <= p).unwrap_or(0);
         let (o0, s0) = &self.frames[i];
         let Some((o1, s1)) = self.frames.get(i + 1) else { return Some(s0.clone()) };
         let local = if o1 > o0 { (p - o0) / (o1 - o0) } else { 1.0 };
+        let local = if self.sampled { local } else { spec.easing.apply(local) };
         Some(render::animate::mix(s0, s1, local))
     }
 
@@ -183,11 +189,11 @@ impl Tab {
                 if let (Some(custom), Some(doc), (element, 0)) = (styler.keyframe_custom(&spec.name), doc.as_deref(), node) {
                     let samples = ((spec.duration * 30.0) as usize).clamp(8, 120);
                     let frames = render::hover::custom_property_frames(doc, styler, element, &custom, samples);
-                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, start });
+                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, sampled: true, start });
                     continue;
                 }
                 if let Some(frames) = styler.keyframe_styles(&spec.name, &base) {
-                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, start });
+                    keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, sampled: false, start });
                 }
             }
         }

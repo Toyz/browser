@@ -68,8 +68,42 @@ pub fn can_ever_match(list: &str) -> bool {
     })
 }
 
+/// What marks a rule condition as an `@container` query: it's checked per
+/// element against its query container (see [`container_matches`]), not
+/// against the viewport.
+pub const CONTAINER: &str = "@container ";
+
+/// `@container sidebar (width < 30rem)` as a rule condition (the container
+/// name is dropped: the nearest query container answers).
+pub fn container_condition(prelude: &str) -> String {
+    let prelude = prelude.trim();
+    let condition = match prelude.find(['(', ' ']) {
+        // A leading name (an identifier that isn't `not`).
+        Some(i) if !prelude.starts_with('(') && !prelude[..i].eq_ignore_ascii_case("not") => prelude[i..].trim(),
+        _ => prelude,
+    };
+    format!("{CONTAINER}{condition}")
+}
+
+/// Is `condition` a container query?
+pub fn is_container(condition: &str) -> bool {
+    condition.starts_with(CONTAINER)
+}
+
+/// A container query against a query container `size` (width, height);
+/// any other condition holds (the viewport already decided those).
+pub fn container_matches(condition: &str, size: (f32, f32)) -> bool {
+    let Some(query) = condition.strip_prefix(CONTAINER) else { return true };
+    let query = query.replace("inline-size", "width").replace("block-size", "height");
+    matches(&query, &MediaEnv { width: size.0, height: size.1, dark: false, scripting: true })
+}
+
 /// Does a comma-separated media query list match? An empty list matches.
+/// Container queries are left to [`container_matches`].
 pub fn matches(list: &str, env: &MediaEnv) -> bool {
+    if is_container(list) {
+        return true;
+    }
     let list = list.trim().to_ascii_lowercase();
     if list.is_empty() {
         return true;

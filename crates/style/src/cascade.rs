@@ -184,6 +184,7 @@ impl RuleIndex {
                     order: entry.rule,
                     normal: rule.normal.clone(),
                     important: rule.important.clone(),
+                    containers: rule.media.iter().any(|m| media::is_container(m)).then(|| rule.media.clone()),
                 });
             }
         }
@@ -207,6 +208,9 @@ struct Matched {
     order: u32,
     normal: Arc<[Decl]>,
     important: Arc<[Decl]>,
+    /// `@container` conditions around the rule (checked against the
+    /// element's query container when it's cascaded).
+    containers: Option<Arc<[Arc<str>]>>,
 }
 
 const ORIGIN_UA: u8 = 0;
@@ -615,6 +619,7 @@ impl Styler {
                 order: 0,
                 normal: parsed.0.clone().into(),
                 important: Arc::from([]),
+                containers: None,
             });
         }
         if let Some(inline) = e.attr("style") {
@@ -625,6 +630,7 @@ impl Styler {
                 order: 0,
                 normal: parsed.0.clone().into(),
                 important: parsed.1.clone().into(),
+                containers: None,
             });
         }
         self.cascade(&mut style, parent, matched);
@@ -668,6 +674,12 @@ impl Styler {
     }
 
     fn cascade(&self, style: &mut ComputedStyle, parent: &ComputedStyle, mut matched: Vec<Matched>) {
+        // `@container` rules: against the nearest query container (the
+        // viewport when there's none).
+        if matched.iter().any(|m| m.containers.is_some()) {
+            let size = parent.query_container.unwrap_or((self.env.width, self.env.height));
+            matched.retain(|m| m.containers.iter().flat_map(|c| c.iter()).all(|c| media::container_matches(c, size)));
+        }
         matched.sort_by_key(|m| (m.origin, m.specificity, m.order));
 
         // Cascade order: normal declarations by origin/specificity/order, then
@@ -714,6 +726,12 @@ impl Styler {
         }
 
         finalize(style);
+        // Flex and grid items are block-level ("blockified"): a <span> in a
+        // flex row is a box, and its block `::before` stays inside it
+        // (GitHub's tabs reserve their bold width with one).
+        if matches!(parent.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid) {
+            style.display = style.display.blockified();
+        }
     }
 
     /// A bloom filter of every ancestor's tag/id/classes, so selectors needing an
@@ -1599,6 +1617,20 @@ mod tests {
         assert_eq!(style_of(&doc, &s, "em").width, Length::Px(22.0));
         assert_eq!(style_of(&doc, &s, "i").width, Length::Px(33.0));
         assert_eq!(style_of(&doc, &s, "div").color, Color::Rgba(0xff0000ff));
+    }
+
+    #[test]
+    fn container_queries() {
+        let (doc, s) = styled(
+            "<nav><b>i</b><i>w</i><em>n</em></nav>",
+            "nav { container-type: inline-size; width: 800px } \
+             @container (width < 48rem) { b { display: none } } \
+             @container (width < 60rem) { i { display: none } } \
+             @container name (min-width: 20rem) { em { color: red } }",
+        );
+        assert_ne!(style_of(&doc, &s, "b").display, Display::None, "800px isn't under 48rem");
+        assert_eq!(style_of(&doc, &s, "i").display, Display::None, "800px is under 60rem");
+        assert_ne!(style_of(&doc, &s, "em").color, style_of(&doc, &s, "nav").color, "named container query applied");
     }
 
     #[test]
