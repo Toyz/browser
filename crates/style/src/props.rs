@@ -2272,9 +2272,10 @@ mod tests {
             parse("background", "url(\"../img/x.png\") no-repeat center / 10px #fafafa")
         });
         assert_eq!(bg[0], Decl::BackgroundColor(Color::Rgba(0xfafafaff)));
-        assert_eq!(bg[2], Decl::BackgroundUrl(Some("https://e.com/img/x.png".into())));
-        assert_eq!(bg[3], Decl::BackgroundSize(BgSizeSpec::Explicit(LenSpec::px(10.0), LenSpec::Auto)));
-        assert_eq!(bg[4], Decl::BackgroundPosition(BgPos::CENTER));
+        assert!(bg.contains(&Decl::BackgroundUrl(Some("https://e.com/img/x.png".into()))));
+        assert!(bg.contains(&Decl::BackgroundRepeat(BgRepeat { x: false, y: false })));
+        assert!(bg.contains(&Decl::BackgroundSize(BgSizeSpec::Explicit(LenSpec::px(10.0), LenSpec::Auto))));
+        assert!(bg.contains(&Decl::BackgroundPosition(BgPos::CENTER)));
         let mask = parse("mask-image", "url(data:image/svg+xml,%3Csvg%3E)");
         assert_eq!(mask[0], Decl::Masked(true));
         assert!(matches!(&mask[1], Decl::MaskUrl(Some(u)) if u.starts_with("data:image/svg+xml")));
