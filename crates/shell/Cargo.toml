@@ -24,6 +24,7 @@ html.workspace = true
 render.workspace = true
 style.workspace = true
 page.workspace = true
+js.workspace = true
 futures = "0.3"
 image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
 

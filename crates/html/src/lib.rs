@@ -5,7 +5,7 @@ use std::cell::{Ref, RefCell};
 
 use html5ever::interface::{ElementFlags, NodeOrText, QuirksMode, TreeSink};
 use html5ever::tendril::{StrTendril, TendrilSink as _};
-use html5ever::{ParseOpts, QualName, parse_document};
+use html5ever::{ParseOpts, QualName, parse_document, parse_fragment as parse_html_fragment};
 use page::{Attribute, Document, NodeData, NodeId};
 use url::Url;
 
@@ -14,11 +14,17 @@ use url::Url;
 /// Scripting is reported as *disabled*, so `<noscript>` content is parsed as
 /// real markup and rendered — right for a browser that doesn't run JS (yet).
 pub fn parse(html: &str, url: Url) -> Document {
+    parse_scripted(html, url, false)
+}
+
+/// Parse a full HTML document; with `scripting`, `<noscript>` is inert text
+/// (as in a browser that runs JavaScript).
+pub fn parse_scripted(html: &str, url: Url, scripting: bool) -> Document {
     let mut opts = ParseOpts::default();
-    opts.tree_builder.scripting_enabled = false;
-    let sink = Sink {
-        doc: RefCell::new(Document::new(url)),
-    };
+    opts.tree_builder.scripting_enabled = scripting;
+    let mut doc = Document::new(url);
+    doc.scripting = scripting;
+    let sink = Sink { doc: RefCell::new(doc) };
     parse_document(sink, opts).one(html)
 }
 
@@ -145,6 +151,18 @@ impl TreeSink for Sink {
     fn reparent_children(&self, node: &NodeId, new_parent: &NodeId) {
         self.doc.borrow_mut().reparent_children(*node, *new_parent);
     }
+}
+
+/// Parse `html` as the contents of a `<context>` element (`innerHTML`): a
+/// document whose root's first child holds the parsed nodes.
+pub fn parse_fragment(html: &str, context: &str, url: Url) -> Document {
+    let mut opts = ParseOpts::default();
+    opts.tree_builder.scripting_enabled = true;
+    let sink = Sink {
+        doc: RefCell::new(Document::new(url)),
+    };
+    let name = QualName::new(None, html5ever::ns!(html), html5ever::LocalName::from(context));
+    parse_html_fragment(sink, opts, name, Vec::new(), true).one(html)
 }
 
 #[cfg(test)]

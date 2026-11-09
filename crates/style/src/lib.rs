@@ -9,6 +9,7 @@
 pub mod cascade;
 pub mod media;
 pub mod props;
+pub mod query;
 pub mod selector;
 pub mod sheet;
 pub mod values;

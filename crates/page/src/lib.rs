@@ -89,6 +89,9 @@ pub struct Document {
     pub url: Url,
     /// No (or an ancient) doctype: render with legacy "quirks mode" rules.
     pub quirks: bool,
+    /// Parsed for a browser running scripts: `<noscript>` holds raw text
+    /// and isn't shown.
+    pub scripting: bool,
 }
 
 impl Document {
@@ -99,7 +102,7 @@ impl Document {
             children: Vec::new(),
             data: NodeData::Document,
         });
-        Self { nodes, root, url, quirks: false }
+        Self { nodes, root, url, quirks: false, scripting: false }
     }
 
     pub fn root(&self) -> NodeId {
@@ -236,6 +239,22 @@ impl Document {
     // ---- queries ----
 
     /// Depth-first, document-order iterator over `id` and its descendants.
+    /// Copy `id` (and everything under it) from `other` into this document,
+    /// unattached.
+    pub fn import(&mut self, other: &Document, id: NodeId) -> NodeId {
+        let copy = self.create(other.node(id).data.clone());
+        for &child in other.children(id) {
+            let c = self.import(other, child);
+            self.append(copy, c);
+        }
+        copy
+    }
+
+    /// Mutable access to a node's data (text content, attributes).
+    pub fn data_mut(&mut self, id: NodeId) -> Option<&mut NodeData> {
+        self.nodes.get_mut(id).map(|n| &mut n.data)
+    }
+
     pub fn descendants(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let mut stack = vec![id];
         std::iter::from_fn(move || {

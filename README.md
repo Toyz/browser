@@ -1,6 +1,6 @@
 # Feather 🪶
 
-**A web browser with no web engine.** It's called Feather because it's so light it doesn't even have JavaScript.
+**A web browser with no web engine.** It's called Feather because it's so light. It runs JavaScript anyway, in a JavaScript engine written in Rust.
 
 Feather parses HTML, runs the CSS through a cascade it wrote itself, and turns the page into **native [GPUI](https://www.gpui.rs) elements**, the same UI framework the Zed editor is built with. There's no WebView, no Blink, no WebKit, no Servo in a trench coat. Every paragraph is a GPUI element. Every `<div>` is a GPUI `div()`. The text fields are code-editor text fields. It's Rust from the HTML tokenizer to the tab strip.
 

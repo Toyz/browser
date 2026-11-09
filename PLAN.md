@@ -95,11 +95,12 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [x] Min-content width estimates (GPUI measures text min-width as the whole line), so flex items/cells shrink like CSS
 - [x] `calc()` in media queries; CSS block semantics for auto-margin boxes
 - [x] Interactive states: `:hover` (blocks report via GPUI hover, inline elements via the inline engine's hit-testing; the chain includes flattened ancestors), `:active`, `:target`, `:focus*` matching (nothing focusable yet). Restyles run in the background only when the page has state rules. CSS `cursor`.
-- [ ] Faster state restyles: today a hover change re-runs style + layout for the whole page (~35ms on Wikipedia). Restyle only the affected subtree / rows.
-- [ ] `transition` / `@keyframes` animations: interpolate paint properties (colors, opacity, transforms) per frame on top of the hover patcher, no re-layout (a compositor-style fast path)
-- [ ] Dark mode (`prefers-color-scheme: dark` + a dark canvas)
+- [x] Faster state restyles: only elements whose state changed are restyled; paint-only changes are patched into the layout (no re-layout)
+- [x] `transition` / `@keyframes` animations: interpolate paint properties (colors, opacity, transforms) per frame on top of the hover patcher, no re-layout (a compositor-style fast path)
+- [x] Dark mode (`prefers-color-scheme: dark` + a dark canvas)
 - [x] Re-style on window resize: rules keep their `@media` conditions; pages keep `Document` + `StyleData`; when a condition flips, restyle + re-layout in the background (debounced) and swap, keeping scroll position. (Viewport units only update on breakpoint changes for now.)
-- [ ] CSS nesting, `::before/::after` content (Wikipedia's "[edit]" brackets), fonts from `@font-face`
+- [x] `::before/::after` content, fonts from `@font-face` (variable fonts instanced per weight), rotate/scale transforms, real gradients
+- [ ] CSS nesting
 
 **Done when:** a typical blog (or a docs site) looks recognizably like it does in Chrome.
 
@@ -133,13 +134,15 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 **Done when:** it looks and feels like a real browser window, not an app with a URL field.
 
 ### Phase 4 — JS "works-ish"
-- [ ] Embed **[Boa](https://github.com/boa-dev/boa)** (a JS engine written in pure Rust — so even the JavaScript is Rust); run `<script>` tags in order, `defer`/`async`
-- [ ] `console`, `setTimeout/setInterval`, `requestAnimationFrame`, microtasks, an event loop driven by the GPUI executor
-- [ ] DOM read API: `document`, `getElementById`, `querySelector(All)`, `textContent`, `getAttribute`, `children`, `parentNode`
-- [ ] DOM write API (the framework subset): `createElement`, `createTextNode`, `appendChild`, `insertBefore`, `removeChild`, `setAttribute`, `classList`, `style.*`, `innerHTML` (setter reuses the `html` crate)
-- [ ] Events: `addEventListener`, bubbling, `click`, `input`, `submit`, `keydown`, `preventDefault`
-- [ ] Changes mark the page dirty → restyle → `cx.notify()`
-- [ ] `fetch`, `localStorage`, `location`, `history.pushState` (needed for SPAs)
+- [x] Embed **[Boa](https://github.com/boa-dev/boa)** (a JS engine written in pure Rust — so even the JavaScript is Rust); run `<script>` tags in order, `defer`/`async`
+- [x] `console`, `setTimeout/setInterval`, `requestAnimationFrame`, microtasks, an event loop (on a script thread per page; DOM snapshots go to the tab)
+- [x] DOM read API: `document`, `getElementById`, `querySelector(All)`, `textContent`, `getAttribute`, `children`, `parentNode`
+- [x] DOM write API (the framework subset): `createElement`, `createTextNode`, `appendChild`, `insertBefore`, `removeChild`, `setAttribute`, `classList`, `style.*`, `innerHTML` (setter reuses the `html` crate)
+- [x] Events: `addEventListener`, capture/bubbling, `click` (with `preventDefault` on links and buttons), `preventDefault`
+- [ ] Events: `input`, `submit`, `keydown` from the page's widgets
+- [x] Changes mark the page dirty → restyle → `cx.notify()`
+- [ ] `fetch` / `XMLHttpRequest` with CORS, `history.pushState` (needed for SPAs); `localStorage` and `location` are in
+- [ ] ES modules, custom elements, shadow DOM (`<slot>`, constructable stylesheets)
 - [ ] Stub everything else (no-ops / plausible defaults)
 
 **Done when:** a Preact or React todo app works, and a common SPA's first screen renders.

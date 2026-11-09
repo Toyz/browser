@@ -1,0 +1,20 @@
+[package]
+name = "js"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# intl_bundled: real Intl (ICU data compiled in); annex-b: the web-legacy
+# parts pages still use (substr, escape, HTML comments in scripts).
+boa_engine = { version = "0.22", features = ["intl_bundled", "annex-b"] }
+page.workspace = true
+html.workspace = true
+style.workspace = true
+url.workspace = true
+slotmap.workspace = true
+anyhow.workspace = true
+async-channel = "2"
+
+[dev-dependencies]
+net.workspace = true

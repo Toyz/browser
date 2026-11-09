@@ -27,6 +27,8 @@ pub struct LoadedPage {
     pub source: Option<Source>,
     /// The server wants HTTP Basic credentials (the realm it named).
     pub auth_realm: Option<String>,
+    /// The page's script thread (pages without scripts have none).
+    pub scripts: Option<Arc<js::ScriptHost>>,
 }
 
 #[derive(Clone)]
@@ -95,6 +97,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
             signature: Vec::new(),
             source: Some(Source::new("html", &response.body)),
             auth_realm: None,
+            scripts: None,
         });
     }
     let response = net::fetch_document(url, referer, post)?;
@@ -115,12 +118,27 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
             doc: None,
             styles: None,
             signature: Vec::new(),
+            scripts: None,
         });
     }
-    let doc = html::parse(&response.body, response.url.clone());
-    let page_url = response.url.clone();
-    let fetch_text = move |url: &Url| may_load(&page_url, url).then(|| net::fetch_text_cached(url)).flatten();
-    let styles = style::StyleData::for_document(&doc, &fetch_text);
+    let scripting = std::env::var_os("FEATHER_NO_JS").is_none();
+    let doc = html::parse_scripted(&response.body, response.url.clone(), scripting);
+    // Scripts run first: the first paint shows what they built.
+    let (doc, scripts) = if scripting {
+        let page_url = response.url.clone();
+        js::start(
+            doc,
+            js::Options {
+                fetch_text: Arc::new(move |u: &Url| may_load(&page_url, u).then(|| net::fetch_text_cached(u)).flatten()),
+                dark: env.dark,
+                budget: std::time::Duration::from_millis(1500),
+                debug: std::env::var_os("BROWSER_DEBUG").is_some(),
+            },
+        )
+    } else {
+        (doc, None)
+    };
+    let styles = styles_for(&doc);
     // `:target` from the requested URL's fragment.
     let target = url.fragment().and_then(|f| find_id(&doc, f));
     let state = Arc::new(ElementState { target, ..Default::default() });
@@ -136,7 +154,33 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
         signature: styles.signature(&env),
         doc: Some(Arc::new(doc)),
         styles: Some(styles),
+        scripts: scripts.map(Arc::new),
     })
+}
+
+/// The document's stylesheets, parsed (external ones fetched, cached).
+pub fn styles_for(doc: &page::Document) -> style::StyleData {
+    let page_url = doc.url.clone();
+    let fetch_text = move |url: &Url| may_load(&page_url, url).then(|| net::fetch_text_cached(url)).flatten();
+    style::StyleData::for_document(doc, &fetch_text)
+}
+
+/// What the document's stylesheets are made of (when scripts change the
+/// DOM, the sheets are only re-parsed if this changes).
+pub fn style_key(doc: &page::Document) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for n in doc.descendants(doc.root()) {
+        let Some(e) = doc.element(n) else { continue };
+        match &**e.local_name() {
+            "style" => doc.text_content(n).hash(&mut h),
+            "link" if e.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) => {
+                (e.attr("href"), e.attr("media")).hash(&mut h)
+            }
+            _ => {}
+        }
+    }
+    h.finish()
 }
 
 /// `<meta http-equiv="refresh" content="0;url=https://...">`

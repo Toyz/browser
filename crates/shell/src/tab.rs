@@ -22,6 +22,7 @@ use url::Url;
 
 mod animations;
 mod forms;
+mod scripts;
 
 use crate::capture::{self, CaptureJob};
 use crate::history::{self, History};
@@ -94,6 +95,12 @@ pub struct Tab {
     _image_task: Option<Task<()>>,
     favicon: Option<Arc<Image>>,
     _favicon_task: Option<Task<()>>,
+    /// Following the page's script thread (DOM updates, navigations).
+    _scripts_task: Option<Task<()>>,
+    /// Re-reading stylesheets scripts changed.
+    _script_styles: Option<Task<()>>,
+    /// A link click already went to the scripts (mouse up shouldn't again).
+    script_clicked: bool,
     _refresh: Option<Task<()>>,
     _restyle: Option<Task<()>>,
     /// Elements whose blocks report the pointer inside them.
@@ -186,6 +193,9 @@ impl Tab {
             _image_task: None,
             favicon: None,
             _favicon_task: None,
+            _scripts_task: None,
+            _script_styles: None,
+            script_clicked: false,
             _refresh: None,
             _restyle: None,
             hover_blocks: HashSet::new(),
@@ -462,6 +472,7 @@ impl Tab {
         self.load_fonts(cx);
         let site = self.page.as_ref().map(|p| p.url.clone());
         self.load_favicon(site, favicon, cx);
+        self.follow_scripts(window, cx);
         self.schedule_refresh(refresh, window, cx);
         self.sync_keyframes(window);
     }
@@ -1235,8 +1246,7 @@ impl Tab {
         let track_hover = self
             .page
             .as_ref()
-            .and_then(|p| p.styles.as_ref())
-            .is_some_and(|s| s.has_state_rules());
+            .is_some_and(|p| p.scripts.is_some() || p.styles.as_ref().is_some_and(|s| s.has_state_rules()));
         let page_gen = self.page_gen;
         let controls = cx.entity().downgrade();
         RenderCx {
@@ -1292,18 +1302,26 @@ impl Tab {
                 }
                 // Buttons and labels: activate the element.
                 if let Some(node) = render::activation_target(url) {
-                    click.update(cx, |this, cx| this.activate(node, window, cx)).ok();
+                    click
+                        .update(cx, |this, cx| this.link_clicked(move |this, window, cx| this.activate(node, window, cx), window, cx))
+                        .ok();
                     return;
                 }
                 let url = url.clone();
                 let new_tab = window.modifiers().secondary(cx);
                 click
                     .update(cx, |this, cx| {
-                        if new_tab {
-                            cx.emit(TabEvent::OpenInNewTab(url));
-                        } else {
-                            this.navigate(url, window, cx);
-                        }
+                        this.link_clicked(
+                            move |this, window, cx| {
+                                if new_tab {
+                                    cx.emit(TabEvent::OpenInNewTab(url));
+                                } else {
+                                    this.navigate(url, window, cx);
+                                }
+                            },
+                            window,
+                            cx,
+                        )
                     })
                     .ok();
             }),
@@ -1717,7 +1735,7 @@ impl Tab {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child(if self.loading.is_some() { "Loading…" } else { "So light it doesn't even have JavaScript." }),
+                    .child(if self.loading.is_some() { "Loading…" } else { "Now with JavaScript. Still no web engine." }),
             )
             .child(div().flex().flex_wrap().justify_center().max_w(px(480.)).children(tiles))
             .into_any_element()
@@ -1778,6 +1796,7 @@ impl Render for Tab {
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
                     this.mouse_down = false;
+                    this.script_mouse_up();
                     this.interaction_changed(window, cx);
                 }),
             )

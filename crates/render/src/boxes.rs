@@ -1431,6 +1431,10 @@ impl Builder<'_> {
                 NodeData::Element(e) => e,
                 _ => continue,
             };
+            // With scripting on, `<noscript>` is just text nobody shows.
+            if doc.scripting && &*element.name.local == "noscript" {
+                continue;
+            }
 
             let mut style = self.styler.compute(doc, child, parent_style);
             if style.display == Display::None {

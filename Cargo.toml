@@ -24,6 +24,7 @@ page = { path = "crates/page" }
 html = { path = "crates/html" }
 style = { path = "crates/style" }
 render = { path = "crates/render" }
+js = { path = "crates/js" }
 
 [profile.dev.package."*"]
 # Dependencies (GPUI, the parser) are painfully slow unoptimized; our code stays debuggable.
@@ -39,4 +40,6 @@ opt-level = 2
 [profile.dev.package.render]
 opt-level = 2
 [profile.dev.package.net]
+opt-level = 2
+[profile.dev.package.js]
 opt-level = 2
