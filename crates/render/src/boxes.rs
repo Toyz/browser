@@ -1,0 +1,1770 @@
+//! Box tree construction: page model + computed styles → blocks and paragraphs.
+//!
+//! No GPUI elements here (just data), so it runs on a background thread and is
+//! unit-testable. The key trick: each run of inline content becomes one
+//! [`Paragraph`] (flat text + styled spans + link ranges) that the view renders
+//! as a single GPUI `StyledText`, which gives us real line wrapping for free.
+
+use std::ops::Range;
+use std::sync::Arc;
+
+use gpui_kit::SharedString;
+use page::{Document, NodeData, NodeId};
+use style::{
+    Color, ComputedStyle, ContentItem, Float, Pseudo, Display, Edges, FontFamily, Length, LineHeight, ListStyle, Overflow,
+    Styler, TextTransform, WhiteSpace,
+};
+use url::Url;
+
+#[derive(Debug, Clone)]
+pub enum LayoutBox {
+    Block(Block),
+    Paragraph(Arc<Paragraph>),
+    Image(ImageBox),
+}
+
+/// A replaced `<img>`.
+#[derive(Debug, Clone)]
+pub struct ImageBox {
+    pub id: usize,
+    pub style: Arc<ComputedStyle>,
+    pub src: Arc<Url>,
+    /// Pixel density of the chosen source (`2x` srcset candidates are drawn at half size).
+    pub density: f32,
+    /// `width`/`height` attributes, px.
+    pub attr_width: Option<f32>,
+    pub attr_height: Option<f32>,
+    pub alt: Option<SharedString>,
+    pub link: Option<Arc<Url>>,
+    pub anchors: Vec<String>,
+}
+
+impl LayoutBox {
+    /// Margins, applied by whoever lays out this box's parent.
+    pub fn margin(&self) -> Edges<Length> {
+        match self {
+            LayoutBox::Block(b) => b.style.margin,
+            LayoutBox::Paragraph(_) => Edges::all(Length::ZERO),
+            LayoutBox::Image(i) => i.style.margin,
+        }
+    }
+
+    fn anchors_mut(&mut self) -> &mut Vec<String> {
+        match self {
+            LayoutBox::Block(b) => &mut b.anchors,
+            LayoutBox::Paragraph(p) => &mut Arc::make_mut(p).anchors,
+            LayoutBox::Image(i) => &mut i.anchors,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockKind {
+    Normal,
+    ListItem { marker: Option<SharedString> },
+    Flex,
+    Grid,
+    Table,
+    TableRow,
+    TableCell,
+}
+
+#[derive(Debug, Clone)]
+pub struct Block {
+    /// Unique within the page; used for GPUI element ids (scroll state etc).
+    pub id: usize,
+    pub style: Arc<ComputedStyle>,
+    pub kind: BlockKind,
+    pub children: Vec<LayoutBox>,
+    /// Fragment identifiers (`id=`, `<a name=>`) that start at this block.
+    pub anchors: Vec<String>,
+    /// Estimated min-content width, px (see [`Paragraph::min_content`]).
+    pub min_content: f32,
+    /// Estimated max-content width (no wrapping), px.
+    pub max_content: f32,
+    /// Table cells: how many columns this cell spans.
+    pub colspan: u16,
+    /// Table cells: sizing shared with the rest of the column (see [`layout_table`]).
+    pub cell: Option<CellLayout>,
+    /// A section heading (h1–h6, or a wrapper starting with one); floats stop at these.
+    pub heading: bool,
+}
+
+/// A table cell's flex sizing, derived from its whole column so that every
+/// row lays out the same way and columns line up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellLayout {
+    pub basis: f32,
+    pub grow: f32,
+    pub min: f32,
+}
+
+impl Block {
+    /// Can this block be cut into horizontal slices (one per child row) without
+    /// visibly changing it? Then its children become top-level rows, which is
+    /// what keeps long pages virtualizable.
+    fn is_splittable(&self) -> bool {
+        let s = &self.style;
+        self.kind == BlockKind::Normal
+            && s.border_width.top == 0.0
+            && s.border_width.bottom == 0.0
+            && s.border_radius.iter().all(|r| r.px_or_zero() == 0.0)
+            && s.height.is_auto()
+            && s.min_height.is_auto()
+            && s.max_height.is_auto()
+            && s.overflow == Overflow::Visible
+            && s.opacity >= 1.0
+    }
+
+    /// When split, does it need a wrapper layer around each slice (vs. a plain indent)?
+    fn needs_wrapper(&self) -> bool {
+        let s = &self.style;
+        let fancy = |l: Length| !matches!(l, Length::Px(_));
+        s.painted_background().is_some()
+            || s.border_width.left > 0.0
+            || s.border_width.right > 0.0
+            || !s.width.is_auto()
+            || !s.min_width.is_auto()
+            || !s.max_width.is_auto()
+            || fancy(s.margin.left)
+            || fancy(s.margin.right)
+            || fancy(s.padding.left)
+            || fancy(s.padding.right)
+    }
+}
+
+/// The text-relevant subset of a style, per span.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlineStyle {
+    pub font_size: f32,
+    pub line_height: LineHeight,
+    pub font_weight: u16,
+    pub italic: bool,
+    pub font_family: FontFamily,
+    pub font_names: style::FontNames,
+    pub color: Color,
+    pub background: Option<Color>,
+    pub underline: bool,
+    pub strikethrough: bool,
+    /// How far this text's baseline is raised (px, negative = lowered), from
+    /// `vertical-align` on it and its inline ancestors.
+    pub baseline_shift: f32,
+}
+
+impl InlineStyle {
+    pub(crate) fn of(s: &ComputedStyle, is_inline_box: bool) -> Self {
+        Self {
+            font_size: s.font_size,
+            line_height: s.line_height,
+            font_weight: s.font_weight,
+            italic: s.italic,
+            font_family: s.font_family,
+            font_names: s.font_names.clone(),
+            color: if s.visible { s.color } else { Color::TRANSPARENT },
+            // Block backgrounds are painted by the block; only inline ones go on text runs.
+            background: if is_inline_box { s.painted_background() } else { None },
+            underline: s.underline,
+            strikethrough: s.strikethrough,
+            baseline_shift: 0.0,
+        }
+    }
+}
+
+/// A word, space run, line break or inline object within a paragraph: the
+/// units of line breaking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceKind {
+    Word,
+    Space,
+    Newline,
+    /// Index into [`Paragraph::objects`].
+    Object(u32),
+}
+
+#[derive(Debug, Clone)]
+pub struct Piece {
+    pub range: Range<usize>,
+    /// Index into [`Paragraph::spans`].
+    pub span: u32,
+    pub kind: PieceKind,
+    /// A line may break before this piece.
+    pub break_before: bool,
+}
+
+/// An inline element with a visible box (background and/or border), drawn
+/// behind its text: `<code>` chips, `<mark>`, buttons...
+#[derive(Debug, Clone)]
+pub struct InlineBox {
+    pub range: Range<usize>,
+    pub background: Option<Color>,
+    pub border_width: f32,
+    pub border_color: Color,
+    pub radius: f32,
+    pub pad_top: f32,
+    pub pad_bottom: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Span {
+    /// Byte length; spans tile the paragraph text in order.
+    pub len: usize,
+    pub style: InlineStyle,
+}
+
+#[derive(Debug, Clone)]
+pub struct Link {
+    pub range: Range<usize>,
+    pub url: Arc<Url>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Paragraph {
+    /// Unique within the page; used as the GPUI element id.
+    pub id: usize,
+    /// Style of the containing block (alignment, white-space).
+    pub style: Arc<ComputedStyle>,
+    pub text: SharedString,
+    pub spans: Vec<Span>,
+    pub links: Arc<[Link]>,
+    pub anchors: Vec<String>,
+    pub pieces: Vec<Piece>,
+    pub boxes: Vec<InlineBox>,
+    /// Inline images (each marked by U+FFFC in `text`).
+    pub objects: Vec<ImageBox>,
+    /// Estimated min-content width (the longest word), px, for table column
+    /// sizing (which needs numbers before layout).
+    pub min_content: f32,
+    /// Estimated max-content width (the longest line, unwrapped), px.
+    pub max_content: f32,
+}
+
+impl Paragraph {
+    pub fn link_at(&self, byte_ix: usize) -> Option<&Link> {
+        self.links.iter().find(|l| l.range.contains(&byte_ix))
+    }
+
+    /// One `StyledText` has one font size and line height. Use the first
+    /// visible span's: a paragraph's start sets its size far more reliably than
+    /// "most text" (e.g. a title followed by a long, small-print domain name).
+    pub fn dominant_style(&self) -> InlineStyle {
+        let mut offset = 0;
+        for span in &self.spans {
+            let text = &self.text[offset..offset + span.len];
+            offset += span.len;
+            if !text.trim().is_empty() {
+                return span.style.clone();
+            }
+        }
+        InlineStyle::of(&self.style, false)
+    }
+}
+
+/// A container that's been split across rows; each row re-creates it around its slice.
+#[derive(Debug, Clone)]
+pub struct Wrapper {
+    pub indent_left: f32,
+    pub indent_right: f32,
+    pub style: Arc<ComputedStyle>,
+}
+
+/// A top-level, independently laid-out piece of the page.
+#[derive(Debug, Clone)]
+pub struct Row {
+    /// Containers this row is nested in, outermost first.
+    pub wrappers: Arc<[Wrapper]>,
+    /// Collapsed vertical margin above this row, px.
+    pub space_before: f32,
+    /// Horizontal offsets within the innermost wrapper, px.
+    pub indent_left: f32,
+    pub indent_right: f32,
+    pub content: LayoutBox,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LayoutTree {
+    pub rows: Vec<Row>,
+    /// Space after the last row, px.
+    pub space_after: f32,
+    /// Fragment id → row index, for `#anchor` navigation.
+    pub anchors: Vec<(String, usize)>,
+    /// Page background (from the root or body, like CSS's canvas propagation).
+    pub canvas: Option<Color>,
+    /// Every image on the page, in document order, with the rows that show it
+    /// (to re-measure them once it loads).
+    pub images: Vec<(Arc<Url>, Vec<usize>)>,
+}
+
+impl LayoutTree {
+    pub fn row_for_anchor(&self, fragment: &str) -> Option<usize> {
+        self.anchors
+            .iter()
+            .find(|(name, _)| name == fragment)
+            .map(|&(_, row)| row)
+    }
+}
+
+/// Build the layout tree for a whole document.
+pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
+    let mut builder = Builder {
+        doc,
+        styler,
+        base_url: doc.base_url(),
+        next_id: 0,
+        canvas: None,
+    };
+    let root_style = Arc::new(ComputedStyle::root_parent());
+    let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
+    let canvas = builder.canvas;
+    let mut tree = flatten(root);
+    tree.canvas = canvas;
+    tree
+}
+
+/// Build the layout tree for plain text (non-HTML responses).
+pub fn build_plain_text(text: &str) -> LayoutTree {
+    let mut style = ComputedStyle::root_parent();
+    style.font_family = FontFamily::Mono;
+    style.font_size = 13.0;
+    style.white_space = WhiteSpace::PreWrap;
+    style.margin = Edges::all(Length::Px(8.0));
+    let style = Arc::new(style);
+    let mut inline = InlineBuilder::default();
+    inline.push_text(text, &style, None);
+    let mut block = Block {
+        id: 0,
+        style: style.clone(),
+        kind: BlockKind::Normal,
+        children: Vec::new(),
+        anchors: Vec::new(),
+        min_content: 0.0,
+        max_content: 0.0,
+        colspan: 1,
+        cell: None,
+        heading: false,
+    };
+    if let Some(p) = inline.finish(1, style) {
+        block.children.push(LayoutBox::Paragraph(Arc::new(p)));
+    }
+    flatten(block)
+}
+
+struct Builder<'a> {
+    doc: &'a Document,
+    styler: &'a Styler,
+    /// Resolved once: looking up `<base>` per link is quadratic on big pages.
+    base_url: Url,
+    next_id: usize,
+    canvas: Option<Color>,
+}
+
+/// Accumulates the children of one block while walking its subtree.
+struct Container {
+    style: Arc<ComputedStyle>,
+    children: Vec<LayoutBox>,
+    inline: InlineBuilder,
+    /// Anchors seen but not yet attached to a box.
+    pending_anchors: Vec<String>,
+}
+
+impl Container {
+    fn push(&mut self, mut child: LayoutBox) {
+        child.anchors_mut().append(&mut self.pending_anchors);
+        self.children.push(child);
+    }
+}
+
+/// Text from an element's `::before` / `::after`, with the pseudo-element's style.
+#[derive(Default)]
+struct Generated {
+    before: Option<(String, ComputedStyle)>,
+    after: Option<(String, ComputedStyle)>,
+}
+
+impl Builder<'_> {
+    fn generated(&self, id: NodeId, style: &ComputedStyle) -> Generated {
+        let one = |which| {
+            let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
+            let element = self.doc.element(id)?;
+            let mut text = String::new();
+            for item in ps.content.as_deref()? {
+                match item {
+                    ContentItem::Str(s) => text.push_str(s),
+                    ContentItem::Attr(name) => text.push_str(element.attr(name).unwrap_or("")),
+                    ContentItem::OpenQuote => text.push('“'),
+                    ContentItem::CloseQuote => text.push('”'),
+                }
+            }
+            (!text.is_empty()).then_some((text, ps))
+        };
+        Generated { before: one(Pseudo::Before), after: one(Pseudo::After) }
+    }
+
+    /// Approximate floats: a floated box and the content after it (up to the
+    /// next heading, `clear`, or a handful of blocks) become a two-column row,
+    /// float on its side, text beside it. Real floats wrap text *around* the
+    /// float, which our layout model can't express; this covers the common
+    /// "infobox / thumbnail next to paragraphs" case.
+    fn group_floats(&mut self, children: Vec<LayoutBox>, parent: &Arc<ComputedStyle>) -> Vec<LayoutBox> {
+        const MAX_BESIDE: usize = 8;
+        let is_float = |b: &LayoutBox| matches!(b, LayoutBox::Block(b) if b.style.float != Float::None);
+        if !children.iter().any(is_float) {
+            return children;
+        }
+        let mut out = Vec::with_capacity(children.len());
+        let mut iter = children.into_iter().peekable();
+        while let Some(child) = iter.next() {
+            let LayoutBox::Block(float) = child else {
+                out.push(child);
+                continue;
+            };
+            if float.style.float == Float::None {
+                out.push(LayoutBox::Block(float));
+                continue;
+            }
+            // Consecutive floats on the same side stack in one column.
+            let side = float.style.float;
+            let mut floats = vec![LayoutBox::Block(float)];
+            while let Some(LayoutBox::Block(next)) = iter.peek() {
+                if next.style.float != side {
+                    break;
+                }
+                floats.push(iter.next().unwrap());
+            }
+            let mut beside = Vec::new();
+            while let Some(next) = iter.peek() {
+                let stop = match next {
+                    LayoutBox::Block(b) => b.heading || b.style.clear || b.style.float != Float::None,
+                    LayoutBox::Paragraph(_) | LayoutBox::Image(_) => false,
+                };
+                if stop || beside.len() >= MAX_BESIDE {
+                    break;
+                }
+                beside.push(iter.next().unwrap());
+            }
+
+            let float_column = if floats.len() == 1 {
+                floats.pop().unwrap()
+            } else {
+                let mut st = ComputedStyle::anonymous(parent);
+                st.display = Display::Block;
+                st.flex_shrink = 0.0;
+                LayoutBox::Block(self.synthetic_block(st, BlockKind::Normal, floats))
+            };
+            if beside.is_empty() {
+                // Nothing to sit beside: just push it to its side.
+                let mut float_column = float_column;
+                if let LayoutBox::Block(b) = &mut float_column
+                    && side == Float::Right
+                {
+                    Arc::make_mut(&mut b.style).margin.left = Length::Auto;
+                }
+                out.push(float_column);
+                continue;
+            }
+            let mut text_style = ComputedStyle::anonymous(parent);
+            text_style.display = Display::Block;
+            text_style.flex_grow = 1.0;
+            text_style.flex_shrink = 1.0;
+            text_style.flex_basis = Length::Px(0.0);
+            let text_column = LayoutBox::Block(self.synthetic_block(text_style, BlockKind::Normal, beside));
+
+            let mut row_style = ComputedStyle::anonymous(parent);
+            row_style.display = Display::Flex;
+            row_style.align_items = Some(style::Align::Start);
+            let items = if side == Float::Right {
+                vec![text_column, float_column]
+            } else {
+                vec![float_column, text_column]
+            };
+            out.push(LayoutBox::Block(self.synthetic_block(row_style, BlockKind::Flex, items)));
+        }
+        out
+    }
+
+    fn synthetic_block(&mut self, style: ComputedStyle, kind: BlockKind, children: Vec<LayoutBox>) -> Block {
+        let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
+        Block {
+            id: self.next_id(),
+            style: Arc::new(style),
+            kind,
+            children,
+            anchors: Vec::new(),
+            min_content,
+            max_content,
+            colspan: 1,
+            cell: None,
+            heading: false,
+        }
+    }
+
+    /// `<img>`: a block-level image box if it's displayed as a block (or
+    /// floats), otherwise an inline object flowing with the text.
+    fn build_image(&mut self, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+        let alt = element.attr("alt").map(str::trim).filter(|a| !a.is_empty());
+        let Some((src, density)) = pick_image_source(element, &self.base_url) else {
+            if let Some(alt) = alt {
+                c.inline.push_text(alt, &style, link);
+            }
+            return;
+        };
+        let attr = |name| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+        let image = ImageBox {
+            id: self.next_id(),
+            style: style.clone(),
+            src: Arc::new(src),
+            density,
+            attr_width: attr("width"),
+            attr_height: attr("height"),
+            alt: alt.map(|a| SharedString::from(a.to_owned())),
+            link: link.cloned(),
+            anchors: Vec::new(),
+        };
+        if style.display.is_block_level() || style.float != Float::None {
+            self.flush(c);
+            c.push(LayoutBox::Image(image));
+        } else {
+            c.inline.push_object(image, &style, link);
+        }
+    }
+
+    fn next_id(&mut self) -> usize {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    fn build_block(
+        &mut self,
+        id: NodeId,
+        style: Arc<ComputedStyle>,
+        kind: BlockKind,
+        link: Option<&Arc<Url>>,
+        generated: Generated,
+    ) -> Block {
+        let mut c = Container {
+            style: style.clone(),
+            children: Vec::new(),
+            inline: InlineBuilder::default(),
+            pending_anchors: Vec::new(),
+        };
+        // Flex and grid containers "blockify" their children: each is an item.
+        let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid);
+        if let Some((text, st)) = &generated.before {
+            c.inline.push_text(text, st, link);
+        }
+        self.build_children(id, &style, &mut c, link, blockify);
+        if let Some((text, st)) = &generated.after {
+            c.inline.push_text(text, st, link);
+        }
+        self.flush(&mut c);
+        let anchors = std::mem::take(&mut c.pending_anchors);
+        let children = if matches!(kind, BlockKind::Normal | BlockKind::ListItem { .. } | BlockKind::TableCell) {
+            self.group_floats(c.children, &style)
+        } else {
+            c.children
+        };
+        let mut children = children;
+        if kind == BlockKind::Table {
+            layout_table(&mut children);
+        }
+        let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
+        let element = self.doc.element(id);
+        let tag_is_heading =
+            element.is_some_and(|e| matches!(&*e.name.local, "h1" | "h2" | "h3" | "h4" | "h5" | "h6"));
+        let heading = tag_is_heading
+            || matches!(children.first(), Some(LayoutBox::Block(b)) if b.heading);
+        let colspan = element
+            .and_then(|e| e.attr("colspan"))
+            .and_then(|v| v.trim().parse::<u16>().ok())
+            .unwrap_or(1)
+            .clamp(1, 64);
+        Block {
+            id: self.next_id(),
+            style,
+            kind,
+            children,
+            anchors,
+            min_content,
+            max_content,
+            colspan,
+            cell: None,
+            heading,
+        }
+    }
+
+    fn flush(&mut self, c: &mut Container) {
+        let inline = std::mem::take(&mut c.inline);
+        let id = self.next_id();
+        if let Some(p) = inline.finish(id, c.style.clone()) {
+            c.push(LayoutBox::Paragraph(Arc::new(p)));
+        }
+    }
+
+    fn build_children(
+        &mut self,
+        id: NodeId,
+        parent_style: &Arc<ComputedStyle>,
+        c: &mut Container,
+        link: Option<&Arc<Url>>,
+        blockify: bool,
+    ) {
+        let doc = self.doc;
+        let mut counter = list_start(doc, id);
+
+        for &child in doc.children(id) {
+            let element = match &doc.node(child).data {
+                NodeData::Text(text) => {
+                    c.inline.push_text(text, parent_style, link);
+                    continue;
+                }
+                NodeData::Element(e) => e,
+                _ => continue,
+            };
+
+            let mut style = self.styler.compute(doc, child, parent_style);
+            if style.display == Display::None {
+                continue;
+            }
+            let tag = &*element.name.local;
+            let floating = style.float != Float::None;
+            if (blockify || floating) && matches!(style.display, Display::Inline | Display::InlineBlock) {
+                style.display = Display::Block;
+            }
+            if floating {
+                // A float keeps its width; it never shrinks to make room.
+                style.flex_shrink = 0.0;
+            }
+            // The canvas takes the root's background, or else the body's.
+            if matches!(tag, "html" | "body") && self.canvas.is_none() {
+                self.canvas = style.painted_background();
+                if tag == "body" {
+                    style.background = None;
+                    style.background_image = None;
+                }
+            }
+            if tag == "html" {
+                style.background = None;
+                style.background_image = None;
+            }
+            // `html, body { height: 100%; overflow: ... }` size and scroll the
+            // *viewport*; the page list does both, so drop them here (it keeps
+            // the page splittable into rows).
+            if matches!(tag, "html" | "body") {
+                style.height = Length::Auto;
+                style.min_height = Length::Auto;
+                style.max_height = Length::Auto;
+                style.overflow = Overflow::Visible;
+            }
+            let style = Arc::new(style);
+
+            if let Some(anchor) = element
+                .attr("id")
+                .or_else(|| (tag == "a").then(|| element.attr("name")).flatten())
+            {
+                // An anchor inside running text belongs to the paragraph being built.
+                if c.inline.is_empty() || style.display.is_block_level() {
+                    c.pending_anchors.push(anchor.to_owned());
+                } else {
+                    c.inline.anchors.push(anchor.to_owned());
+                }
+            }
+
+            // Links carry through to everything inside, including nested blocks.
+            let own_link = (tag == "a")
+                .then(|| element.attr("href"))
+                .flatten()
+                .and_then(|href| self.base_url.join(href.trim()).ok())
+                .map(Arc::new);
+            let link = own_link.as_ref().or(link);
+
+            if tag == "img" {
+                self.build_image(element, style, c, link);
+                continue;
+            }
+
+            match style.display {
+                Display::None => {}
+                Display::Contents => self.build_children(child, &style, c, link, blockify),
+                Display::Inline | Display::InlineBlock => match tag {
+                    "br" => c.inline.push_break(),
+                    _ => {
+                        // Inline boxes can't have real margins/padding inside a text
+                        // run; approximate the horizontal ones with space characters.
+                        let px = |l: Length| l.px_or_zero();
+                        let (margin_left, margin_right) = (px(style.margin.left), px(style.margin.right));
+                        let pad_left = px(style.padding.left) + style.border_width.left;
+                        let pad_right = px(style.padding.right) + style.border_width.right;
+                        c.inline.push_spacer(margin_left, &style, link);
+                        let shift = baseline_shift(&style);
+                        c.inline.shifts.push(shift);
+                        let box_start = c.inline.text.len();
+                        c.inline.push_spacer(pad_left, &style, link);
+                        let generated = self.generated(child, &style);
+                        if let Some((text, st)) = &generated.before {
+                            c.inline.push_text(text, st, link);
+                        }
+                        self.build_children(child, &style, c, link, false);
+                        if let Some((text, st)) = &generated.after {
+                            c.inline.push_text(text, st, link);
+                        }
+                        c.inline.push_spacer(pad_right, &style, link);
+                        let box_end = c.inline.text.len();
+                        c.inline.shifts.pop();
+                        if box_end > box_start && (style.painted_background().is_some() || style.has_border()) {
+                            let border = [style.border_width.top, style.border_width.right, style.border_width.bottom, style.border_width.left]
+                                .into_iter()
+                                .fold(0.0, f32::max);
+                            c.inline.boxes.push(InlineBox {
+                                range: box_start..box_end,
+                                background: style.painted_background(),
+                                border_width: border,
+                                border_color: style.border_color.top,
+                                radius: style.border_radius[0].px_or_zero(),
+                                pad_top: style.padding.top.px_or_zero(),
+                                pad_bottom: style.padding.bottom.px_or_zero(),
+                            });
+                        }
+                        c.inline.push_spacer(margin_right, &style, link);
+                    }
+                },
+                display => {
+                    self.flush(c);
+                    let kind = match display {
+                        Display::ListItem => {
+                            if let Some(v) = element.attr("value").and_then(|v| v.trim().parse().ok()) {
+                                counter = v;
+                            }
+                            let marker = list_marker(style.list_style, counter);
+                            counter += 1;
+                            BlockKind::ListItem { marker }
+                        }
+                        Display::Flex => BlockKind::Flex,
+                        Display::Grid => BlockKind::Grid,
+                        Display::Table => BlockKind::Table,
+                        Display::TableRow => BlockKind::TableRow,
+                        Display::TableCell => BlockKind::TableCell,
+                        _ => BlockKind::Normal,
+                    };
+                    let generated = self.generated(child, &style);
+                    let block = self.build_block(child, style, kind, link, generated);
+                    c.push(LayoutBox::Block(block));
+                }
+            }
+        }
+    }
+}
+
+/// How far `vertical-align` raises an inline element's baseline, px.
+fn baseline_shift(s: &ComputedStyle) -> f32 {
+    match s.vertical_align {
+        style::VerticalAlign::Super => s.font_size * 0.5,
+        style::VerticalAlign::Sub => -s.font_size * 0.25,
+        style::VerticalAlign::Shift(v) => v,
+        _ => 0.0,
+    }
+}
+
+/// Rough advance width of a character, as a fraction of the font size.
+fn char_em(ch: char, st: &InlineStyle) -> f32 {
+    let wide = matches!(ch as u32, 0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFF60 | 0x1F300..=0x1FAFF);
+    let base = if wide {
+        1.0
+    } else if st.font_family == FontFamily::Mono {
+        0.62
+    } else if ch.is_uppercase() || "mwMW@%".contains(ch) {
+        0.72
+    } else {
+        0.6
+    };
+    if st.font_weight >= 600 { base * 1.07 } else { base }
+}
+
+/// (min-content, max-content): the longest unbreakable run (word, or whole
+/// line if the text doesn't wrap), and the longest line unwrapped.
+fn paragraph_intrinsic(p: &Paragraph) -> (f32, f32) {
+    let dominant = p.dominant_style();
+    let wraps = p.style.white_space.wraps();
+    let (mut longest_word, mut word) = (0.0f32, 0.0f32);
+    let (mut longest_line, mut line) = (0.0f32, 0.0f32);
+    let mut objects = p.objects.iter();
+    for ch in p.text.chars() {
+        if ch == '\u{FFFC}' {
+            let w = objects.next().map(|o| match o.style.width {
+                Length::Px(w) => w,
+                _ => o.attr_width.unwrap_or(16.0),
+            });
+            let w = w.unwrap_or(0.0);
+            line += w;
+            longest_word = longest_word.max(word);
+            word = 0.0;
+            longest_word = longest_word.max(w.min(240.0));
+            continue;
+        }
+        if ch == '\n' {
+            longest_word = longest_word.max(word);
+            longest_line = longest_line.max(line);
+            word = 0.0;
+            line = 0.0;
+            continue;
+        }
+        let w = char_em(ch, &dominant) * dominant.font_size;
+        line += w;
+        if wraps && ch.is_whitespace() {
+            longest_word = longest_word.max(word);
+            word = 0.0;
+        } else {
+            word += w;
+        }
+    }
+    longest_word = longest_word.max(word);
+    longest_line = longest_line.max(line);
+    // Very long tokens (URLs, hashes) would force huge widths; let those break.
+    let min = if wraps { longest_word.min(240.0) } else { longest_word };
+    (min, longest_line.max(min))
+}
+
+fn block_intrinsic(s: &ComputedStyle, kind: &BlockKind, children: &[LayoutBox]) -> (f32, f32) {
+    let px = |l: Length| l.px_or_zero();
+    let child = |c: &LayoutBox| -> (f32, f32) {
+        match c {
+            LayoutBox::Paragraph(p) => (p.min_content, p.max_content),
+            LayoutBox::Image(i) => {
+                // Images scale down (max-width: 100% is ubiquitous); don't let them force width.
+                let w = match i.style.width {
+                    Length::Px(w) => w,
+                    _ => i.attr_width.unwrap_or(0.0),
+                };
+                (0.0, w)
+            }
+            LayoutBox::Block(b) => {
+                let m = px(b.style.margin.left) + px(b.style.margin.right);
+                (b.min_content + m, b.max_content + m)
+            }
+        }
+    };
+    let horizontal = matches!(kind, BlockKind::TableRow)
+        || (matches!(kind, BlockKind::Flex)
+            && matches!(s.flex_direction, style::FlexDirection::Row | style::FlexDirection::RowReverse)
+            && !s.flex_wrap);
+    let (mut min, mut max) = if horizontal {
+        let gaps = px(s.column_gap) * children.len().saturating_sub(1) as f32;
+        children
+            .iter()
+            .map(child)
+            .fold((gaps, gaps), |(a, b), (c, d)| (a + c, b + d))
+    } else {
+        children
+            .iter()
+            .map(child)
+            .fold((0.0, 0.0), |(a, b), (c, d)| (f32::max(a, c), f32::max(b, d)))
+    };
+    let edges = s.horizontal_edges();
+    min += edges;
+    max += edges;
+    if let Length::Px(w) = s.outer_width(s.width) {
+        min = w;
+        max = w;
+    }
+    if let Length::Px(limit) = s.outer_width(s.max_width) {
+        min = min.min(limit);
+        max = max.min(limit);
+    }
+    if let Length::Px(m) = s.outer_width(s.min_width) {
+        min = min.max(m);
+        max = max.max(m);
+    }
+    (min, max.max(min))
+}
+
+/// Approximate CSS's automatic table layout: every cell in a column gets the
+/// same flex basis (the column's widest content), grow factor (proportional to
+/// that, so wide columns take most of any extra space) and minimum (the
+/// column's longest word). Identical rows then lay out identically, so the
+/// columns line up.
+fn layout_table(children: &mut [LayoutBox]) {
+    fn rows_mut<'a>(children: &'a mut [LayoutBox], out: &mut Vec<&'a mut Block>) {
+        for child in children {
+            if let LayoutBox::Block(b) = child {
+                match b.kind {
+                    BlockKind::TableRow => out.push(b),
+                    // thead/tbody/tfoot
+                    BlockKind::Normal => rows_mut(&mut b.children, out),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut rows = Vec::new();
+    rows_mut(children, &mut rows);
+
+    #[derive(Default, Clone, Copy)]
+    struct Column {
+        min: f32,
+        max: f32,
+        fixed: Option<f32>,
+    }
+    let mut columns: Vec<Column> = Vec::new();
+    fn cells(row: &mut Block) -> impl Iterator<Item = &mut Block> {
+        row.children.iter_mut().filter_map(|c| match c {
+            LayoutBox::Block(b) if b.kind == BlockKind::TableCell => Some(b),
+            _ => None,
+        })
+    }
+
+    // Measure columns from single-span cells.
+    for row in rows.iter_mut() {
+        let mut col = 0;
+        for cell in cells(row) {
+            let span = cell.colspan as usize;
+            if columns.len() < col + span {
+                columns.resize(col + span, Column::default());
+            }
+            if span == 1 {
+                let c = &mut columns[col];
+                c.min = c.min.max(cell.min_content);
+                c.max = c.max.max(cell.max_content);
+                if let Length::Px(w) = cell.style.outer_width(cell.style.width) {
+                    c.fixed = Some(c.fixed.map_or(w, |f: f32| f.max(w)));
+                }
+            }
+            col += span;
+        }
+    }
+    if columns.is_empty() {
+        return;
+    }
+
+    // Assign.
+    for row in rows.iter_mut() {
+        let mut col = 0;
+        for cell in cells(row) {
+            let span = cell.colspan as usize;
+            let spanned = &columns[col..(col + span).min(columns.len())];
+            let mut basis = 0.0;
+            let mut min = 0.0;
+            let mut grow = 0.0;
+            for c in spanned {
+                match c.fixed {
+                    Some(w) => {
+                        basis += w;
+                        min += w.max(c.min);
+                    }
+                    None => {
+                        basis += c.max;
+                        min += c.min;
+                        grow += c.max.max(1.0);
+                    }
+                }
+            }
+            // A spanning cell wider than its columns still needs room.
+            if span > 1 {
+                basis = basis.max(cell.max_content);
+                min = min.max(cell.min_content);
+            }
+            cell.cell = Some(CellLayout { basis, grow, min });
+            col += span;
+        }
+    }
+}
+
+/// Choose an image URL: the `srcset` candidate best for a 2x display, else `src`.
+/// Returns the URL and its pixel density.
+fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
+    let width_hint = e.attr("width").and_then(|w| w.trim().parse::<f32>().ok());
+    let mut best: Option<(String, f32, f32)> = None; // (url, density, score)
+    if let Some(srcset) = e.attr("srcset") {
+        for candidate in srcset.split(',') {
+            let mut parts = candidate.split_whitespace();
+            let Some(url) = parts.next() else { continue };
+            let descriptor = parts.next().unwrap_or("1x");
+            let density = if let Some(x) = descriptor.strip_suffix('x') {
+                x.parse::<f32>().unwrap_or(1.0)
+            } else if let Some(w) = descriptor.strip_suffix('w') {
+                // Width descriptors: density relative to the displayed width, if known.
+                match (w.parse::<f32>(), width_hint) {
+                    (Ok(w), Some(display)) if display > 0.0 => w / display,
+                    _ => 1.0,
+                }
+            } else {
+                1.0
+            };
+            // Closest to 2x, preferring sharper over blurrier.
+            let score = if density >= 2.0 { density - 2.0 } else { (2.0 - density) * 2.0 };
+            if best.as_ref().is_none_or(|(_, _, s)| score < *s) {
+                best = Some((url.to_owned(), density, score));
+            }
+        }
+    }
+    let (url, density) = match best {
+        Some((url, density, _)) => (url, density),
+        None => (e.attr("src")?.trim().to_owned(), 1.0),
+    };
+    if url.is_empty() {
+        return None;
+    }
+    Some((base.join(&url).ok()?, density.max(0.1)))
+}
+
+fn list_start(doc: &Document, id: NodeId) -> i64 {
+    doc.element(id)
+        .filter(|e| &*e.name.local == "ol")
+        .and_then(|e| e.attr("start"))
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1)
+}
+
+fn list_marker(style: ListStyle, n: i64) -> Option<SharedString> {
+    let s = match style {
+        ListStyle::None => return None,
+        ListStyle::Disc => "•".to_string(),
+        ListStyle::Circle => "◦".to_string(),
+        ListStyle::Square => "▪".to_string(),
+        ListStyle::Decimal => format!("{n}."),
+        ListStyle::LowerAlpha => format!("{}.", alpha(n)),
+        ListStyle::UpperAlpha => format!("{}.", alpha(n).to_ascii_uppercase()),
+        ListStyle::LowerRoman => format!("{}.", roman(n)),
+        ListStyle::UpperRoman => format!("{}.", roman(n).to_ascii_uppercase()),
+    };
+    Some(s.into())
+}
+
+fn alpha(n: i64) -> String {
+    if n < 1 {
+        return n.to_string();
+    }
+    let mut n = n;
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(b'a' + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+fn roman(n: i64) -> String {
+    if !(1..4000).contains(&n) {
+        return n.to_string();
+    }
+    const TABLE: [(i64, &str); 13] = [
+        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"),
+        (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for (value, numeral) in TABLE {
+        while n >= value {
+            out.push_str(numeral);
+            n -= value;
+        }
+    }
+    out
+}
+
+fn push_transformed(text: &mut String, ch: char, tt: TextTransform, word_start: &mut bool) {
+    match tt {
+        TextTransform::None => text.push(ch),
+        TextTransform::Uppercase => text.extend(ch.to_uppercase()),
+        TextTransform::Lowercase => text.extend(ch.to_lowercase()),
+        TextTransform::Capitalize if *word_start && ch.is_alphabetic() => text.extend(ch.to_uppercase()),
+        TextTransform::Capitalize => text.push(ch),
+    }
+    *word_start = ch.is_whitespace();
+}
+
+/// Collects one paragraph's worth of inline content, collapsing whitespace.
+#[derive(Default)]
+struct InlineBuilder {
+    text: String,
+    spans: Vec<Span>,
+    links: Vec<Link>,
+    anchors: Vec<String>,
+    /// The text ends in collapsible whitespace (or is empty), so further
+    /// whitespace is dropped. Starts "true" to strip leading whitespace.
+    after_space: bool,
+    started: bool,
+    /// Baseline shifts of enclosing inline elements (`vertical-align`).
+    shifts: Vec<f32>,
+    boxes: Vec<InlineBox>,
+    objects: Vec<ImageBox>,
+}
+
+impl InlineBuilder {
+    fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    fn push_text(&mut self, raw: &str, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+        if !self.started {
+            self.started = true;
+            self.after_space = true;
+        }
+        let start = self.text.len();
+        let ws = style.white_space;
+        let tt = style.text_transform;
+        let mut word_start = self.text.is_empty() || self.after_space;
+        if ws.collapses_spaces() {
+            for ch in raw.chars() {
+                if ch == '\n' && ws.preserves_newlines() {
+                    if self.text.ends_with(' ') && self.after_space {
+                        self.text.pop();
+                    }
+                    self.text.push('\n');
+                    self.after_space = true;
+                    word_start = true;
+                } else if ch.is_ascii_whitespace() {
+                    if !self.after_space {
+                        self.text.push(' ');
+                        self.after_space = true;
+                    }
+                    word_start = true;
+                } else {
+                    push_transformed(&mut self.text, ch, tt, &mut word_start);
+                    self.after_space = false;
+                }
+            }
+        } else {
+            for ch in raw.replace("\r\n", "\n").replace('\t', "    ").chars() {
+                push_transformed(&mut self.text, ch, tt, &mut word_start);
+            }
+            self.after_space = false;
+        }
+        let mut inline = InlineStyle::of(style, false);
+        inline.baseline_shift = self.shifts.iter().sum();
+        self.record(start, inline, link);
+    }
+
+    /// Horizontal space of about `px` pixels, made of en and thin spaces (which,
+    /// unlike ASCII spaces, survive whitespace collapsing but still allow a
+    /// line break). Stands in for inline margins and padding.
+    fn push_spacer(&mut self, px: f32, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+        let em = style.font_size.max(1.0);
+        if px < em * 0.15 {
+            return;
+        }
+        let en = (px / (em * 0.5)).floor() as usize;
+        let thin = ((px - en as f32 * em * 0.5) / (em * 0.2)).round() as usize;
+        let text: String = std::iter::repeat_n('\u{2002}', en.min(20))
+            .chain(std::iter::repeat_n('\u{2009}', thin.min(3)))
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        let mut spacer_style = style.clone();
+        spacer_style.underline = false;
+        spacer_style.strikethrough = false;
+        spacer_style.white_space = style::WhiteSpace::Normal;
+        spacer_style.text_transform = TextTransform::None;
+        // A spacer at the very start of a line shouldn't count as text that
+        // later whitespace collapses against.
+        let after_space = self.after_space;
+        self.push_text(&text, &spacer_style, link);
+        self.after_space = after_space && self.text.trim_end_matches(['\u{2002}', '\u{2009}']).is_empty();
+    }
+
+    /// `<br>`: a hard line break. Following whitespace is collapsed away.
+    fn push_break(&mut self) {
+        self.started = true;
+        // A space right before the break would just dangle at the end of the line.
+        if self.after_space && self.text.ends_with(' ') {
+            self.pop_last_byte();
+        }
+        let start = self.text.len();
+        self.text.push('\n');
+        self.after_space = true;
+        let style = self
+            .spans
+            .last()
+            .map(|s| s.style.clone())
+            .unwrap_or_else(|| InlineStyle::of(&ComputedStyle::root_parent(), false));
+        self.record(start, style, None);
+    }
+
+    fn record(&mut self, start: usize, style: InlineStyle, link: Option<&Arc<Url>>) {
+        let end = self.text.len();
+        if end == start {
+            return;
+        }
+        match self.spans.last_mut() {
+            Some(last) if last.style == style => last.len += end - start,
+            _ => self.spans.push(Span { len: end - start, style }),
+        }
+        if let Some(url) = link {
+            match self.links.last_mut() {
+                Some(last) if Arc::ptr_eq(&last.url, url) && last.range.end == start => last.range.end = end,
+                _ => self.links.push(Link { range: start..end, url: url.clone() }),
+            }
+        }
+    }
+
+    /// An inline image, flowing with the text.
+    fn push_object(&mut self, image: ImageBox, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+        self.started = true;
+        let start = self.text.len();
+        self.text.push('\u{FFFC}');
+        self.after_space = false;
+        self.objects.push(image);
+        let mut inline = InlineStyle::of(style, false);
+        inline.baseline_shift = self.shifts.iter().sum();
+        self.record(start, inline, link);
+    }
+
+    fn pop_last_byte(&mut self) {
+        self.text.pop();
+        let len = self.text.len();
+        for b in &mut self.boxes {
+            b.range.end = b.range.end.min(len);
+        }
+        self.boxes.retain(|b| !b.range.is_empty());
+        if let Some(last) = self.spans.last_mut() {
+            last.len -= 1;
+            if last.len == 0 {
+                self.spans.pop();
+            }
+        }
+        for link in &mut self.links {
+            link.range.end = link.range.end.min(len);
+        }
+        self.links.retain(|l| !l.range.is_empty());
+    }
+
+    fn finish(mut self, id: usize, style: Arc<ComputedStyle>) -> Option<Paragraph> {
+        if self.after_space && self.text.ends_with(' ') {
+            self.pop_last_byte();
+        }
+        // A final newline (end of a <pre>, trailing <br>) doesn't open another line.
+        if self.text.ends_with('\n') {
+            self.pop_last_byte();
+        }
+        if self.text.is_empty() {
+            return None;
+        }
+        let pieces = segment(&self.text, &self.spans);
+        let mut p = Paragraph {
+            id,
+            style,
+            text: self.text.into(),
+            spans: self.spans,
+            links: self.links.into(),
+            anchors: self.anchors,
+            pieces,
+            boxes: self.boxes,
+            objects: self.objects,
+            min_content: 0.0,
+            max_content: 0.0,
+        };
+        (p.min_content, p.max_content) = paragraph_intrinsic(&p);
+        Some(p)
+    }
+}
+
+fn is_wide(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x115F | 0x2E80..=0x303E | 0x3041..=0x33FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xA000..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF | 0xFF00..=0xFF60)
+}
+
+/// Split paragraph text into line-breaking units. Pieces never cross span
+/// boundaries; a line may break before a piece that follows a space or line
+/// break, around inline objects, and between CJK characters.
+fn segment(text: &str, spans: &[Span]) -> Vec<Piece> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Word,
+        Space,
+        Newline,
+        Object,
+        Wide,
+    }
+    let class = |ch: char| match ch {
+        ' ' | '\t' => Class::Space,
+        '\n' => Class::Newline,
+        '\u{FFFC}' => Class::Object,
+        c if is_wide(c) => Class::Wide,
+        _ => Class::Word,
+    };
+    let mut pieces: Vec<Piece> = Vec::new();
+    let mut objects = 0u32;
+    let mut offset = 0;
+    for (span_ix, span) in spans.iter().enumerate() {
+        let span_text = &text[offset..offset + span.len];
+        let mut current: Option<(usize, Class)> = None;
+        let flush = |start: usize, end: usize, c: Class, pieces: &mut Vec<Piece>, objects: &mut u32| {
+            let prev = pieces.last().map(|p| p.kind);
+            let kind = match c {
+                Class::Word | Class::Wide => PieceKind::Word,
+                Class::Space => PieceKind::Space,
+                Class::Newline => PieceKind::Newline,
+                Class::Object => {
+                    *objects += 1;
+                    PieceKind::Object(*objects - 1)
+                }
+            };
+            let break_before = match prev {
+                None => false,
+                Some(PieceKind::Space | PieceKind::Newline | PieceKind::Object(_)) => true,
+                Some(PieceKind::Word) => matches!(c, Class::Object | Class::Wide) || {
+                    // A wide (CJK) char right before also allows a break.
+                    pieces.last().is_some_and(|p| text[p.range.clone()].chars().last().is_some_and(is_wide))
+                },
+            };
+            pieces.push(Piece { range: start..end, span: span_ix as u32, kind, break_before });
+        };
+        for (i, ch) in span_text.char_indices() {
+            let c = class(ch);
+            let at = offset + i;
+            match current {
+                // Words and spaces group; everything else is one piece per char.
+                Some((_, cur)) if cur == c && matches!(c, Class::Word | Class::Space) => {}
+                Some((start, cur)) => {
+                    flush(start, at, cur, &mut pieces, &mut objects);
+                    current = Some((at, c));
+                }
+                None => current = Some((at, c)),
+            }
+        }
+        if let Some((start, cur)) = current {
+            flush(start, offset + span.len, cur, &mut pieces, &mut objects);
+        }
+        offset += span.len;
+    }
+    pieces
+}
+
+/// Hoist the children of splittable blocks into a flat list of top-level rows,
+/// collapsing vertical margins along the way (siblings *and* parent/child, which
+/// is roughly what CSS does for margins that touch).
+fn flatten(root: Block) -> LayoutTree {
+    let mut f = Flattener {
+        tree: LayoutTree::default(),
+        pending_space: 0.,
+        pending_anchors: Vec::new(),
+        wrappers: Arc::from([]),
+    };
+    f.visit_block_contents(root, 0., 0.);
+    f.tree.space_after = f.pending_space;
+    for anchor in f.pending_anchors {
+        let last = f.tree.rows.len().saturating_sub(1);
+        f.tree.anchors.push((anchor, last));
+    }
+    f.tree
+}
+
+struct Flattener {
+    tree: LayoutTree,
+    pending_space: f32,
+    pending_anchors: Vec<String>,
+    wrappers: Arc<[Wrapper]>,
+}
+
+impl Flattener {
+    fn visit_block_contents(&mut self, mut block: Block, indent_left: f32, indent_right: f32) {
+        self.pending_anchors.append(&mut block.anchors);
+        let s = block.style.clone();
+        let px = |l: Length| l.px_or_zero();
+        self.pending_space = self.pending_space.max(px(s.margin.top)) + px(s.padding.top);
+
+        let saved_wrappers = self.wrappers.clone();
+        let (inner_left, inner_right) = if block.needs_wrapper() {
+            let mut wrappers = self.wrappers.to_vec();
+            wrappers.push(Wrapper { indent_left, indent_right, style: s.clone() });
+            self.wrappers = wrappers.into();
+            (0.0, 0.0)
+        } else {
+            (
+                indent_left + px(s.margin.left) + px(s.padding.left) + s.border_width.left,
+                indent_right + px(s.margin.right) + px(s.padding.right) + s.border_width.right,
+            )
+        };
+        for child in block.children {
+            self.visit(child, inner_left, inner_right);
+        }
+        self.wrappers = saved_wrappers;
+        self.pending_space = self.pending_space.max(px(s.margin.bottom)) + px(s.padding.bottom);
+    }
+
+    fn visit(&mut self, child: LayoutBox, indent_left: f32, indent_right: f32) {
+        match child {
+            LayoutBox::Block(b) if b.is_splittable() => {
+                self.visit_block_contents(b, indent_left, indent_right);
+            }
+            mut content => {
+                let row_ix = self.tree.rows.len();
+                for anchor in self.pending_anchors.drain(..) {
+                    self.tree.anchors.push((anchor, row_ix));
+                }
+                for anchor in collect_anchors(&mut content) {
+                    self.tree.anchors.push((anchor, row_ix));
+                }
+                let mut images = Vec::new();
+                collect_images(&content, &mut images);
+                for url in images {
+                    match self.tree.images.iter_mut().find(|(u, _)| *u == url) {
+                        Some((_, rows)) => {
+                            if rows.last() != Some(&row_ix) {
+                                rows.push(row_ix);
+                            }
+                        }
+                        None => self.tree.images.push((url, vec![row_ix])),
+                    }
+                }
+                let margin = content.margin();
+                // Rows can't express auto/percent horizontal margins as an indent; zero them
+                // here and let the row render them on the content itself.
+                self.tree.rows.push(Row {
+                    wrappers: self.wrappers.clone(),
+                    space_before: self.pending_space.max(margin.top.px_or_zero()),
+                    indent_left,
+                    indent_right,
+                    content,
+                });
+                self.pending_space = margin.bottom.px_or_zero();
+            }
+        }
+    }
+}
+
+/// All anchors inside a box (they all map to the row containing it).
+fn collect_anchors(b: &mut LayoutBox) -> Vec<String> {
+    let mut out = Vec::new();
+    match b {
+        LayoutBox::Block(block) => {
+            out.append(&mut block.anchors);
+            for child in &mut block.children {
+                out.extend(collect_anchors(child));
+            }
+        }
+        LayoutBox::Paragraph(p) => {
+            if !p.anchors.is_empty() {
+                out.append(&mut Arc::make_mut(p).anchors);
+            }
+        }
+        LayoutBox::Image(i) => out.append(&mut i.anchors),
+    }
+    out
+}
+
+/// Image URLs inside a box, for the row → images index.
+fn collect_images(b: &LayoutBox, out: &mut Vec<Arc<Url>>) {
+    match b {
+        LayoutBox::Block(block) => {
+            for url in [&block.style.background_url, &block.style.mask_url].into_iter().flatten() {
+                if let Ok(url) = Url::parse(url) {
+                    out.push(Arc::new(url));
+                }
+            }
+            block.children.iter().for_each(|c| collect_images(c, out));
+        }
+        LayoutBox::Image(i) => out.push(i.src.clone()),
+        LayoutBox::Paragraph(p) => out.extend(p.objects.iter().map(|o| o.src.clone())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use style::MediaEnv;
+    use style::sheet::parse_stylesheet;
+
+    fn layout_css(html_src: &str, css: &str) -> LayoutTree {
+        let doc = html::parse(html_src, Url::parse("https://example.com/dir/page").unwrap());
+        let sheet = style::props::with_base(Some(&doc.url), || parse_stylesheet(css));
+        let styler = Styler::new(vec![sheet], MediaEnv::default());
+        build(&doc, &styler)
+    }
+
+    fn layout(html_src: &str) -> LayoutTree {
+        layout_css(html_src, "")
+    }
+
+    fn paragraph(row: &Row) -> &Paragraph {
+        match &row.content {
+            LayoutBox::Paragraph(p) => p,
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    fn texts(tree: &LayoutTree) -> Vec<String> {
+        tree.rows.iter().map(|r| paragraph(r).text.to_string()).collect()
+    }
+
+    #[test]
+    fn collapses_whitespace_across_inline_elements() {
+        let tree = layout("<p>  Hello \n <b> big </b>   world  </p>");
+        assert_eq!(tree.rows.len(), 1);
+        let p = paragraph(&tree.rows[0]);
+        assert_eq!(&*p.text, "Hello big world");
+        let lens: Vec<_> = p.spans.iter().map(|s| (s.len, s.style.font_weight)).collect();
+        assert_eq!(lens, vec![(6, 400), (4, 700), (5, 400)]);
+    }
+
+    #[test]
+    fn transparent_divs_flatten_into_rows_with_collapsed_margins() {
+        let tree = layout("<div><div><p>one</p><p>two</p></div></div><h1>three</h1>");
+        assert_eq!(texts(&tree), vec!["one", "two", "three"]);
+        // body margin 8 collapses with p's 16 → 16; between p's: max(16,16) = 16.
+        assert_eq!(tree.rows[0].space_before, 16.0);
+        assert_eq!(tree.rows[1].space_before, 16.0);
+        // h1: font 32, margin .67em ≈ 21.44 > 16
+        assert!((tree.rows[2].space_before - 21.44).abs() < 0.01);
+        assert_eq!(tree.rows[0].indent_left, 8.0, "body margin");
+        assert!(tree.rows[0].wrappers.is_empty());
+    }
+
+    #[test]
+    fn centered_containers_become_wrappers() {
+        let tree = layout_css(
+            "<main><p>one</p><p>two</p></main>",
+            "body { margin: 0 } main { max-width: 600px; margin: 0 auto; padding: 0 20px; background: #eee }",
+        );
+        assert_eq!(texts(&tree), vec!["one", "two"]);
+        for row in &tree.rows {
+            assert_eq!(row.wrappers.len(), 1);
+            assert_eq!(row.wrappers[0].style.max_width, Length::Px(600.0));
+            assert_eq!(row.indent_left, 0.0);
+        }
+    }
+
+    #[test]
+    fn flex_containers_blockify_children() {
+        let tree = layout_css(
+            r#"<nav><a href="/a">A</a> <a href="/b">B</a> text</nav>"#,
+            "nav { display: flex; gap: 8px }",
+        );
+        assert_eq!(tree.rows.len(), 1, "flex containers aren't split");
+        let LayoutBox::Block(nav) = &tree.rows[0].content else { panic!() };
+        assert_eq!(nav.kind, BlockKind::Flex);
+        // Two blockified links + one anonymous paragraph for " text".
+        assert_eq!(nav.children.len(), 3);
+        let LayoutBox::Block(a) = &nav.children[0] else { panic!("{:?}", nav.children[0]) };
+        let LayoutBox::Paragraph(p) = &a.children[0] else { panic!() };
+        assert_eq!(p.links.len(), 1);
+    }
+
+    #[test]
+    fn links_resolve_and_span_nested_inlines() {
+        let tree = layout(r#"<p>go <a href="../x?y=1">to <b>here</b></a> now</p>"#);
+        let p = paragraph(&tree.rows[0]);
+        assert_eq!(&*p.text, "go to here now");
+        assert_eq!(p.links.len(), 1);
+        assert_eq!(p.links[0].range, 3..10);
+        assert_eq!(p.links[0].url.as_str(), "https://example.com/x?y=1");
+        assert!(p.link_at(4).is_some() && p.link_at(11).is_none());
+    }
+
+    #[test]
+    fn br_and_trailing_space() {
+        let tree = layout("<p>a <br>  b </p><p>c<br></p><pre>d\n</pre>");
+        assert_eq!(texts(&tree), vec!["a\nb", "c", "d"]);
+    }
+
+    #[test]
+    fn inline_content_around_blocks_becomes_anonymous_paragraphs() {
+        let tree = layout("<div>before<p>inside</p>after</div>");
+        assert_eq!(texts(&tree), vec!["before", "inside", "after"]);
+    }
+
+    #[test]
+    fn list_markers() {
+        let tree = layout(r#"<ol start="3"><li>a<li>b</ol><ul><li>x</ul><ol type="i"><li>p<li>q<li>r<li>s</ol>"#);
+        let markers: Vec<_> = tree
+            .rows
+            .iter()
+            .map(|r| match &r.content {
+                LayoutBox::Block(Block { kind: BlockKind::ListItem { marker }, .. }) => marker.clone().unwrap().to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(markers, vec!["3.", "4.", "•", "i.", "ii.", "iii.", "iv."]);
+        assert_eq!(tree.rows[0].indent_left, 8.0 + 40.0, "body + ol padding");
+    }
+
+    #[test]
+    fn pre_preserves_whitespace() {
+        let tree = layout("<pre>a  b\n  c</pre>");
+        assert_eq!(&*paragraph(&tree.rows[0]).text, "a  b\n  c");
+    }
+
+    #[test]
+    fn text_transform_and_visibility() {
+        let tree = layout_css("<p>hello world <span>x</span></p>", "p { text-transform: capitalize } span { visibility: hidden }");
+        let p = paragraph(&tree.rows[0]);
+        assert_eq!(&*p.text, "Hello World X");
+        assert_eq!(p.spans.last().unwrap().style.color, Color::TRANSPARENT);
+    }
+
+    #[test]
+    fn hidden_things_are_skipped() {
+        let tree = layout("<head><title>t</title><style>p{}</style></head><p hidden>no</p><script>x()</script><p>yes</p>");
+        assert_eq!(texts(&tree), vec!["yes"]);
+    }
+
+    #[test]
+    fn author_css_hides_and_positions() {
+        let tree = layout_css(
+            r##"<div class="menu">menu</div><a class="skip" href="#main">skip</a><p>content</p>"##,
+            ".menu { display: none } .skip { position: absolute; left: -9999px }",
+        );
+        assert_eq!(texts(&tree), vec!["content"]);
+    }
+
+    #[test]
+    fn anchors_map_to_rows() {
+        let tree = layout(r#"<p>intro</p><div id="sec"><h2>Section</h2><p>body <span id="deep">x</span></p></div>"#);
+        assert_eq!(tree.row_for_anchor("sec"), Some(1));
+        assert_eq!(tree.row_for_anchor("deep"), Some(2));
+        assert_eq!(tree.row_for_anchor("missing"), None);
+    }
+
+    #[test]
+    fn tables_stay_single_rows() {
+        let tree = layout("<table><tr><td>a<td>b</tr><tr><td>c<td>d</tr></table>");
+        assert_eq!(tree.rows.len(), 1);
+        match &tree.rows[0].content {
+            LayoutBox::Block(t) => {
+                assert_eq!(t.kind, BlockKind::Table);
+                let LayoutBox::Block(tbody) = &t.children[0] else { panic!() };
+                assert_eq!(tbody.children.len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_height_and_overflow_dont_block_splitting() {
+        let tree = layout_css("<p>a</p><p>b</p>", "html, body { height: 100%; overflow-y: scroll; min-height: 100vh }");
+        assert_eq!(texts(&tree), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn canvas_background_comes_from_body() {
+        let tree = layout_css("<p>x</p>", "body { background: #102030 }");
+        assert_eq!(tree.canvas, Some(Color::Rgba(0x102030ff)));
+        assert!(tree.rows[0].wrappers.is_empty(), "body bg moved to the canvas");
+    }
+
+    #[test]
+    fn generated_content() {
+        let tree = layout_css(
+            r#"<h2>History<span class="edit"><a href="/e">edit</a></span></h2><ul class="h"><li>a</li><li>b</li></ul><q>hi</q>"#,
+            r#".edit::before { content: " [" } .edit::after { content: "]" } .h li { display: inline } .h li + li::before { content: " · " }"#,
+        );
+        assert_eq!(texts(&tree), vec!["History [edit]", "a · b", "“hi”"]);
+    }
+
+    #[test]
+    fn floats_sit_beside_following_content() {
+        let tree = layout_css(
+            r#"<div class="box">info</div><p>one</p><p>two</p><h2>next</h2><p>three</p>"#,
+            ".box { float: right; width: 200px }",
+        );
+        // [row: (one, two) | box], h2, three
+        let LayoutBox::Block(row) = &tree.rows[0].content else { panic!("{:?}", tree.rows[0].content) };
+        assert_eq!(row.kind, BlockKind::Flex);
+        let LayoutBox::Block(text) = &row.children[0] else { panic!() };
+        assert_eq!(text.children.len(), 2);
+        let LayoutBox::Block(float) = &row.children[1] else { panic!() };
+        assert_eq!(float.style.width, Length::Px(200.0));
+        assert_eq!(row.style.border_width.top, 0.0, "anonymous boxes have no borders");
+        assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["next", "three"]);
+    }
+
+    #[test]
+    fn images_and_srcset() {
+        let tree = layout(
+            r#"<p>logo:</p><img src="a.png" srcset="a1.png 1x, a2.png 2x" width="50" height="40" alt="Logo"><p>math <img src="m.png" height="12" alt="x²"> inline</p>"#,
+        );
+        // Inline images flow with the text as objects.
+        let logo = paragraph(&tree.rows[1]);
+        assert_eq!(&*logo.text, "\u{FFFC}");
+        let img = &logo.objects[0];
+        assert_eq!(img.src.as_str(), "https://example.com/dir/a2.png");
+        assert_eq!(img.density, 2.0);
+        assert_eq!((img.attr_width, img.attr_height), (Some(50.0), Some(40.0)));
+        let math = paragraph(&tree.rows[2]);
+        assert_eq!(&*math.text, "math \u{FFFC} inline");
+        assert_eq!(math.objects.len(), 1);
+        assert_eq!(tree.images.len(), 2);
+        assert_eq!(tree.images[0].1, vec![1]);
+    }
+
+    #[test]
+    fn table_columns_share_sizing() {
+        let tree = layout(
+            r#"<table><tr><td>1.</td><td width="18">^</td><td>A short title</td></tr><tr><td>10.</td><td width="18">^</td><td>A much much longer title here</td></tr><tr><td colspan="2"></td><td>sub</td></tr></table>"#,
+        );
+        let LayoutBox::Block(table) = &tree.rows[0].content else { panic!() };
+        let LayoutBox::Block(tbody) = &table.children[0] else { panic!() };
+        let cell = |row: usize, col: usize| -> CellLayout {
+            let LayoutBox::Block(r) = &tbody.children[row] else { panic!() };
+            let LayoutBox::Block(c) = &r.children[col] else { panic!() };
+            c.cell.unwrap()
+        };
+        assert_eq!(cell(0, 0), cell(1, 0), "same column, same sizing");
+        assert_eq!(cell(0, 2), cell(1, 2));
+        assert_eq!(cell(0, 1).grow, 0.0, "fixed-width column doesn't grow");
+        assert!(cell(0, 2).grow > cell(0, 0).grow * 3.0, "wide column takes most extra space");
+        // colspan=2 spans the first two columns.
+        assert_eq!(cell(2, 0).basis, cell(0, 0).basis + cell(0, 1).basis);
+    }
+
+    #[test]
+    fn inline_margins_become_spaces() {
+        let tree = layout_css(r#"<p><b class="name">Hacker News</b><a href="/new">new</a></p>"#, ".name { margin-right: 5px }");
+        let text = paragraph(&tree.rows[0]).text.to_string();
+        assert!(text.starts_with("Hacker News\u{2009}") || text.starts_with("Hacker News\u{2002}"), "{text:?}");
+        assert!(text.ends_with("new"));
+    }
+
+    #[test]
+    fn css_images_are_collected() {
+        let tree = layout_css(
+            r#"<div class="arrow"></div><span class="icon"></span>"#,
+            ".arrow { width: 10px; height: 10px; background: url(triangle.svg) } .icon { display: block; width: 20px; height: 20px; background-color: currentColor; mask-image: url(/i/menu.svg) }",
+        );
+        let urls: Vec<_> = tree.images.iter().map(|(u, _)| u.as_str().to_owned()).collect();
+        assert_eq!(urls, vec!["https://example.com/dir/triangle.svg", "https://example.com/i/menu.svg"]);
+    }
+
+    #[test]
+    fn pieces_boxes_and_superscripts() {
+        let tree = layout_css(
+            r#"<p>Hello <b>wor</b>ld<sup>[1]</sup> <code class="c">.rs</code></p>"#,
+            ".c { background: #eee; border: 1px solid #ccc; padding: 0 4px }",
+        );
+        let p = paragraph(&tree.rows[0]);
+        let pieces: Vec<_> = p.pieces.iter().map(|pc| (&p.text[pc.range.clone()], pc.kind, pc.break_before)).collect();
+        assert_eq!(pieces[0], ("Hello", PieceKind::Word, false));
+        assert_eq!(pieces[1], (" ", PieceKind::Space, false));
+        // "wor" + "ld" are one word across a span boundary: no break between.
+        assert_eq!(pieces[2], ("wor", PieceKind::Word, true));
+        assert_eq!(pieces[3], ("ld", PieceKind::Word, false));
+        // Superscript is raised and smaller.
+        let sup = p.spans.iter().find(|s| s.style.baseline_shift > 0.0).expect("raised span");
+        assert!(sup.style.font_size < 16.0);
+        // The code chip is a decorated inline box.
+        assert_eq!(p.boxes.len(), 1);
+        assert_eq!(p.boxes[0].border_width, 1.0);
+        assert!(p.text[p.boxes[0].range.clone()].contains(".rs"));
+    }
+
+    #[test]
+    fn content_box_sizes_include_padding() {
+        let tree = layout_css(
+            r#"<div class="a">x</div><div class="b">y</div>"#,
+            ".a { width: 100px; padding: 0 10px; border: 2px solid } .b { box-sizing: border-box; width: 100px; padding: 0 10px; border: 2px solid }",
+        );
+        let block = |row: usize| match &tree.rows[row].content {
+            LayoutBox::Block(b) => b.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(block(0).style.outer_width(block(0).style.width), Length::Px(124.0));
+        assert_eq!(block(1).style.outer_width(block(1).style.width), Length::Px(100.0));
+        assert_eq!(block(0).min_content, 124.0);
+    }
+
+    #[test]
+    fn helpers() {
+        assert_eq!(alpha(1), "a");
+        assert_eq!(alpha(27), "aa");
+        assert_eq!(roman(1994), "mcmxciv");
+    }
+}

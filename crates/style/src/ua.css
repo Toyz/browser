@@ -1,0 +1,79 @@
+/* User-agent stylesheet: the browser's defaults, lowest in the cascade.
+   Loosely follows the HTML spec's rendering section. */
+
+html, address, blockquote, body, center, div, figure, figcaption, footer, form,
+header, hr, legend, listing, main, p, plaintext, pre, search, xmp, article, aside,
+h1, h2, h3, h4, h5, h6, hgroup, nav, section, details, summary, fieldset, dl, dt,
+dd, menu, ol, ul, optgroup, option, caption, thead, tbody, tfoot, dialog[open] {
+  display: block;
+}
+
+head, script, style, template, title, meta, link, base, datalist, param, source,
+track, area, map, dialog, noembed, noframes, rp, col, colgroup, [hidden] {
+  display: none;
+}
+
+/* Replaced and interactive content we can't render yet. */
+svg, math, canvas, video, audio, iframe, object, embed, input, select, textarea,
+picture > source {
+  display: none;
+}
+
+html { color: CanvasText; font-family: system-ui, sans-serif; }
+body { margin: 8px; }
+
+p, dl, multicol { margin-top: 1em; margin-bottom: 1em; }
+blockquote, figure { margin: 1em 40px; }
+dd { margin-left: 40px; }
+address { font-style: italic; }
+center { text-align: center; }
+center > * { margin-left: auto; margin-right: auto; }
+
+h1, h2, h3, h4, h5, h6 { font-weight: bold; line-height: 1.25; }
+h1 { font-size: 2em; margin: 0.67em 0; }
+h2 { font-size: 1.5em; margin: 0.83em 0; }
+h3 { font-size: 1.17em; margin: 1em 0; }
+h4 { font-size: 1em; margin: 1.33em 0; }
+h5 { font-size: 0.83em; margin: 1.67em 0; }
+h6 { font-size: 0.67em; margin: 2.33em 0; }
+
+pre, listing, xmp, plaintext {
+  display: block;
+  font-family: monospace;
+  font-size: 0.8125em;
+  white-space: pre;
+  margin: 1em 0;
+}
+code, kbd, samp, tt { font-family: monospace; }
+
+hr { margin: 0.5em 0; border: 0; border-top: 1px solid #d0d0d0; }
+
+ul, ol, menu { margin: 1em 0; padding-left: 40px; list-style-type: disc; }
+ol { list-style-type: decimal; }
+:is(ul, ol, menu) :is(ul, ol, menu) { margin-top: 0; margin-bottom: 0; }
+:is(ul, ol, menu) :is(ul, menu) { list-style-type: circle; }
+:is(ul, ol, menu) :is(ul, ol, menu) :is(ul, menu) { list-style-type: square; }
+li { display: list-item; }
+
+table { display: table; }
+tr { display: table-row; }
+td, th { display: table-cell; padding: 1px; }
+th { font-weight: bold; text-align: center; }
+caption { text-align: center; }
+
+:any-link { color: LinkText; text-decoration: underline; }
+b, strong { font-weight: bold; }
+i, cite, em, var, dfn { font-style: italic; }
+u, ins { text-decoration: underline; }
+s, strike, del { text-decoration: line-through; }
+small, sub, sup { font-size: smaller; }
+sub { vertical-align: sub; }
+sup { vertical-align: super; }
+big { font-size: larger; }
+mark { background-color: Mark; color: MarkText; }
+q::before { content: open-quote; }
+q::after { content: close-quote; }
+
+details > summary:first-of-type { display: block; }
+details:not([open]) > :not(summary:first-of-type) { display: none; }
+fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }

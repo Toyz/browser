@@ -1,0 +1,17 @@
+[package]
+name = "render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+page.workspace = true
+style.workspace = true
+url.workspace = true
+anyhow.workspace = true
+imagesize = "0.13"
+
+[dev-dependencies]
+net.workspace = true
+html.workspace = true

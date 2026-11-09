@@ -1,0 +1,10 @@
+[package]
+name = "html"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+html5ever.workspace = true
+page.workspace = true
+url.workspace = true

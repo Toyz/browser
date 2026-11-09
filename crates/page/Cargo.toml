@@ -1,0 +1,10 @@
+[package]
+name = "page"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+markup5ever.workspace = true
+slotmap.workspace = true
+url.workspace = true

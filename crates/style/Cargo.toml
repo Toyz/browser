@@ -1,0 +1,16 @@
+[package]
+name = "style"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+page.workspace = true
+url.workspace = true
+cssparser = "0.38"
+cssparser-color = "0.6"
+selectors = "0.42"
+precomputed-hash = "0.1"
+
+[dev-dependencies]
+html.workspace = true

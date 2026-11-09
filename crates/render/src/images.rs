@@ -1,0 +1,144 @@
+//! Loaded images: decoding metadata and the per-page image store.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use std::borrow::Cow;
+use std::sync::{OnceLock, RwLock};
+
+use anyhow::{Context as _, Result, bail};
+use gpui_kit::{AssetSource, Image, ImageFormat, SharedString};
+use url::Url;
+
+#[derive(Clone)]
+pub enum ImageState {
+    Loading,
+    /// Intrinsic size in image pixels.
+    Ready { image: Arc<Image>, width: f32, height: f32 },
+    Failed,
+}
+
+/// Images for the current page, filled in as they arrive.
+pub type ImageStore = Rc<RefCell<HashMap<Url, ImageState>>>;
+
+const SVG_PREFIX: &str = "page-svg/";
+
+fn svg_registry() -> &'static RwLock<HashMap<u64, Arc<[u8]>>> {
+    static REGISTRY: OnceLock<RwLock<HashMap<u64, Arc<[u8]>>>> = OnceLock::new();
+    REGISTRY.get_or_init(Default::default)
+}
+
+/// Make a page's SVG available to GPUI's `svg()` element (which loads by
+/// asset path, and draws in the current text color: exactly a CSS mask).
+pub fn svg_asset_path(image: &Image) -> SharedString {
+    let id = image.id();
+    if !svg_registry().read().unwrap().contains_key(&id) {
+        svg_registry().write().unwrap().insert(id, image.bytes.clone().into());
+    }
+    format!("{SVG_PREFIX}{id}.svg").into()
+}
+
+/// The app's asset source, plus SVGs registered by pages.
+pub struct PageAssets<A>(pub A);
+
+impl<A: AssetSource> AssetSource for PageAssets<A> {
+    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if let Some(rest) = path.strip_prefix(SVG_PREFIX) {
+            let id: u64 = rest.trim_end_matches(".svg").parse().unwrap_or(0);
+            return Ok(svg_registry().read().unwrap().get(&id).map(|b| Cow::Owned(b.to_vec())));
+        }
+        self.0.load(path)
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        self.0.list(path)
+    }
+}
+
+/// Identify the format and intrinsic size of downloaded image bytes. Cheap
+/// (header parsing only); GPUI does the actual decoding when it first draws.
+pub fn prepare(bytes: Vec<u8>) -> Result<(Arc<Image>, f32, f32)> {
+    let (format, (width, height)) = if looks_like_svg(&bytes) {
+        (ImageFormat::Svg, svg_size(&bytes).unwrap_or((300.0, 150.0)))
+    } else {
+        let format = match imagesize::image_type(&bytes).context("unrecognized image data")? {
+            imagesize::ImageType::Png => ImageFormat::Png,
+            imagesize::ImageType::Jpeg => ImageFormat::Jpeg,
+            imagesize::ImageType::Gif => ImageFormat::Gif,
+            imagesize::ImageType::Webp => ImageFormat::Webp,
+            imagesize::ImageType::Bmp => ImageFormat::Bmp,
+            imagesize::ImageType::Tiff => ImageFormat::Tiff,
+            other => bail!("unsupported image format {other:?}"),
+        };
+        let size = imagesize::blob_size(&bytes).context("can't read image size")?;
+        (format, (size.width as f32, size.height as f32))
+    };
+    if width <= 0.0 || height <= 0.0 {
+        bail!("empty image");
+    }
+    Ok((Arc::new(Image::from_bytes(format, bytes)), width, height))
+}
+
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let t = text.trim_start_matches('\u{feff}').trim_start();
+    t.starts_with('<') && text.contains("<svg")
+}
+
+/// `width`/`height` attributes of the root `<svg>`, else its viewBox.
+fn svg_size(bytes: &[u8]) -> Option<(f32, f32)> {
+    let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+    let start = text.find("<svg")?;
+    let tag = &text[start..start + text[start..].find('>')?];
+    let attr = |name: &str| -> Option<String> {
+        let pattern = format!(" {name}=");
+        let i = tag.find(&pattern)? + pattern.len();
+        let quote = tag[i..].chars().next()?;
+        let rest = &tag[i + 1..];
+        Some(rest[..rest.find(quote)?].to_owned())
+    };
+    let number = |v: String| -> Option<f32> {
+        let v = v.trim();
+        if v.ends_with('%') {
+            return None;
+        }
+        v.trim_end_matches("px").parse().ok()
+    };
+    if let (Some(w), Some(h)) = (attr("width").and_then(number), attr("height").and_then(number)) {
+        return Some((w, h));
+    }
+    let view_box = attr("viewBox")?;
+    let parts: Vec<f32> = view_box
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    (parts.len() == 4).then(|| (parts[2], parts[3]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn svg_sizes() {
+        assert_eq!(svg_size(br#"<svg xmlns="x" width="18" height="18px">"#), Some((18.0, 18.0)));
+        assert_eq!(svg_size(br#"<?xml?><svg viewBox="0 0 24 12">"#), Some((24.0, 12.0)));
+        assert_eq!(svg_size(br#"<svg width="100%" viewBox="0,0,8,8">"#), Some((8.0, 8.0)));
+    }
+
+    #[test]
+    fn prepares_png() {
+        // 1×2 transparent PNG
+        let png = net::decode_data_url(
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAACCAYAAACZgbYnAAAAD0lEQVR42mNkYGBgZGAAAAAQAAEh4qYfAAAAAElFTkSuQmCC",
+        )
+        .unwrap();
+        let (_, w, h) = prepare(png).unwrap();
+        assert_eq!((w, h), (1.0, 2.0));
+        assert!(prepare(b"not an image".to_vec()).is_err());
+    }
+}

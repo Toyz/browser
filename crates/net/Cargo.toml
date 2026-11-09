@@ -1,0 +1,12 @@
+[package]
+name = "net"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+url.workspace = true
+ureq.workspace = true
+base64 = "0.22"
+percent-encoding = "2"

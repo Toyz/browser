@@ -1,0 +1,30 @@
+[package]
+name = "shell"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "browser"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit.workspace = true
+anyhow.workspace = true
+url.workspace = true
+net.workspace = true
+html.workspace = true
+render.workspace = true
+style.workspace = true
+page.workspace = true
+futures = "0.3"
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+
+# Only for `--features screenshot`: the same GPUI crates gpui-kit uses, with
+# `test-support` switched on (which adds `Window::render_to_image`).
+gpui-test-support = { package = "gpui-pre", version = "=0.3.11", optional = true, features = ["test-support"] }
+gpui-platform-test-support = { package = "gpui-pre-platform", version = "=0.3.11", optional = true, features = ["test-support"] }
+
+[features]
+# `--screenshot out.png`: render the page offscreen to PNG and quit (dev/testing aid).
+screenshot = ["dep:gpui-test-support", "dep:gpui-platform-test-support", "dep:image"]
