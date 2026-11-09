@@ -11,7 +11,7 @@ use std::sync::{OnceLock, RwLock};
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{
     AnyElement, AssetSource, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
-    Styled, StyledImage, div, img, relative,
+    Img, Pixels, Styled, StyledImage, div, img, px, relative,
 };
 use url::Url;
 
@@ -66,13 +66,20 @@ fn padded(bytes: &[u8], format: ImageFormat) -> Option<Arc<RenderImage>> {
 
 /// Draw a loaded image filling its parent (padded when possible).
 pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32) -> AnyElement {
+    picture_rounded(image, padded, width, height, [px(0.); 4])
+}
+
+/// The same with rounded corners (top-left, top-right, bottom-right,
+/// bottom-left).
+pub fn picture_rounded(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32, corners: [Pixels; 4]) -> AnyElement {
+    let round = |i: Img| i.rounded_tl(corners[0]).rounded_tr(corners[1]).rounded_br(corners[2]).rounded_bl(corners[3]);
     match padded {
         Some(p) if width > 0.0 && height > 0.0 => div()
             .size_full()
             .relative()
             .overflow_hidden()
             .child(
-                img(p.clone())
+                round(img(p.clone()))
                     .absolute()
                     .left(relative(-1.0 / width))
                     .top(relative(-1.0 / height))
@@ -81,7 +88,7 @@ pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32
                     .object_fit(ObjectFit::Fill),
             )
             .into_any_element(),
-        _ => img(image.clone()).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+        _ => round(img(image.clone())).size_full().object_fit(ObjectFit::Fill).into_any_element(),
     }
 }
 

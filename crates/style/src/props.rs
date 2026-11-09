@@ -991,9 +991,12 @@ fn parse_display<'i>(p: &mut Parser<'i>) -> PResult<'i, Display> {
         ("inline", None) | ("ruby" | "ruby-text" | "ruby-base", _) => Display::Inline,
         ("inline-block", _) | ("inline", Some("flow-root")) => Display::InlineBlock,
         ("list-item", _) => Display::ListItem,
-        ("flex" | "inline-flex" | "-webkit-box" | "-webkit-flex" | "-ms-flexbox" | "-webkit-inline-box", _)
-        | (_, Some("flex")) => Display::Flex,
-        ("grid" | "inline-grid" | "-ms-grid", _) | (_, Some("grid")) => Display::Grid,
+        ("inline-flex" | "-webkit-inline-box" | "-webkit-inline-flex" | "-ms-inline-flexbox", _) | ("inline", Some("flex")) => {
+            Display::InlineFlex
+        }
+        ("flex" | "-webkit-box" | "-webkit-flex" | "-ms-flexbox", _) | (_, Some("flex")) => Display::Flex,
+        ("inline-grid" | "-ms-inline-grid", _) | ("inline", Some("grid")) => Display::InlineGrid,
+        ("grid" | "-ms-grid", _) | (_, Some("grid")) => Display::Grid,
         ("table" | "inline-table", _) => Display::Table,
         ("table-row", _) => Display::TableRow,
         ("table-cell", _) => Display::TableCell,
@@ -1067,6 +1070,9 @@ fn parse_flex<'i>(p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
                 grow = Some(n);
             } else if shrink.is_none() {
                 shrink = Some(n);
+            } else if n == 0.0 && basis.is_none() {
+                // `flex: 1 1 0`: a unitless zero basis.
+                basis = Some(LenSpec::px(0.0));
             } else {
                 return err(p);
             }
@@ -2360,6 +2366,10 @@ mod tests {
             vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridTracks(None)]
         );
         assert_eq!(
+            parse("flex", "1 1 0"),
+            vec![Decl::FlexGrow(1.0), Decl::FlexShrink(1.0), Decl::FlexBasis(LenSpec::px(0.0))]
+        );
+        assert_eq!(
             parse("grid-template-columns", "repeat(auto-fill, minmax(200px, 1fr))"),
             vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridTracks(None)]
         );
@@ -2387,7 +2397,7 @@ mod tests {
 
     #[test]
     fn display_and_font_family() {
-        assert_eq!(parse("display", "inline-flex"), vec![Decl::Display(Display::Flex)]);
+        assert_eq!(parse("display", "inline-flex"), vec![Decl::Display(Display::InlineFlex)]);
         assert_eq!(
             parse("content", r#"" [" attr(title) "\f007" open-quote"#),
             vec![Decl::Content(Some(vec![

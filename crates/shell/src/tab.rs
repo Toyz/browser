@@ -999,6 +999,9 @@ impl Tab {
                     cx.background_executor().timer(Duration::from_millis(200)).await;
                 }
             };
+            if job.wait > 0 {
+                cx.background_executor().timer(Duration::from_millis(job.wait)).await;
+            }
             // Wait (a while) for images, then let the list lay out and measure.
             wait_for_images(cx).await;
             if let Some((w, h)) = job.resize {

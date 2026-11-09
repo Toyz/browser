@@ -674,7 +674,8 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     let content = match state {
         _ if !s.visible => div().into_any_element(),
         Some(ImageState::Ready { image, padded, width, height }) => {
-            transform::image(i, cx).unwrap_or_else(|| crate::images::picture(&image, &padded, width, height))
+            let corners = s.border_radius.map(radius);
+            transform::image(i, cx).unwrap_or_else(|| crate::images::picture_rounded(&image, &padded, width, height, corners))
         }
         Some(ImageState::Failed) | None if natural_width.is_none() => match &i.alt {
             Some(alt) => div()

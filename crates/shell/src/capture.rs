@@ -44,6 +44,8 @@ pub struct CaptureJob {
     pub wheel: Option<f32>,
     /// Keystrokes to send after the click (`enter` ends with Enter).
     pub keys: Option<String>,
+    /// Extra time to wait before capturing, ms (scripted pages).
+    pub wait: u64,
     /// Click here (window coordinates) before capturing, then let it settle.
     pub click: Option<(f32, f32)>,
     /// Type this into the omnibox before capturing (suggestions, autocomplete).
@@ -77,6 +79,7 @@ impl Args {
         let mut keys = None;
         let mut swipe = None;
         let mut wheel = None;
+        let mut wait = 0;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -95,6 +98,7 @@ impl Args {
                         Some((n.parse().ok()?, end))
                     })
                 }
+                "--wait" => wait = it.next().and_then(|n| n.parse().ok()).unwrap_or(0),
                 "--wheel" => wheel = it.next().and_then(|n| n.parse().ok()),
                 "--click" => {
                     click = it.next().as_deref().and_then(|s| s.split_once(',')).and_then(|(x, y)| {
@@ -126,7 +130,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel, wait });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

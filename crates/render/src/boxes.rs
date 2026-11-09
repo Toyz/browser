@@ -1412,10 +1412,18 @@ impl Builder<'_> {
             let cols = auto_columns(content, min, style.column_gap.px_or_zero());
             Arc::make_mut(&mut style).grid_columns = Some(cols);
         }
-        self.avail = match (&kind, style.grid_columns) {
-            (BlockKind::Grid, Some(n)) if style.grid_tracks.is_none() && style.grid_areas.is_none() => {
+        let gap = style.column_gap.px_or_zero();
+        self.avail = match (&kind, style.grid_columns, style.grid_tracks.as_deref()) {
+            // Explicit tracks (`280px 1fr`): items are assumed to be in the
+            // flexible ones (fixed columns give their items a width anyway).
+            (BlockKind::Grid, _, Some(tracks)) if !tracks.is_empty() => {
+                let fixed: f32 = tracks.iter().map(|t| if let Track::Px(v) = t { *v } else { 0.0 }).sum();
+                let flexible = tracks.iter().filter(|t| !matches!(t, Track::Px(_))).count().max(1) as f32;
+                ((content - fixed - gap * (tracks.len() as f32 - 1.0)) / flexible).max(0.0)
+            }
+            (BlockKind::Grid, Some(n), None) if style.grid_areas.is_none() => {
                 let n = n.max(1) as f32;
-                (content - style.column_gap.px_or_zero() * (n - 1.0)) / n
+                (content - gap * (n - 1.0)) / n
             }
             _ => content,
         };
@@ -1436,6 +1444,18 @@ impl Builder<'_> {
             c.children
         };
         let mut children = children;
+        // A rounded box that clips (avatars): GPUI clips to rectangles, so
+        // the images filling it take its corners themselves.
+        let zero = |r: &Length| matches!(r, Length::Auto) || r.px_or_zero() == 0.0 && !matches!(r, Length::Percent(p) if *p > 0.0);
+        if style.overflow != Overflow::Visible && !style.border_radius.iter().all(zero) {
+            for child in &mut children {
+                if let LayoutBox::Image(i) = child
+                    && i.style.border_radius.iter().all(zero)
+                {
+                    Arc::make_mut(&mut i.style).border_radius = style.border_radius;
+                }
+            }
+        }
         // `auto-fit`: empty tracks collapse, so the items share the row.
         if kind == BlockKind::Grid
             && let Some((_, true)) = style.grid_auto
@@ -1583,8 +1603,8 @@ impl Builder<'_> {
             }
             let tag = &*element.name.local;
             let floating = style.float != Float::None;
-            if (blockify || floating) && matches!(style.display, Display::Inline | Display::InlineBlock) {
-                style.display = Display::Block;
+            if blockify || floating {
+                style.display = style.display.blockified();
             }
             if floating {
                 // A float keeps its width; it never shrinks to make room.
@@ -1714,6 +1734,13 @@ impl Builder<'_> {
                         None => InlineObject::BlockBox(Arc::new(block)),
                     };
                     c.inline.push_object(object, &style, link);
+                }
+                Display::InlineFlex | Display::InlineGrid => {
+                    // A flex/grid container in the line: a GPUI subtree there.
+                    let kind = block_kind_for(style.display);
+                    let generated = self.generated(child, &style);
+                    let block = self.build_block(child, style.clone(), kind, link, generated);
+                    c.inline.push_object(InlineObject::BlockBox(Arc::new(block)), &style, link);
                 }
                 Display::Inline => match tag {
                     "br" => c.inline.push_break(),
@@ -1905,6 +1932,13 @@ fn block_intrinsic(s: &ComputedStyle, kind: &BlockKind, children: &[LayoutBox]) 
             }
         }
     };
+    // Absolutely positioned boxes take no room.
+    let in_flow: Vec<&LayoutBox> = children
+        .iter()
+        .filter(|c| !matches!(c, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed)))
+        .collect();
+    let children = in_flow;
+    let child = |c: &&LayoutBox| child(c);
     let horizontal = matches!(kind, BlockKind::TableRow)
         || (matches!(kind, BlockKind::Flex)
             && matches!(s.flex_direction, style::FlexDirection::Row | style::FlexDirection::RowReverse)
@@ -2345,8 +2379,8 @@ fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, ou
 
 fn block_kind_for(display: Display) -> BlockKind {
     match display {
-        Display::Flex => BlockKind::Flex,
-        Display::Grid => BlockKind::Grid,
+        Display::Flex | Display::InlineFlex => BlockKind::Flex,
+        Display::Grid | Display::InlineGrid => BlockKind::Grid,
         Display::Table => BlockKind::Table,
         Display::TableRow => BlockKind::TableRow,
         Display::TableCell => BlockKind::TableCell,

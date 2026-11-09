@@ -1172,10 +1172,8 @@ fn finalize(s: &mut ComputedStyle) {
         );
     }
     // Out-of-flow boxes are always block-level ("blockified").
-    if matches!(s.position, Position::Absolute | Position::Fixed)
-        && matches!(s.display, Display::Inline | Display::InlineBlock)
-    {
-        s.display = Display::Block;
+    if matches!(s.position, Position::Absolute | Position::Fixed) {
+        s.display = s.display.blockified();
     }
 }
 

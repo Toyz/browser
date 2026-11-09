@@ -262,6 +262,10 @@ pub enum Display {
     ListItem,
     Flex,
     Grid,
+    /// `inline-flex` / `inline-grid`: a flex or grid container that sits
+    /// in a line like an inline-block.
+    InlineFlex,
+    InlineGrid,
     Table,
     TableRow,
     TableCell,
@@ -273,8 +277,19 @@ impl Display {
     pub fn is_block_level(self) -> bool {
         !matches!(
             self,
-            Display::None | Display::Inline | Display::InlineBlock | Display::Contents
+            Display::None | Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineGrid | Display::Contents
         )
+    }
+
+    /// What it becomes where boxes must be block-level (flex and grid
+    /// items, floats, absolutely positioned boxes).
+    pub fn blockified(self) -> Display {
+        match self {
+            Display::Inline | Display::InlineBlock => Display::Block,
+            Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
+            d => d,
+        }
     }
 }
 
