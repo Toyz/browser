@@ -810,6 +810,16 @@ fn private_getters_from_arrows() {
 }
 
 #[test]
+fn text_decoder_replaces_malformed_bytes() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const d = new TextDecoder();
+        const s = d.decode(new Uint8Array([0x1f, 0x8b, 0xff, 0xf8, 0x41, 0xe2, 0x82, 0xac, 0xc3]));
+        document.getElementById("o").textContent = Array.from(s).map((c) => c.codePointAt(0).toString(16)).join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "1f fffd fffd fffd 41 20ac fffd");
+}
+
+#[test]
 fn cloned_responses_read_the_body() {
     let doc = run(r##"<body><p id="o"></p><script>
         let resolve;

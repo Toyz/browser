@@ -2411,16 +2411,28 @@
         }
       }
       this._pending = end < b.length ? b.slice(end) : null;
+      // UTF-8, with U+FFFD for anything malformed (as the spec has it).
       let out = "";
+      const parts = [];
+      const cont = (j) => j < end && (b[j] & 0xc0) === 0x80;
       for (let i = 0; i < end;) {
-        const c = b[i++];
-        let cp = c;
-        if (c >= 0xf0) cp = ((c & 7) << 18) | ((b[i++] & 63) << 12) | ((b[i++] & 63) << 6) | (b[i++] & 63);
-        else if (c >= 0xe0) cp = ((c & 15) << 12) | ((b[i++] & 63) << 6) | (b[i++] & 63);
-        else if (c >= 0xc0) cp = ((c & 31) << 6) | (b[i++] & 63);
+        const c = b[i];
+        let cp = 0xfffd, len = 1;
+        if (c < 0x80) cp = c;
+        else if (c >= 0xc2 && c < 0xe0 && cont(i + 1)) { cp = ((c & 31) << 6) | (b[i + 1] & 63); len = 2; }
+        else if (c >= 0xe0 && c < 0xf0 && cont(i + 1) && cont(i + 2)) {
+          const v = ((c & 15) << 12) | ((b[i + 1] & 63) << 6) | (b[i + 2] & 63);
+          if (v >= 0x800 && (v < 0xd800 || v > 0xdfff)) { cp = v; len = 3; }
+        } else if (c >= 0xf0 && c < 0xf5 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+          const v = ((c & 7) << 18) | ((b[i + 1] & 63) << 12) | ((b[i + 2] & 63) << 6) | (b[i + 3] & 63);
+          if (v >= 0x10000 && v <= 0x10ffff) { cp = v; len = 4; }
+        }
         out += String.fromCodePoint(cp);
+        i += len;
+        if (out.length > 8192) { parts.push(out); out = ""; }
       }
-      return out;
+      parts.push(out);
+      return parts.join("");
     }
   }
 
@@ -2587,6 +2599,18 @@
     return [String(body), "text/plain;charset=UTF-8"];
   }
 
+  // A request body for the network: bytes stay bytes (gzipped JSON,
+  // protobuf), passed as a byte string the native side unpacks.
+  function requestBody(body) {
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      const b = body instanceof ArrayBuffer ? new Uint8Array(body) : new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+      let s = "";
+      for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192));
+      return [{ bytes: s }, null];
+    }
+    return encodeBody(body);
+  }
+
   class Request {
     constructor(input, init) {
       init = init || {};
@@ -2705,7 +2729,7 @@
     let req;
     try { req = new Request(input, init); } catch (e) { return Promise.reject(e); }
     if (req.signal && req.signal.aborted) return Promise.reject(req.signal.reason);
-    const [body, type] = encodeBody(req._body);
+    const [body, type] = requestBody(req._body);
     if (type && !req.headers.has("content-type")) req.headers.set("content-type", type);
     return new Promise((resolve, reject) => {
       const id = nextRequest++;
@@ -2790,7 +2814,7 @@
       this._fire("loadend");
     }
     send(body) {
-      const [text, type] = this._method === "GET" || this._method === "HEAD" ? [null, null] : encodeBody(body);
+      const [text, type] = this._method === "GET" || this._method === "HEAD" ? [null, null] : requestBody(body);
       if (type && !this._headers.has("content-type")) this._headers.set("content-type", type);
       const credentials = this.withCredentials ? "include" : "same-origin";
       this._fire("loadstart");

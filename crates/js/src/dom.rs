@@ -1517,6 +1517,12 @@ fn script_request(d: &Shared, a: &[JsValue], cx: &mut Context) -> JsResult<Optio
     }
     let body = match a.get_or_undefined(4) {
         v if v.is_null_or_undefined() => None,
+        // `{bytes}`: binary, one byte per character.
+        v if v.is_object() => {
+            let bytes = v.as_object().map(|o| o.get(js_string!("bytes"), cx)).transpose()?.unwrap_or_default();
+            let s = bytes.to_string(cx)?;
+            Some(s.iter().map(|u| u as u8).collect())
+        }
         v => Some(v.to_string(cx)?.to_std_string_escaped().into_bytes()),
     };
     let mode = arg_string(a, 5, cx)?;
