@@ -109,6 +109,8 @@ pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
     s.background_position = style::BgPos {
         x: mix_f(from.background_position.x, to.background_position.x, t),
         y: mix_f(from.background_position.y, to.background_position.y, t),
+        dx: mix_f(from.background_position.dx, to.background_position.dx, t),
+        dy: mix_f(from.background_position.dy, to.background_position.dy, t),
     };
     let mix_offset = |a: style::Offset, b: style::Offset| style::Offset { px: mix_f(a.px, b.px, t), pct: mix_f(a.pct, b.pct, t) };
     s.translate = (mix_offset(from.translate.0, to.translate.0), mix_offset(from.translate.1, to.translate.1));

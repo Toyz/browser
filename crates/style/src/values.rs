@@ -654,11 +654,19 @@ pub enum BgSize {
 pub struct BgPos {
     pub x: f32,
     pub y: f32,
+    /// Then moved this far, px (`-9px -125px` picks a sprite out of a sheet).
+    pub dx: f32,
+    pub dy: f32,
 }
 
 impl BgPos {
-    pub const TOP_LEFT: BgPos = BgPos { x: 0.0, y: 0.0 };
-    pub const CENTER: BgPos = BgPos { x: 0.5, y: 0.5 };
+    pub const TOP_LEFT: BgPos = BgPos { x: 0.0, y: 0.0, dx: 0.0, dy: 0.0 };
+    pub const CENTER: BgPos = BgPos { x: 0.5, y: 0.5, dx: 0.0, dy: 0.0 };
+
+    /// At fractions `x`, `y` of the free space, not moved.
+    pub const fn at(x: f32, y: f32) -> BgPos {
+        BgPos { x, y, dx: 0.0, dy: 0.0 }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

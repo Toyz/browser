@@ -1667,7 +1667,7 @@ mod tests {
         );
         let p = style_of(&doc, &s, "p");
         let g = &p.gradients.as_ref().unwrap()[0];
-        assert_eq!(g.shape, GradientShape::Radial { circle: true, size: RadialSize::FarthestCorner, at: BgPos { x: 0.3, y: 0.3 } });
+        assert_eq!(g.shape, GradientShape::Radial { circle: true, size: RadialSize::FarthestCorner, at: BgPos::at(0.3, 0.3) });
         assert_eq!(g.stops.len(), 3);
         assert_eq!(g.stops[1].pos, Some(StopPos::Fraction(0.6)));
         let em = style_of(&doc, &s, "em");
@@ -1693,7 +1693,7 @@ mod tests {
         assert_eq!(g.stops.len(), 4);
         let em = style_of(&doc, &s, "em");
         let g = &em.gradients.as_ref().unwrap()[0];
-        assert_eq!(g.shape, GradientShape::Conic { from: 90.0, at: BgPos { x: 0.25, y: 0.75 } });
+        assert_eq!(g.shape, GradientShape::Conic { from: 90.0, at: BgPos::at(0.25, 0.75) });
         assert_eq!(g.stops[1].pos, Some(StopPos::Px(90.0)));
         assert_eq!(g.stops[2].pos, Some(StopPos::Px(180.0)));
     }

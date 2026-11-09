@@ -946,6 +946,14 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
         };
         (d, size)
     };
+    // Pixel offsets (sprite sheets): moved from where alignment put it, and
+    // kept at its size rather than squeezed by the box.
+    let shifted = |el: Div, pos: BgPos| -> Div {
+        if pos.dx == 0.0 && pos.dy == 0.0 {
+            return el;
+        }
+        el.flex_shrink_0().relative().left(px(pos.dx)).top(px(pos.dy))
+    };
     let sized = |el: Div, size: BgSize, (w, h): (f32, f32)| -> Div {
         let ratio = if h > 0.0 { w / h } else { 1.0 };
         match size {
@@ -970,7 +978,7 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
         let path = crate::images::svg_asset_path(&image);
         let (d, size) = layer(s.mask_size, s.mask_position);
         let xf = transform::Xf::of_box(s);
-        let icon = sized(div(), size, (w, h)).child(
+        let icon = shifted(sized(div(), size, (w, h)), s.mask_position).child(
             svg()
                 .path(path)
                 .size_full()
@@ -986,7 +994,7 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
         BgSize::Contain => ObjectFit::Contain,
         _ => ObjectFit::Fill,
     };
-    let picture = sized(div(), size, (w, h)).child(img(image).size_full().object_fit(fit));
+    let picture = shifted(sized(div(), size, (w, h)), s.background_position).child(img(image).size_full().object_fit(fit));
     Some(d.child(picture).into_any_element())
 }
 

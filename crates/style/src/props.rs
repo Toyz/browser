@@ -1810,45 +1810,102 @@ fn parse_bg_size<'i>(p: &mut Parser<'i>) -> PResult<'i, BgSizeSpec> {
 }
 
 fn parse_bg_position<'i>(p: &mut Parser<'i>) -> PResult<'i, BgPos> {
+    // Each item: an edge keyword, `center`, a percentage (a fraction of the
+    // free space) or a length (an offset from the left/top, or from the
+    // edge a keyword just named: `right 10px`).
     let mut pos = BgPos::TOP_LEFT;
     let mut seen = 0;
     let mut x_set = false;
+    let mut y_set = false;
+    // The axis of a keyword waiting for its offset, and which way it counts.
+    let mut edge: Option<(bool, f32)> = None;
     while seen < 4 {
         let state = p.state();
-        let fraction = match p.next() {
+        enum Item {
+            Edge(bool, f32),
+            Center,
+            Fraction(f32),
+            Px(f32),
+        }
+        let item = match p.next() {
             Ok(Token::Ident(id)) => match id.to_ascii_lowercase().as_str() {
-                "left" => Some(("x", 0.0)),
-                "right" => Some(("x", 1.0)),
-                "top" => Some(("y", 0.0)),
-                "bottom" => Some(("y", 1.0)),
-                "center" => Some(("c", 0.5)),
+                "left" => Some(Item::Edge(true, 0.0)),
+                "right" => Some(Item::Edge(true, 1.0)),
+                "top" => Some(Item::Edge(false, 0.0)),
+                "bottom" => Some(Item::Edge(false, 1.0)),
+                "center" => Some(Item::Center),
                 _ => None,
             },
-            Ok(Token::Percentage { unit_value, .. }) => Some(("n", *unit_value)),
-            Ok(Token::Dimension { .. }) | Ok(Token::Number { .. }) => Some(("n", 0.0)),
+            Ok(Token::Percentage { unit_value, .. }) => Some(Item::Fraction(*unit_value)),
+            Ok(Token::Dimension { value, unit, .. }) => {
+                let v = match unit.to_ascii_lowercase().as_str() {
+                    "px" => *value,
+                    "em" | "rem" => *value * 16.0,
+                    _ => 0.0,
+                };
+                Some(Item::Px(v))
+            }
+            Ok(Token::Number { value, .. }) => Some(Item::Px(*value)),
             _ => None,
         };
-        let Some((axis, v)) = fraction else {
+        let Some(item) = item else {
             p.reset(&state);
             break;
         };
-        match axis {
-            "x" => {
-                pos.x = v;
-                x_set = true;
+        match item {
+            Item::Edge(is_x, v) => {
+                if is_x {
+                    pos.x = v;
+                    x_set = true;
+                } else {
+                    pos.y = v;
+                    y_set = true;
+                }
+                edge = Some((is_x, if v > 0.5 { -1.0 } else { 1.0 }));
+                seen += 1;
+                continue;
             }
-            "y" => pos.y = v,
-            "c" if !x_set && seen == 0 => {
-                pos.x = v;
-                pos.y = v;
+            Item::Center if !x_set && seen == 0 => {
+                pos.x = 0.5;
+                pos.y = 0.5;
             }
-            "c" => pos.y = v,
-            _ if !x_set => {
-                pos.x = v;
-                x_set = true;
+            Item::Center => {
+                if x_set {
+                    pos.y = 0.5;
+                    y_set = true;
+                } else {
+                    pos.x = 0.5;
+                    x_set = true;
+                }
             }
-            _ => pos.y = v,
+            Item::Fraction(v) | Item::Px(v) if edge.is_some() && matches!(item, Item::Px(_)) => {
+                // `right 10px`: from that edge.
+                let (is_x, sign) = edge.expect("checked");
+                if is_x { pos.dx = sign * v } else { pos.dy = sign * v }
+            }
+            Item::Fraction(v) => {
+                if !x_set {
+                    pos.x = v;
+                    x_set = true;
+                } else {
+                    pos.y = v;
+                    y_set = true;
+                }
+            }
+            Item::Px(v) => {
+                if !x_set {
+                    pos.x = 0.0;
+                    pos.dx = v;
+                    x_set = true;
+                } else {
+                    pos.y = 0.0;
+                    pos.dy = v;
+                    y_set = true;
+                }
+            }
         }
+        let _ = y_set;
+        edge = None;
         seen += 1;
     }
     if seen == 0 { err(p) } else { Ok(pos) }
