@@ -9,7 +9,7 @@ use url::Url;
 /// Largest document body we'll read, to keep a hostile page from eating memory.
 const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 
-const USER_AGENT: &str = concat!("browser/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("Feather/", env!("CARGO_PKG_VERSION"));
 
 /// A fetched document.
 #[derive(Debug, Clone)]
@@ -27,8 +27,16 @@ pub fn parse_input(input: &str) -> Result<Url> {
     if input.is_empty() {
         bail!("empty address");
     }
+    // Local paths: "/Users/me/page.html", "~/notes.txt".
+    if input.starts_with('/') || input.starts_with("~/") {
+        let path = match input.strip_prefix("~/") {
+            Some(rest) => std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rest),
+            None => input.into(),
+        };
+        return Url::from_file_path(&path).map_err(|()| anyhow::anyhow!("not a valid path: {input}"));
+    }
     match Url::parse(input) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(url),
+        Ok(url) if matches!(url.scheme(), "http" | "https" | "file") => Ok(url),
         // "localhost:8080" parses with scheme "localhost"; treat it as a host.
         Ok(_) if !input.contains("://") => {
             Url::parse(&format!("https://{input}")).context("not a valid address")
@@ -59,6 +67,9 @@ fn agent() -> &'static ureq::Agent {
 /// Fetch a URL, following redirects. Non-2xx responses still return their body
 /// (error pages are documents too).
 pub fn fetch(url: &Url) -> Result<Response> {
+    if url.scheme() == "file" {
+        return file::fetch(url);
+    }
     let mut response = agent()
         .get(url.as_str())
         .call()
@@ -140,6 +151,10 @@ pub fn fetch_bytes(url: &Url) -> Result<Vec<u8>> {
     if url.scheme() == "data" {
         return decode_data_url(url.as_str());
     }
+    if url.scheme() == "file" {
+        // Not cached: local files change under you while you edit them.
+        return file::read(url);
+    }
     if let Some(hit) = cache::get(url.as_str()) {
         return Ok((*hit).clone());
     }
@@ -166,6 +181,86 @@ fn fetch_bytes_uncached(url: &Url) -> Result<Vec<u8>> {
         .limit(MAX_RESOURCE_BYTES)
         .read_to_vec()
         .context("failed to read response body")
+}
+
+/// `file://` URLs: local files, and directories as listings.
+mod file {
+    use super::*;
+    use std::fmt::Write as _;
+
+    fn path(url: &Url) -> Result<std::path::PathBuf> {
+        url.to_file_path().map_err(|()| anyhow::anyhow!("not a local file: {url}"))
+    }
+
+    pub fn read(url: &Url) -> Result<Vec<u8>> {
+        let path = path(url)?;
+        let meta = std::fs::metadata(&path).with_context(|| format!("can't open {}", path.display()))?;
+        if meta.len() > MAX_RESOURCE_BYTES {
+            bail!("{} is too big", path.display());
+        }
+        std::fs::read(&path).with_context(|| format!("can't read {}", path.display()))
+    }
+
+    fn escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    pub fn fetch(url: &Url) -> Result<Response> {
+        let path = path(url)?;
+        let html = |url: Url, body: String| Response { url, status: 200, content_type: Some("text/html".into()), body };
+        if path.is_dir() {
+            // Relative links in the listing need the trailing slash.
+            let mut url = url.clone();
+            if !url.path().ends_with('/') {
+                url.set_path(&format!("{}/", url.path()));
+            }
+            return Ok(html(url, listing(&path)?));
+        }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        let image = matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tif" | "tiff");
+        if image {
+            // An image on its own: a page with just the image on it, like everyone does.
+            let name = escape(&path.file_name().unwrap_or_default().to_string_lossy());
+            let body = format!(
+                "<!doctype html><title>{name}</title><body style=\"margin:0;background:#0e0e0e;text-align:center\"><img src=\"{}\" style=\"max-width:100%\">",
+                escape(url.as_str())
+            );
+            return Ok(html(url.clone(), body));
+        }
+        let bytes = read(url)?;
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        let content_type = match ext.as_str() {
+            "html" | "htm" | "xhtml" => "text/html",
+            _ => "text/plain",
+        };
+        Ok(Response { url: url.clone(), status: 200, content_type: Some(content_type.into()), body })
+    }
+
+    fn listing(dir: &std::path::Path) -> Result<String> {
+        let mut entries: Vec<(bool, String)> = std::fs::read_dir(dir)
+            .with_context(|| format!("can't list {}", dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| (e.path().is_dir(), e.file_name().to_string_lossy().into_owned()))
+            .filter(|(_, name)| !name.starts_with('.'))
+            .collect();
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+        let title = escape(&dir.display().to_string());
+        let mut body = format!(
+            "<!doctype html><title>{title}</title><style>body{{font-family:system-ui;margin:2em 3em}} \
+             li{{list-style:none;padding:2px 0}} a{{text-decoration:none}} a:hover{{text-decoration:underline}} \
+             .d a{{font-weight:600}}</style><h1>Index of {title}</h1><ul>"
+        );
+        if dir.parent().is_some() {
+            body.push_str("<li class=d><a href=\"../\">⬆ Parent directory</a>");
+        }
+        for (is_dir, name) in entries {
+            let href: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>().replace('+', "%20");
+            let (class, icon, slash) = if is_dir { ("d", "📁", "/") } else { ("f", "📄", "") };
+            let _ = write!(body, "<li class={class}>{icon} <a href=\"{href}{slash}\">{}{slash}</a>", escape(&name));
+        }
+        body.push_str("</ul>");
+        Ok(body)
+    }
 }
 
 /// `data:[<mediatype>][;base64],<data>`
@@ -212,7 +307,9 @@ mod tests {
 
     #[test]
     fn rejects_other_schemes_and_empty() {
-        assert!(parse_input("file:///etc/passwd").is_err());
+        assert!(parse_input("ftp://example.com").is_err());
+        assert_eq!(parse_input("file:///etc/hosts").unwrap().as_str(), "file:///etc/hosts");
+        assert_eq!(parse_input("/tmp/a b.html").unwrap().as_str(), "file:///tmp/a%20b.html");
         assert_eq!(parse_input("localhost:8080").unwrap().as_str(), "https://localhost:8080/");
         assert!(parse_input("   ").is_err());
     }

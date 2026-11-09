@@ -125,12 +125,13 @@ impl Document {
         }
     }
 
+    /// (Unknown ids, e.g. from another document, have no children.)
     pub fn children(&self, id: NodeId) -> &[NodeId] {
-        &self.nodes[id].children
+        self.nodes.get(id).map(|n| &n.children[..]).unwrap_or(&[])
     }
 
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.nodes[id].parent
+        self.nodes.get(id)?.parent
     }
 
     pub fn len(&self) -> usize {

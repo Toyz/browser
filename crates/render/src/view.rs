@@ -98,7 +98,7 @@ impl Palette {
             Color::Foreground | Color::CurrentColor => self.foreground,
             Color::Link => self.link,
             Color::Muted => self.muted,
-            Color::Rgba(v) => rgba(v).into(),
+            Color::Rgba(v) | Color::LightDark(v, _) => rgba(v).into(),
         }
     }
 

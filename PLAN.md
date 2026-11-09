@@ -121,9 +121,13 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 **Done when:** you'd actually use it for reading.
 
 ### Phase 3.5 — Native browser frame
-- [ ] Custom title bar with tabs in the window frame (Chrome-style), using gpui-component's `TitleBar`
-- [ ] Tab strip: new/close/reorder, per-tab history and loading state, favicons
-- [ ] Omnibox-style URL bar in the frame
+- [x] Custom title bar with tabs in the window frame (Chrome-style), using gpui-component's `TitleBar`
+- [x] Tab strip: new/close (Cmd-T/W, middle click), per-tab history and loading state, favicons, Cmd-click opens links in background tabs
+- [ ] Tab reordering by drag
+- [x] Omnibox: history suggestions, inline completion, DuckDuckGo search, lock / not-secure / file icons
+- [x] Dark mode: the chrome follows the system; pages get `prefers-color-scheme`, and those opting in with `color-scheme` get dark defaults and `light-dark()`
+- [x] `file://` pages and directory listings (web pages can't load local files)
+- [x] New tab page with most-visited sites; history saved to disk
 
 **Done when:** it looks and feels like a real browser window, not an app with a URL field.
 
@@ -144,7 +148,8 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 - [ ] `MutationObserver`, `IntersectionObserver` (lazy-loading images use it)
 - [ ] Cookies and login flows
 - [x] Performance pass 1 (measured with `--bench`): engine/render crates optimized in dev builds; inline layouts + shaped text cached across frames in element state; shaped lines behind `Rc`; restyles reuse unchanged rows (keeping caches); hover restyles re-measure only visible rows; absolute children no longer block row splitting; in-memory subresource cache; back/forward page cache with scroll restore; loading bar. Wikipedia scroll: 39ms → ~1.3ms/frame.
-- [ ] Performance: incremental restyle (only affected subtrees), splitting single-column grids / flex columns into rows, web fonts off the critical path
+- [x] Performance pass 2: grids and flex columns split into rows (blizztrack's home page: 1 → 148 rows); links prerender on hover; text shaping cached by content across pages and tabs; images shared between consecutive pages show up instantly; hover restyles wait for scrolling to stop and only re-measure rows that changed
+- [ ] Performance: incremental restyle (only affected subtrees), web fonts off the critical path
 
 ---
 

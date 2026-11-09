@@ -70,6 +70,7 @@ pub fn prepare(bytes: Vec<u8>) -> Result<(Arc<Image>, f32, f32)> {
             imagesize::ImageType::Webp => ImageFormat::Webp,
             imagesize::ImageType::Bmp => ImageFormat::Bmp,
             imagesize::ImageType::Tiff => ImageFormat::Tiff,
+            imagesize::ImageType::Ico => ImageFormat::Ico,
             other => bail!("unsupported image format {other:?}"),
         };
         let size = imagesize::blob_size(&bytes).context("can't read image size")?;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use gpui_kit::SharedString;
 use page::{Document, NodeData, NodeId};
-use style::{
+use style::{Align, FlexDirection, Justify, 
     Color, ComputedStyle, ContentItem, Float, Pseudo, Display, Edges, FontFamily, Length, LineHeight, ListStyle, Overflow,
     Styler, TextTransform, WhiteSpace,
 };
@@ -106,16 +106,142 @@ impl Block {
     /// visibly changing it? Then its children become top-level rows, which is
     /// what keeps long pages virtualizable.
     fn is_splittable(&self) -> bool {
+        self.kind == BlockKind::Normal && self.sliceable_box()
+    }
+
+    /// The box itself (ignoring its layout mode) survives being sliced.
+    fn sliceable_box(&self) -> bool {
         let s = &self.style;
-        self.kind == BlockKind::Normal
-            && s.border_width.top == 0.0
+        // `min-height: 100vh` page wrappers: the content is taller anyway.
+        let min_height_ok = match s.min_height {
+            Length::Auto | Length::Percent(_) => true,
+            Length::Px(_) => self.children.len() > 3 && s.painted_background().is_none(),
+        };
+        s.border_width.top == 0.0
             && s.border_width.bottom == 0.0
             && s.border_radius.iter().all(|r| r.px_or_zero() == 0.0)
             && s.height.is_auto()
-            && s.min_height.is_auto()
+            && min_height_ok
             && s.max_height.is_auto()
             && s.overflow == Overflow::Visible
             && s.opacity >= 1.0
+            && s.position != style::Position::Absolute
+            && s.position != style::Position::Fixed
+    }
+
+    /// A grid or a flex column that can be cut between its rows of items:
+    /// returns it as a plain block whose children are the slices (or, for a
+    /// one-column stack, the items themselves), so the flattener can split
+    /// it like any other block. Long pages are mostly made of these now.
+    #[allow(clippy::result_large_err)]
+    fn into_stack(mut self) -> Result<Block, Block> {
+        let s = self.style.clone();
+        if !self.sliceable_box() || self.children.len() < 2 {
+            return Err(self);
+        }
+        let columns = match self.kind {
+            BlockKind::Grid => match s.grid_columns {
+                Some(n) if n >= 1 => n as usize,
+                _ => return Err(self),
+            },
+            BlockKind::Flex
+                if s.flex_direction == FlexDirection::Column
+                    && !s.flex_wrap
+                    && matches!(s.justify_content, None | Some(Justify::Start)) =>
+            {
+                1
+            }
+            _ => return Err(self),
+        };
+        // A single row of items (including our own slices) stays whole.
+        if self.children.len() <= columns {
+            return Err(self);
+        }
+        let spans = self.children.iter().any(|c| matches!(c, LayoutBox::Block(b) if b.style.grid_column.is_some()));
+        if spans {
+            return Err(self);
+        }
+        let gap = s.row_gap.px_or_zero();
+        let stretch = matches!(s.align_items, None | Some(Align::Stretch));
+        let children = std::mem::take(&mut self.children);
+        let mut out: Vec<LayoutBox> = Vec::new();
+        if columns == 1 && stretch {
+            // A stack of full-width items: they're just blocks in a row.
+            for (i, mut child) in children.into_iter().enumerate() {
+                if i > 0 && gap > 0.0 {
+                    // Gaps don't collapse with margins.
+                    if let LayoutBox::Block(b) = &mut child {
+                        let st = Arc::make_mut(&mut b.style);
+                        st.margin.top = Length::Px(st.margin.top.px_or_zero() + gap);
+                    } else {
+                        out.push(LayoutBox::Block(Block::spacer(&s, gap)));
+                    }
+                }
+                out.push(child);
+            }
+        } else {
+            // One copy of the container per row of items; the copies agree on
+            // column widths because they have the same template and width.
+            let mut slice_style = (*s).clone();
+            slice_style.margin = Edges::all(Length::ZERO);
+            slice_style.padding = Edges::all(Length::ZERO);
+            slice_style.border_width = Edges::all(0.0);
+            slice_style.background = None;
+            slice_style.background_image = None;
+            slice_style.background_url = None;
+            slice_style.width = Length::Auto;
+            slice_style.min_width = Length::Auto;
+            slice_style.max_width = Length::Auto;
+            slice_style.min_height = Length::Auto;
+            let mut items = children.into_iter().peekable();
+            let mut row = 0;
+            while items.peek().is_some() {
+                let group: Vec<LayoutBox> = items.by_ref().take(columns).collect();
+                let mut st = slice_style.clone();
+                if row > 0 {
+                    st.margin.top = Length::Px(gap);
+                }
+                out.push(LayoutBox::Block(Block {
+                    // Unique and stable: GPUI element ids come from these.
+                    id: (1 << 40) + (self.id << 16) + row,
+                    // No hover reporting: moving between slices would look like
+                    // leaving and re-entering the container.
+                    node: None,
+                    style: Arc::new(st),
+                    kind: self.kind.clone(),
+                    children: group,
+                    anchors: Vec::new(),
+                    min_content: self.min_content,
+                    max_content: self.max_content,
+                    colspan: 1,
+                    cell: None,
+                    heading: false,
+                }));
+                row += 1;
+            }
+        }
+        self.children = out;
+        self.kind = BlockKind::Normal;
+        Ok(self)
+    }
+
+    fn spacer(parent: &ComputedStyle, height: f32) -> Block {
+        let mut st = ComputedStyle::anonymous(parent);
+        st.display = style::Display::Block;
+        st.height = Length::Px(height);
+        Block {
+            id: usize::MAX / 2,
+            node: None,
+            style: Arc::new(st),
+            kind: BlockKind::Normal,
+            children: Vec::new(),
+            anchors: Vec::new(),
+            min_content: 0.0,
+            max_content: 0.0,
+            colspan: 1,
+            cell: None,
+            heading: false,
+        }
     }
 
     /// When split, does it need a wrapper layer around each slice (vs. a plain indent)?
@@ -345,12 +471,18 @@ impl LayoutTree {
     /// Keep `old`'s rows wherever this tree's are identical. Restyles (hover,
     /// resize) mostly change little; reusing the old rows keeps their
     /// paragraphs' `Arc`s, and with them the renderer's cached inline layouts.
-    pub fn reuse_unchanged(&mut self, old: &LayoutTree) {
-        for (new, old) in self.rows.iter_mut().zip(&old.rows) {
+    /// Keep `old`'s rows where nothing changed (so their cached layouts
+    /// survive) and return the indexes of the rows that did change.
+    pub fn reuse_unchanged(&mut self, old: &LayoutTree) -> Vec<usize> {
+        let mut changed = Vec::new();
+        for (ix, (new, old)) in self.rows.iter_mut().zip(&old.rows).enumerate() {
             if new == old {
                 *new = old.clone();
+            } else {
+                changed.push(ix);
             }
         }
+        changed
     }
 
     pub fn row_for_anchor(&self, fragment: &str) -> Option<usize> {
@@ -769,6 +901,10 @@ impl Builder<'_> {
             // The canvas takes the root's background, or else the body's.
             if matches!(tag, "html" | "body") && self.canvas.is_none() {
                 self.canvas = style.painted_background();
+                // A page in a dark color scheme gets a dark canvas.
+                if tag == "body" && self.canvas.is_none() && style.dark {
+                    self.canvas = Some(Color::Rgba(style::DARK_CANVAS));
+                }
                 if tag == "body" {
                     style.background = None;
                     style.background_image = None;
@@ -1206,7 +1342,7 @@ fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
 /// A CSS color as SVG understands it (theme colors use the light palette).
 fn color_hex(c: Color) -> String {
     let v = match c {
-        Color::Rgba(v) => v,
+        Color::Rgba(v) | Color::LightDark(v, _) => v,
         Color::Link => 0x1a0dabff,
         Color::Muted => 0x6b6b6bff,
         Color::Foreground | Color::CurrentColor => 0x1a1a1aff,
@@ -1702,6 +1838,14 @@ impl Flattener {
     }
 
     fn visit(&mut self, child: LayoutBox, indent_left: f32, indent_right: f32) {
+        // Grids and flex columns split between their rows of items.
+        let child = match child {
+            LayoutBox::Block(b) if matches!(b.kind, BlockKind::Grid | BlockKind::Flex) => match b.into_stack() {
+                Ok(stack) => return self.visit_block_contents(stack, indent_left, indent_right),
+                Err(b) => LayoutBox::Block(b),
+            },
+            other => other,
+        };
         match child {
             LayoutBox::Block(b) if b.is_splittable() => {
                 self.visit_block_contents(b, indent_left, indent_right);
@@ -2140,7 +2284,7 @@ mod tests {
         let html = "<p>one</p><p class=x>two</p><p>three</p>";
         let old = layout_css(html, ".x { color: red }");
         let mut new = layout_css(html, ".x { color: blue }");
-        new.reuse_unchanged(&old);
+        let _ = new.reuse_unchanged(&old);
         let para = |t: &LayoutTree, i: usize| match &t.rows[i].content {
             LayoutBox::Paragraph(p) => p.clone(),
             _ => panic!(),

@@ -341,7 +341,9 @@ impl StyleData {
     /// Which media conditions hold in `env`. Two environments with the same
     /// signature style a page identically (except for viewport units).
     pub fn signature(&self, env: &MediaEnv) -> Vec<bool> {
-        self.conditions.iter().map(|c| media::matches(c, env)).collect()
+        // The color scheme too: `color-scheme` / `light-dark()` follow it
+        // without any media query.
+        self.conditions.iter().map(|c| media::matches(c, env)).chain([env.dark]).collect()
     }
 
     /// A styler for this viewport: only the rules whose media conditions hold.
@@ -409,6 +411,10 @@ impl Styler {
             return style;
         }
 
+        if self.env.dark && el_is_root(doc, id) {
+            // `<meta name="color-scheme" content="light dark">`
+            style.dark = meta_allows_dark(doc);
+        }
         let el = ElementRef::new(doc, id, &self.state);
         let bloom = self.ancestor_bloom(doc, id);
         let mut caches = SelectorCaches::default();
@@ -639,6 +645,7 @@ impl Styler {
             Decl::Float(v) => s.float = *v,
             Decl::BorderBox(v) => s.border_box = *v,
             Decl::Cursor(v) => s.cursor = *v,
+            Decl::ColorScheme(v) => s.dark = *v && self.env.dark,
             Decl::VerticalAlign(crate::props::VAlignSpec::Keyword(k)) => s.vertical_align = *k,
             Decl::VerticalAlign(crate::props::VAlignSpec::Len(l)) => {
                 s.vertical_align = match len(l) {
@@ -776,8 +783,43 @@ fn non_auto(l: Length) -> Length {
     if l.is_auto() { Length::ZERO } else { l }
 }
 
+fn meta_allows_dark(doc: &Document) -> bool {
+    doc.descendants(doc.root()).any(|n| {
+        doc.element(n).is_some_and(|e| {
+            &*e.name.local == "meta"
+                && e.attr("name").is_some_and(|v| v.eq_ignore_ascii_case("color-scheme"))
+                && e.attr("content").is_some_and(|c| c.split_whitespace().any(|w| w.eq_ignore_ascii_case("dark")))
+        })
+    })
+}
+
+/// The browser's own colors in a dark color scheme (Chrome's).
+const DARK_TEXT: u32 = 0xe8eaedff;
+const DARK_LINK: u32 = 0x8ab4f8ff;
+const DARK_MUTED: u32 = 0x9aa0a6ff;
+/// The canvas behind a dark page.
+pub const DARK_CANVAS: u32 = 0x121212ff;
+
+/// `light-dark()` and system colors, for this element's color scheme.
+fn scheme_color(c: Color, dark: bool) -> Color {
+    match c {
+        Color::LightDark(l, d) => Color::Rgba(if dark { d } else { l }),
+        Color::Foreground if dark => Color::Rgba(DARK_TEXT),
+        Color::Link if dark => Color::Rgba(DARK_LINK),
+        Color::Muted if dark => Color::Rgba(DARK_MUTED),
+        c => c,
+    }
+}
+
 /// Post-cascade fixups.
 fn finalize(s: &mut ComputedStyle) {
+    let dark = s.dark;
+    s.color = scheme_color(s.color, dark);
+    for side in Side::ALL {
+        s.border_color.set(side, scheme_color(s.border_color.get(side), dark));
+    }
+    s.background = s.background.map(|c| scheme_color(c, dark));
+    s.background_image = s.background_image.map(|c| scheme_color(c, dark));
     for side in Side::ALL {
         if s.border_style.get(side) == BorderStyle::None {
             s.border_width.set(side, 0.0);

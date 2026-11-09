@@ -122,6 +122,110 @@ struct FlowState {
 /// it's for the same paragraph and no image has loaded since.
 type FlowCache = (Arc<Paragraph>, u64, Rc<RefCell<FlowState>>);
 
+/// A shaped span for measuring: its layout and each glyph's (byte index, x).
+type SpanShape = (Arc<LineLayout>, Rc<[(usize, Pixels)]>);
+
+/// Text shaping results shared by every paragraph, page and tab, keyed by
+/// content rather than by element. A site's header, nav and footer shape
+/// once and are reused on its next page; a restyle that only changes colors
+/// (hover) re-measures for free. GPUI's own line cache only lives a frame.
+mod shapes {
+    use super::*;
+    use std::hash::{Hash, Hasher};
+
+    /// Clear everything past this much cached text (crude, but a page's worth
+    /// of text is a few hundred KB).
+    const MAX_BYTES: usize = 8 << 20;
+
+    #[derive(PartialEq, Eq, Hash)]
+    struct MeasureKey {
+        text: SharedString,
+        font: Font,
+        size: u32,
+    }
+
+    /// Painting also depends on color and decorations.
+    #[derive(PartialEq, Eq)]
+    struct PaintKey {
+        measure: MeasureKey,
+        color: [u32; 4],
+        background: Option<[u32; 4]>,
+        underline: bool,
+        strikethrough: bool,
+    }
+
+    impl Hash for PaintKey {
+        fn hash<H: Hasher>(&self, h: &mut H) {
+            self.measure.hash(h);
+            self.color.hash(h);
+            self.background.hash(h);
+            (self.underline, self.strikethrough).hash(h);
+        }
+    }
+
+    fn bits(c: Hsla) -> [u32; 4] {
+        [c.h.to_bits(), c.s.to_bits(), c.l.to_bits(), c.a.to_bits()]
+    }
+
+    #[derive(Default)]
+    struct Caches {
+        measure: HashMap<MeasureKey, SpanShape>,
+        paint: HashMap<PaintKey, Rc<ShapedLine>>,
+        bytes: usize,
+    }
+
+    thread_local! {
+        static CACHES: RefCell<Caches> = RefCell::default();
+    }
+
+    fn charge(c: &mut Caches, len: usize) {
+        c.bytes += len;
+        if c.bytes > MAX_BYTES {
+            c.measure.clear();
+            c.paint.clear();
+            c.bytes = len;
+        }
+    }
+
+    pub(super) fn measure(ts: &WindowTextSystem, text: SharedString, size: Pixels, run: &TextRun) -> SpanShape {
+        let key = MeasureKey { text, font: run.font.clone(), size: f32::from(size).to_bits() };
+        if let Some(hit) = CACHES.with_borrow(|c| c.measure.get(&key).cloned()) {
+            return hit;
+        }
+        let layout = ts.layout_line(&key.text, size, std::slice::from_ref(run), None);
+        let mut xs: Vec<(usize, Pixels)> =
+            layout.runs.iter().flat_map(|run| run.glyphs.iter().map(|g| (g.index, g.position.x))).collect();
+        xs.sort_by_key(|&(i, _)| i);
+        let shape: SpanShape = (layout, xs.into());
+        CACHES.with_borrow_mut(|c| {
+            charge(c, key.text.len());
+            c.measure.insert(key, shape.clone());
+        });
+        shape
+    }
+
+    pub(super) fn paint(ts: &WindowTextSystem, text: SharedString, size: Pixels, run: &TextRun) -> Rc<ShapedLine> {
+        let key = PaintKey {
+            measure: MeasureKey { text, font: run.font.clone(), size: f32::from(size).to_bits() },
+            color: bits(run.color),
+            background: run.background_color.map(bits),
+            underline: run.underline.is_some(),
+            strikethrough: run.strikethrough.is_some(),
+        };
+        if let Some(hit) = CACHES.with_borrow(|c| c.paint.get(&key).cloned()) {
+            return hit;
+        }
+        // Behind an Rc: a ShapedLine is big (inline decoration runs), and
+        // copying it per run per frame showed up in profiles.
+        let line = Rc::new(ts.shape_line(key.measure.text.clone(), size, std::slice::from_ref(run), None));
+        CACHES.with_borrow_mut(|c| {
+            charge(c, key.measure.text.len());
+            c.paint.insert(key, line.clone());
+        });
+        line
+    }
+}
+
 /// CSS line-height around a glyph box: half the leading above, half below.
 fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
     let content = ascent + descent;
@@ -218,7 +322,7 @@ impl FlowState {
             span_starts.push(offset);
             offset += span.len;
         }
-        let mut shaped_spans: HashMap<u32, (Arc<LineLayout>, Vec<(usize, Pixels)>)> = HashMap::new();
+        let mut shaped_spans: HashMap<u32, SpanShape> = HashMap::new();
         let mut span_layout = |span_ix: u32| {
             shaped_spans
                 .entry(span_ix)
@@ -226,15 +330,9 @@ impl FlowState {
                     let start = span_starts[span_ix as usize];
                     let span = &para.spans[span_ix as usize];
                     // Newlines can't be shaped; a space keeps every byte offset.
-                    let text = para.text[start..start + span.len].replace('\n', " ");
-                    let layout = ts.layout_line(&text, px(span.style.font_size), &[text_run(text.len(), &span.style, &cx.palette)], None);
-                    let mut xs: Vec<(usize, Pixels)> = layout
-                        .runs
-                        .iter()
-                        .flat_map(|run| run.glyphs.iter().map(|g| (g.index, g.position.x)))
-                        .collect();
-                    xs.sort_by_key(|&(i, _)| i);
-                    (layout, xs)
+                    let text: SharedString = para.text[start..start + span.len].replace('\n', " ").into();
+                    let run = text_run(text.len(), &span.style, &cx.palette);
+                    shapes::measure(&ts, text, px(span.style.font_size), &run)
                 })
                 .clone()
         };
@@ -725,9 +823,7 @@ fn paint_flow(
                 .entry((wrap, start))
                 .or_insert_with(|| {
                     let run = text_run(text.len(), style, palette);
-                    // Behind an Rc: a ShapedLine is big (inline decoration runs),
-                    // and copying it per run per frame showed up in profiles.
-                    Rc::new(ts.shape_line(text, px(style.font_size), &[run], None))
+                    shapes::paint(&ts, text, px(style.font_size), &run)
                 })
                 .clone();
             let m = measured[ix];

@@ -150,6 +150,8 @@ pub enum Decl {
     VerticalAlign(VAlignSpec),
     BorderBox(bool),
     Cursor(Cursor),
+    /// `color-scheme` allows dark.
+    ColorScheme(bool),
     TextDecoration { underline: bool, strikethrough: bool },
     FontSize(FontSizeSpec),
     LineHeight(LineHeightSpec),
@@ -410,6 +412,13 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
             ("inline-end", Float::Right),
         ])?)),
         "clear" => out.push(D::Clear(ident(p)? != "none")),
+        "color-scheme" => {
+            let mut dark = false;
+            while let Ok(id) = p.expect_ident_cloned() {
+                dark |= id.eq_ignore_ascii_case("dark");
+            }
+            out.push(D::ColorScheme(dark));
+        }
         "cursor" => {
             // `cursor: url(x.cur), pointer`: skip images, take the first keyword we know.
             let mut cursor = None;
@@ -1378,8 +1387,12 @@ pub(crate) fn parse_color<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
         p.parse_nested_block(|p| {
             let light = parse_color(p)?;
             p.expect_comma()?;
-            let _dark = parse_color(p)?;
-            Ok(light)
+            let dark = parse_color(p)?;
+            Ok(match (light, dark) {
+                (Color::Rgba(l), Color::Rgba(d)) => Color::LightDark(l, d),
+                // Keywords on either side: no way to pick later; light it is.
+                _ => light,
+            })
         })
     }) {
         return Ok(c);
@@ -1539,7 +1552,7 @@ mod tests {
         assert_eq!(parse("color", "rgb(0 128 255 / 50%)"), vec![Decl::Color(Color::Rgba(0x0080ff80))]);
         assert_eq!(parse("color", "hsl(0 100% 50%)"), vec![Decl::Color(Color::Rgba(0xff0000ff))]);
         assert_eq!(parse("color", "LinkText"), vec![Decl::Color(Color::Link)]);
-        assert_eq!(parse("color", "light-dark(#111, #eee)"), vec![Decl::Color(Color::Rgba(0x111111ff))]);
+        assert_eq!(parse("color", "light-dark(#111, #eee)"), vec![Decl::Color(Color::LightDark(0x111111ff, 0xeeeeeeff))]);
         // oklch(62.8% 0.2577 29.23) ≈ pure red
         let Decl::Color(Color::Rgba(v)) = parse("color", "oklch(62.8% 0.2577 29.23)")[0] else { panic!() };
         assert!((v >> 24) > 0xf0 && ((v >> 16) & 0xff) < 0x10, "{v:08x}");

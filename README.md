@@ -1,6 +1,6 @@
-# browser
+# Feather 🪶
 
-**A web browser where the web page is not a web page.**
+**A web browser where the web page is not a web page.** Named Feather because it's so light it doesn't have a web engine.
 
 Normal browsers parse HTML into a DOM, run it through a rendering engine, and paint the result into a rectangle. This one parses HTML, runs its CSS through a cascade we wrote ourselves, and then turns the whole page into **native [GPUI](https://www.gpui.rs) UI elements**. GPUI is the GPU UI framework behind the Zed editor. Every paragraph you see is a GPUI element. Every `<div>` is a GPUI `div()`. The DOM is a slotmap the renderer reads once and then mostly ignores.
 
@@ -23,6 +23,9 @@ It is cursed. It also kind of works.
 - **No JavaScript.** Wikipedia gets its no-JS layout. We report `(scripting: none)` to media queries and render `<noscript>` content, like a browser from 2004 that happens to support `oklch()`.
 - **Mask icons are SVGs served through the app's asset system.** CSS `mask-image` icons are fetched, registered as fake app assets, and drawn with GPUI's `svg()` element tinted with the box's color, which is what a mask icon is anyway.
 - **Inline `<svg>` is serialized back into a string.** We parse the SVG into our tree, then write it back out as markup (with `currentColor` swapped for the actual color), percent-encode it into a `data:` URL, and "download" it through the image pipeline. Icons work.
+- **Links load before you click them.** Rest the pointer on a link for 60ms and Feather fetches, parses, styles and lays out the whole page in the background. By the time you click, it's done. This is the closest thing it has to speculative execution.
+- **Grids are sliced like bread.** A CSS grid with a hundred cards becomes fifty two-card grids stacked on top of each other, each one its own list row. They agree on column widths because they all have the same template and the same width. Nobody can tell.
+- **Text shaping is shared across the whole browser.** Shaped text is cached by content, not by element, so Wikipedia's sidebar shapes once and every other Wikipedia tab gets it free.
 - **The screenshot tool doesn't take screenshots.** It asks GPUI to render the window's frame into a texture offscreen. That's how the pictures above were made, with no screen-recording permission.
 
 ## What actually works
@@ -39,9 +42,12 @@ It is cursed. It also kind of works.
 - `:hover`, `:active`, `:target` (restyling the page live), `cursor`
 - `position: relative/absolute/fixed`
 
+- Tabs in the title bar, Chrome-style, with favicons; an omnibox with history suggestions, inline completion and search
+- Dark mode (`prefers-color-scheme`, `color-scheme`, `light-dark()`), `file://` pages and directory listings
+
 ## What doesn't (yet)
 
-JavaScript. Forms. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. Dark mode. Tabs (the plan is a Chrome-style tab strip in the window frame). See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt [Boa](https://github.com/boa-dev/boa) (a JavaScript engine written in Rust, because of course) onto a DOM that was never meant to exist.
+JavaScript. Forms. `position: sticky`. Text wrapping under floats. Text selection. Transitions. Web fonts. See [PLAN.md](PLAN.md) for the roadmap, including the part where we bolt [Boa](https://github.com/boa-dev/boa) (a JavaScript engine written in Rust, because of course) onto a DOM that was never meant to exist.
 
 ## Running it
 
@@ -54,6 +60,9 @@ Developed on macOS. GPUI also runs on Linux and Windows, but nobody has tried th
 | Keys | Action |
 |---|---|
 | Cmd-L | Address bar |
+| Cmd-T / Cmd-W | New tab / close tab |
+| Cmd-1…9, Ctrl-Tab | Switch tabs |
+| Cmd-click | Open link in a background tab |
 | Cmd-[ / Cmd-] | Back / forward |
 | Cmd-R | Reload |
 
@@ -64,7 +73,7 @@ Developed on macOS. GPUI also runs on Linux and Windows, but nobody has tried th
 cargo run --example dump -- https://news.ycombinator.com 20
 
 # Offscreen screenshots: render, save PNGs, quit
-cargo run --features screenshot -- https://example.com --screenshot out.png [--pages 3] [--row 40] [--size 1100x800] [--resize 600x800]
+cargo run --features screenshot -- https://example.com [more URLs as tabs] --screenshot out.png [--pages 3] [--row 40] [--size 1100x800] [--resize 600x800] [--dark|--light] [--type "omnibox text"] [--bench FRAMES]
 ```
 
 ## How it's put together
@@ -75,12 +84,12 @@ net ──► html ──► page (the "DOM") ──► style (cascade) ──�
 
 | Crate | What it does |
 |---|---|
-| [`net`](crates/net) | Fetching (ureq), `data:` URLs |
+| [`net`](crates/net) | Fetching (ureq), `data:` and `file:` URLs, the subresource cache |
 | [`html`](crates/html) | html5ever `TreeSink` into the page tree |
 | [`page`](crates/page) | The arena tree everything else reads |
 | [`style`](crates/style) | Stylesheet parsing, selector matching, the cascade, computed styles, the [UA stylesheet](crates/style/src/ua.css) |
 | [`render`](crates/render) | Box tree, float and table approximations, the inline layout engine, GPUI rendering |
-| [`shell`](crates/shell) | The window, toolbar, history, image loading, live restyling |
+| [`shell`](crates/shell) | Feather itself: tabs, omnibox, history, prerendering, image loading, live restyling |
 
 Built on [GPUI](https://www.gpui.rs) via [gpui-kit](https://gpui-kit.com), [html5ever](https://github.com/servo/html5ever), [cssparser and selectors](https://github.com/servo/stylo), and [Taffy](https://github.com/DioxusLabs/taffy) underneath GPUI.
 

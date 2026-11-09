@@ -16,7 +16,7 @@ pub mod values;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use cascade::{Pseudo, StyleData, StyleSource, Styler, collect_style_sources};
+pub use cascade::{DARK_CANVAS, Pseudo, StyleData, StyleSource, Styler, collect_style_sources};
 pub use selector::ElementState;
 pub use media::MediaEnv;
 pub use values::*;
@@ -98,6 +98,9 @@ pub struct ComputedStyle {
     pub list_style: ListStyle,
     pub visible: bool,
     pub cursor: Cursor,
+    /// The used color scheme is dark: the page allows it (`color-scheme`)
+    /// and the user prefers it.
+    pub dark: bool,
     pub custom: CustomProps,
 }
 
@@ -163,6 +166,7 @@ impl ComputedStyle {
             list_style: ListStyle::Disc,
             visible: true,
             cursor: Cursor::Auto,
+            dark: false,
             custom: CustomProps::default(),
         }
     }
@@ -185,6 +189,7 @@ impl ComputedStyle {
             list_style: parent.list_style,
             visible: parent.visible,
             cursor: parent.cursor,
+            dark: parent.dark,
             custom: parent.custom.clone(),
             ..Self::initial()
         }

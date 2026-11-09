@@ -224,6 +224,8 @@ pub enum Color {
     CurrentColor,
     /// 0xRRGGBBAA
     Rgba(u32),
+    /// `light-dark(a, b)`: resolved by the element's color scheme after the cascade.
+    LightDark(u32, u32),
 }
 
 impl Color {

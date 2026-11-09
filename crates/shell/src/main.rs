@@ -1,740 +1,353 @@
-//! The browser window: toolbar on top, the native page below.
+//! Feather: a web browser so light it doesn't have a web engine.
+//!
+//! The window: a Chrome-style tab strip in the title bar, a toolbar with the
+//! omnibox, and the active tab's page (native GPUI elements) below.
 
 extern crate gpui_kit as gpui;
 
 mod capture;
+mod history;
+mod loader;
+mod omnibox;
+mod tab;
 
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::Duration;
 
-use capture::{Args, CaptureJob};
-
+use capture::Args;
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, ThemeMode, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use futures::StreamExt as _;
-use futures::stream::FuturesUnordered;
-use page::NodeId;
-use render::{FontBook, ImageState, ImageStore, LayoutTree, Palette, RenderCx};
-use std::collections::{HashMap, HashSet};
-use style::ElementState;
+use history::History;
+use omnibox::{Omnibox, OmniboxEvent};
+use render::{FontBook, Palette};
+use tab::{Tab, TabEvent};
 use url::Url;
 
-actions!(browser, [Quit, Back, Forward, Reload, FocusAddressBar]);
+actions!(
+    feather,
+    [
+        Quit, Back, Forward, Reload, FocusAddressBar, NewTab, CloseTab, NextTab, PrevTab,
+        SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectLastTab,
+    ]
+);
 
-/// Concurrent image downloads per page.
-const IMAGE_CONCURRENCY: usize = 8;
-/// Don't fetch more than this many images for one page (lazy loading comes later).
-const MAX_IMAGES: usize = 300;
+/// Height of the tab strip (the title bar).
+const TAB_STRIP_HEIGHT: f32 = 40.;
+/// Height of the toolbar under it, including its bottom border.
+const TOOLBAR_HEIGHT: f32 = 45.;
+/// Everything above the page.
+pub const CHROME_HEIGHT: f32 = TAB_STRIP_HEIGHT + TOOLBAR_HEIGHT;
 
-/// A fetched, parsed and laid-out page.
-struct LoadedPage {
-    url: Url,
-    title: Option<String>,
-    layout: Arc<LayoutTree>,
-    /// Kept so the page can be restyled (window resizes, later: hover, JS).
-    doc: Option<Arc<page::Document>>,
-    styles: Option<style::StyleData>,
-    /// Which media conditions held when `layout` was built.
-    signature: Vec<bool>,
-}
+const TAB_MAX_WIDTH: f32 = 240.;
+const TAB_MIN_WIDTH: f32 = 48.;
+/// Radius of the active tab's top corners and the curves at its feet.
+const TAB_RADIUS: f32 = 8.;
 
-impl LoadedPage {
-    /// The element `#fragment` points at, for `:target`.
-    fn target(&self) -> Option<NodeId> {
-        let fragment = self.url.fragment()?;
-        let doc = self.doc.as_ref()?;
-        doc.descendants(doc.root())
-            .find(|&id| doc.element(id).and_then(|e| e.attr("id")) == Some(fragment))
-    }
-}
+/// `--dark` / `--light` from the command line, else follow the system.
+static FORCED_APPEARANCE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
 
-/// Fetch a subresource (stylesheet) as text, or `None` on any failure. Cached.
-fn fetch_text(url: &Url) -> Option<String> {
-    net::fetch_text_cached(url)
-}
-
-/// Fetch → parse → style → build boxes. Runs on a background thread.
-fn load(url: &Url, env: style::MediaEnv) -> anyhow::Result<LoadedPage> {
-    let response = net::fetch(url)?;
-    let is_html = match &response.content_type {
-        Some(ct) => ct.contains("html"),
-        None => response.body.trim_start().starts_with('<'),
-    };
-    if !is_html {
-        return Ok(LoadedPage {
-            url: response.url,
-            title: None,
-            layout: Arc::new(render::build_plain_text(&response.body)),
-            doc: None,
-            styles: None,
-            signature: Vec::new(),
-        });
-    }
-    let doc = html::parse(&response.body, response.url.clone());
-    let styles = style::StyleData::for_document(&doc, &fetch_text);
-    // `:target` from the requested URL's fragment.
-    let target = url.fragment().and_then(|f| {
-        doc.descendants(doc.root())
-            .find(|&id| doc.element(id).and_then(|e| e.attr("id")) == Some(f))
-    });
-    let state = Arc::new(ElementState { target, ..Default::default() });
-    let layout = render::build(&doc, &styles.styler_with_state(env, state));
-    Ok(LoadedPage {
-        url: response.url,
-        title: doc.title(),
-        layout: Arc::new(layout),
-        signature: styles.signature(&env),
-        doc: Some(Arc::new(doc)),
-        styles: Some(styles),
+pub fn is_dark(window: &Window) -> bool {
+    FORCED_APPEARANCE.get().copied().flatten().unwrap_or_else(|| {
+        matches!(window.appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark)
     })
 }
 
-/// The media environment for the page area of `window`.
-fn media_env(window: &Window) -> style::MediaEnv {
-    let viewport = window.viewport_size();
-    style::MediaEnv {
-        width: f32::from(viewport.width),
-        // Minus the toolbar.
-        height: f32::from(viewport.height) - 48.0,
-        ..Default::default()
+/// The browser's own surfaces, Chrome-style: a darker tab strip, with the
+/// active tab and the toolbar in one lighter color so the tab "is" the toolbar.
+#[derive(Clone, Copy)]
+pub struct ChromeColors {
+    pub strip: Hsla,
+    pub surface: Hsla,
+    /// The omnibox, when not focused.
+    pub field: Hsla,
+}
+
+impl ChromeColors {
+    pub fn get(cx: &App) -> Self {
+        if cx.theme().mode.is_dark() {
+            Self { strip: rgb(0x1b1c1f).into(), surface: rgb(0x2b2c30).into(), field: rgb(0x1b1c1f).into() }
+        } else {
+            Self { strip: rgb(0xdfe3e8).into(), surface: rgb(0xffffff).into(), field: rgb(0xeef1f4).into() }
+        }
     }
 }
 
-/// Same document, ignoring the fragment?
-fn same_document(a: &Url, b: &Url) -> bool {
-    a.as_str().split('#').next() == b.as_str().split('#').next()
+/// Match the chrome to the appearance.
+fn apply_theme(window: &mut Window, cx: &mut App) {
+    let mode = if is_dark(window) { ThemeMode::Dark } else { ThemeMode::Light };
+    Theme::change(mode, Some(window), cx);
 }
 
-struct Browser {
-    focus_handle: FocusHandle,
+struct OpenTab {
+    tab: Entity<Tab>,
+    _subscriptions: [Subscription; 2],
+}
+
+struct Feather {
     palette: Palette,
-    url_bar: Entity<InputState>,
-    history: Vec<Url>,
-    history_ix: usize,
-    /// Pages we navigated away from, kept so back/forward is instant
-    /// (history index → page and where it was scrolled to).
-    page_cache: HashMap<usize, (LoadedPage, ListOffset)>,
-    /// History index of the page on screen (it stays up while the next loads).
-    page_ix: usize,
-    page: Option<LoadedPage>,
-    error: Option<String>,
-    list_state: ListState,
-    hovered_link: Option<Url>,
-    loading: Option<Task<()>>,
-    images: ImageStore,
-    images_pending: usize,
-    /// Bumped per finished image (invalidates cached inline layouts).
-    images_generation: u64,
-    _image_task: Option<Task<()>>,
-    _restyle: Option<Task<()>>,
-    /// Elements whose blocks report the pointer inside them.
-    hover_blocks: HashSet<NodeId>,
-    /// The inline element under the pointer, per paragraph.
-    hover_inline: Option<(usize, NodeId)>,
-    mouse_down: bool,
-    /// The interaction state the current layout was styled with.
-    element_state: Arc<ElementState>,
-    /// Screenshot job from the command line, run once the first page loads.
-    capture: Option<CaptureJob>,
-    _capture_task: Option<Task<()>>,
+    tabs: Vec<OpenTab>,
+    active: usize,
+    omnibox: Entity<Omnibox>,
     _subscriptions: Vec<Subscription>,
 }
 
-impl Browser {
+impl Feather {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let url_bar = cx.new(|cx| InputState::new(window, cx).placeholder("Enter an address"));
-        let subscription = cx.subscribe_in(&url_bar, window, |this, input, event, window, cx| {
-            if let InputEvent::PressEnter { .. } = event {
-                let text = input.read(cx).value();
-                match net::parse_input(&text) {
-                    Ok(url) => this.navigate(url, window, cx),
-                    Err(err) => {
-                        this.error = Some(format!("{err:#}"));
-                        cx.notify();
-                    }
-                }
-            }
-        });
-        url_bar.read(cx).focus_handle(cx).focus(window, cx);
-        let resize = cx.observe_window_bounds(window, |this, window, cx| this.viewport_changed(window, cx));
-        let fonts = Rc::new(FontBook::new(cx.text_system().all_font_names()));
-        Self {
-            focus_handle: cx.focus_handle(),
-            palette: Palette::light(fonts),
-            url_bar,
-            history: Vec::new(),
-            history_ix: 0,
-            page_cache: HashMap::new(),
-            page_ix: 0,
-            page: None,
-            error: None,
-            // Measure well beyond the viewport so fast scrolling stays smooth.
-            list_state: ListState::new(0, ListAlignment::Top, px(2000.)),
-            hovered_link: None,
-            loading: None,
-            images: ImageStore::default(),
-            images_pending: 0,
-            images_generation: 0,
-            _image_task: None,
-            _restyle: None,
-            hover_blocks: HashSet::new(),
-            hover_inline: None,
-            mouse_down: false,
-            element_state: Arc::default(),
-            capture: None,
-            _capture_task: None,
-            _subscriptions: vec![subscription, resize],
-        }
-    }
-
-    /// Go somewhere new: push onto history (dropping any forward entries).
-    fn navigate(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.history.is_empty() {
-            self.history.truncate(self.history_ix + 1);
-            self.page_cache.retain(|&ix, _| ix <= self.history_ix);
-        }
-        self.history.push(url.clone());
-        self.history_ix = self.history.len() - 1;
-        self.show(url, false, window, cx);
-    }
-
-    fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.history_ix > 0 {
-            self.go_to_history(self.history_ix - 1, window, cx);
-        }
-    }
-
-    fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.history_ix + 1 < self.history.len() {
-            self.go_to_history(self.history_ix + 1, window, cx);
-        }
-    }
-
-    /// Back/forward: restore the page from memory if we still have it.
-    fn go_to_history(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.history[ix].clone();
-        let same_page = self.page.as_ref().is_some_and(|p| same_document(&p.url, &url));
-        if same_page {
-            self.history_ix = ix;
-            self.show(url, false, window, cx);
-            return;
-        }
-        self.history_ix = ix;
-        let Some((page, scroll)) = self.page_cache.remove(&ix) else {
-            self.show(url, false, window, cx);
-            return;
-        };
-        self.stash_page();
-        self.page_ix = ix;
-        self.loading = None;
-        self.error = None;
-        self.set_url_bar(page.url.as_str(), window, cx);
-        window.set_window_title(page.title.as_deref().unwrap_or(page.url.as_str()));
-        self.list_state.reset(page.layout.rows.len());
-        self.list_state.scroll_to(scroll);
-        self.page = Some(page);
-        self.hover_blocks.clear();
-        self.hover_inline = None;
-        self.element_state = Arc::default();
-        self.images.borrow_mut().clear();
-        self.load_images(cx);
-        // The window may have been resized since.
-        self.viewport_changed(window, cx);
-        cx.notify();
-    }
-
-    /// Keep the current page (and scroll position) for back/forward, and
-    /// forget pages too far away in history.
-    fn stash_page(&mut self) {
-        const KEEP: usize = 8;
-        if let Some(page) = self.page.take() {
-            let scroll = self.list_state.logical_scroll_top();
-            self.page_cache.insert(self.page_ix, (page, scroll));
-        }
-        let here = self.history_ix;
-        self.page_cache.retain(|&ix, _| ix.abs_diff(here) <= KEEP);
-    }
-
-    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(url) = self.history.get(self.history_ix).cloned() {
-            self.show(url, true, window, cx);
-        }
-    }
-
-    /// Display `url`: scroll within the current page if only the fragment differs,
-    /// otherwise fetch it. Doesn't touch history.
-    fn show(&mut self, url: Url, force_reload: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.set_url_bar(url.as_str(), window, cx);
-        self.error = None;
-        self.focus_handle.focus(window, cx);
-
-        if !force_reload
-            && let Some(page) = &self.page
-            && same_document(&page.url, &url)
-        {
-            self.loading = None;
-            if let Some(page) = &mut self.page {
-                page.url = url.clone();
-            }
-            self.page_ix = self.history_ix;
-            self.scroll_to_fragment(url.fragment());
-            // `:target` moved.
-            self.interaction_changed(window, cx);
-            cx.notify();
-            return;
-        }
-
-        cx.notify();
-        // Media queries see the page area's size.
-        let env = media_env(window);
-        self.loading = Some(cx.spawn_in(window, async move |this, cx| {
-            let result = cx
-                .background_spawn({
-                    let url = url.clone();
-                    async move { load(&url, env) }
-                })
-                .await;
-            this.update_in(cx, |this, window, cx| {
-                this.loading = None;
-                match result {
-                    Ok(mut page) => {
-                        // Keep the fragment across redirects so #anchors still work.
-                        if page.url.fragment().is_none() && url.fragment().is_some() {
-                            page.url.set_fragment(url.fragment());
-                        }
-                        // Redirects may have moved us; record where we actually are.
-                        this.history[this.history_ix] = page.url.clone();
-                        this.set_url_bar(page.url.as_str(), window, cx);
-                        window.set_window_title(page.title.as_deref().unwrap_or(page.url.as_str()));
-                        this.list_state.reset(page.layout.rows.len());
-                        let fragment = page.url.fragment().map(str::to_owned);
-                        // Keep the page we're leaving for back/forward (not on reload).
-                        if this.page_ix != this.history_ix {
-                            this.stash_page();
-                        }
-                        this.page_ix = this.history_ix;
-                        this.page = Some(page);
-                        this.hover_blocks.clear();
-                        this.hover_inline = None;
-                        this.element_state = Arc::default();
-                        this.images.borrow_mut().clear();
-                        this.scroll_to_fragment(fragment.as_deref());
-                        this.load_images(cx);
-                    }
-                    Err(err) => this.error = Some(format!("{err:#}")),
-                }
-                if let Some(job) = this.capture.take() {
-                    this.start_capture(job, window, cx);
-                }
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    /// Fetch the page's images in the background; each one re-measures the rows
-    /// showing it when it arrives.
-    fn load_images(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = &self.page else { return };
-        // Everything not already loaded or failed (this replaces any previous
-        // loader task, so in-flight images are queued again too).
-        let jobs: Vec<Url> = {
-            let mut store = self.images.borrow_mut();
-            let jobs: Vec<Url> = page
-                .layout
-                .images
-                .iter()
-                .map(|(url, _)| url)
-                .chain(page.layout.fixed_images.iter())
-                .take(MAX_IMAGES)
-                .map(|url| (**url).clone())
-                .filter(|url| matches!(store.get(url), None | Some(ImageState::Loading)))
-                .collect();
-            for url in &jobs {
-                store.insert(url.clone(), ImageState::Loading);
-            }
-            jobs
-        };
-        self.images_pending = jobs.len();
-        if jobs.is_empty() {
-            self._image_task = None;
-            return;
-        }
-        self._image_task = Some(cx.spawn(async move |this, cx| {
-            let start = |cx: &mut AsyncApp, url: Url| {
-                let task = cx.background_executor().spawn({
-                    let url = url.clone();
-                    async move { net::fetch_bytes(&url).and_then(render::images::prepare) }
-                });
-                async move { (url, task.await) }
-            };
-            let mut queue = jobs.into_iter();
-            let mut in_flight = FuturesUnordered::new();
-            for job in queue.by_ref().take(IMAGE_CONCURRENCY) {
-                in_flight.push(start(cx, job));
-            }
-            while let Some((url, result)) = in_flight.next().await {
-                if let Some(job) = queue.next() {
-                    in_flight.push(start(cx, job));
-                }
-                let updated = this.update(cx, |this, cx| {
-                    let debug = std::env::var_os("BROWSER_DEBUG").is_some();
-                    let state = match result {
-                        Ok((image, width, height)) => {
-                            if debug {
-                                eprintln!("image loaded: {url}");
-                            }
-                            ImageState::Ready { image, width, height }
-                        }
-                        Err(err) => {
-                            if debug {
-                                eprintln!("image failed: {url}: {err:#}");
-                            }
-                            ImageState::Failed
-                        }
-                    };
-                    // Re-measure the rows (of the *current* layout) showing it.
-                    let rows = this
-                        .page
-                        .as_ref()
-                        .and_then(|p| p.layout.images.iter().find(|(u, _)| **u == url))
-                        .map(|(_, rows)| rows.clone())
-                        .unwrap_or_default();
-                    this.images.borrow_mut().insert(url, state);
-                    this.images_pending = this.images_pending.saturating_sub(1);
-                    this.images_generation += 1;
-                    for row in rows {
-                        this.list_state.remeasure_items(row..row + 1);
-                    }
-                    cx.notify();
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-
-    /// The window was resized: if a media query now evaluates differently,
-    /// restyle and re-lay-out the page (debounced, in the background).
-    fn viewport_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let env = media_env(window);
-        let Some(page) = &self.page else { return };
-        let Some(styles) = &page.styles else { return };
-        if styles.signature(&env) != page.signature {
-            self.restyle(Duration::from_millis(150), window, cx);
-        }
-    }
-
-    /// The interaction state implied by what's under the pointer etc.
-    fn current_state(&self) -> ElementState {
-        let mut state = ElementState::default();
-        let Some(page) = &self.page else { return state };
-        let Some(doc) = &page.doc else { return state };
-        // :hover covers the element and all its ancestors, including ones whose
-        // boxes were flattened away (they have no GPUI element to report).
-        let deepest = self.hover_blocks.iter().copied().chain(self.hover_inline.map(|(_, n)| n));
-        for node in deepest {
-            let mut n = Some(node);
-            while let Some(id) = n {
-                if !state.hovered.insert(id) {
-                    break;
-                }
-                n = doc.parent(id);
-            }
-        }
-        if self.mouse_down {
-            state.active = state.hovered.clone();
-        }
-        state.target = page.target();
-        state
-    }
-
-    /// Hover/active state changed: restyle if the page has rules that care.
-    fn interaction_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let has_rules = self
-            .page
-            .as_ref()
-            .and_then(|p| p.styles.as_ref())
-            .is_some_and(|s| s.has_state_rules());
-        if has_rules && self.current_state() != *self.element_state {
-            self.restyle(Duration::from_millis(16), window, cx);
-        }
-    }
-
-    /// Re-run style + layout in the background with the current viewport and
-    /// interaction state, then swap it in, keeping the scroll position.
-    fn restyle(&mut self, delay: Duration, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = &self.page else { return };
-        let (Some(doc), Some(styles)) = (page.doc.clone(), page.styles.clone()) else { return };
-        self._restyle = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(delay).await;
-            let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
-            let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
-            let signature = styles.signature(&env);
-            let Ok(old) = this.update(cx, |this, _| this.page.as_ref().map(|p| p.layout.clone())) else { return };
-            let layout = cx
-                .background_spawn({
-                    let state = state.clone();
-                    async move {
-                        let mut layout = render::build(&doc, &styles.styler_with_state(env, state));
-                        if let Some(old) = old {
-                            layout.reuse_unchanged(&old);
-                        }
-                        layout
-                    }
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                let Some(page) = &mut this.page else { return };
-                let same_shape = page.layout.rows.len() == layout.rows.len();
-                page.layout = Arc::new(layout);
-                page.signature = signature;
-                this.element_state = state;
-                if same_shape {
-                    // Usually just colors/decorations changed. Re-measure only
-                    // what's on screen: forgetting every row's height makes the
-                    // next scroll jump past rows the list hasn't measured.
-                    let top = this.list_state.logical_scroll_top().item_ix;
-                    let rows = page.layout.rows.len();
-                    this.list_state.remeasure_items(top..(top + 40).min(rows));
-                } else {
-                    // Keep roughly the same place in the page.
-                    let top = this.list_state.logical_scroll_top();
-                    let rows = page.layout.rows.len();
-                    this.list_state.reset(rows);
-                    this.list_state.scroll_to(ListOffset {
-                        item_ix: top.item_ix.min(rows.saturating_sub(1)),
-                        offset_in_item: top.offset_in_item,
-                    });
-                }
-                this.load_images(cx);
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    /// Take the screenshots requested on the command line, then quit.
-    fn start_capture(&mut self, job: CaptureJob, window: &mut Window, cx: &mut Context<Self>) {
-        // Leave a little overlap between pages so nothing falls in a seam.
-        let page_step = f32::from(window.viewport_size().height) - 48.0 - 40.0;
-        let settle = Duration::from_millis(600);
-        self._capture_task = Some(cx.spawn_in(window, async move |this, cx| {
-            // Wait (a while) for images, then let the list lay out and measure.
-            for _ in 0..50 {
-                let pending = this.update(cx, |this, _| this.images_pending).unwrap_or(0);
-                if pending == 0 {
-                    break;
-                }
-                cx.background_executor().timer(Duration::from_millis(200)).await;
-            }
-            if let Some((w, h)) = job.resize {
-                cx.update(|window, _| window.resize(size(px(w), px(h)))).ok();
-                // Debounce + background restyle + image loads for the new layout.
-                cx.background_executor().timer(Duration::from_millis(1200)).await;
-                for _ in 0..50 {
-                    let pending = this.update(cx, |this, _| this.images_pending).unwrap_or(0);
-                    if pending == 0 {
-                        break;
-                    }
-                    cx.background_executor().timer(Duration::from_millis(200)).await;
-                }
-            }
-            if let Some(row) = job.row {
-                this.update(cx, |this, cx| {
-                    this.list_state.scroll_to(ListOffset { item_ix: row, offset_in_item: px(0.) });
-                    cx.notify();
-                })
-                .ok();
-            }
-            cx.background_executor().timer(settle).await;
-            if let Some((x, y)) = job.mouse {
-                // Draw so hitboxes exist, then hover the point and let restyling run.
-                cx.update(|window, cx| {
-                    window.draw(cx).clear(cx);
-                    window.dispatch_event(
-                        PlatformInput::MouseMove(MouseMoveEvent {
-                            position: point(px(x), px(y)),
-                            pressed_button: None,
-                            modifiers: Modifiers::default(),
-                        }),
-                        cx,
-                    );
-                })
-                .ok();
-                cx.background_executor().timer(Duration::from_millis(500)).await;
-            }
-            if let Some(frames) = job.bench {
-                // Scroll in small steps, timing each full frame (layout + paint).
-                let mut times = Vec::with_capacity(frames);
-                let rows = this.update(cx, |this, _| this.page.as_ref().map_or(0, |p| p.layout.rows.len())).unwrap_or(0);
-                for f in 0..frames {
-                    // Step through the whole page (a row at a time, deterministic).
-                    this.update(cx, |this, cx| {
-                        // One row per frame: about what a fast trackpad scroll reveals.
-                        let item_ix = f.min(rows.saturating_sub(1));
-                        this.list_state.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) });
-                        cx.notify();
-                    })
-                    .ok();
-                    let t = std::time::Instant::now();
-                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
-                    times.push(t.elapsed().as_secs_f64() * 1000.0);
-                }
-                times.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let avg = times.iter().sum::<f64>() / times.len() as f64;
-                let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
-                println!(
-                    "bench: {frames} frames, avg {avg:.2}ms, p95 {p95:.2}ms, max {:.2}ms",
-                    times.last().unwrap()
-                );
-            }
-            for page in 0..job.pages {
-                let step = if page == 0 { job.scroll } else { page_step };
-                // Scroll in small steps, drawing in between: the list measures rows
-                // lazily, so one big jump would skip past unmeasured (zero-height) rows.
-                let mut remaining = step;
-                while remaining > 0.0 {
-                    let chunk = remaining.min(300.0);
-                    remaining -= chunk;
-                    this.update(cx, |this, cx| {
-                        this.list_state.scroll_by(px(chunk));
-                        cx.notify();
-                    })
-                    .ok();
-                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
-                }
-                cx.background_executor().timer(settle).await;
-                let path = job.path_for(page);
-                // Draw explicitly (a background window may not be getting display
-                // refreshes), twice: GPUI decodes images on first use, so the first
-                // frame kicks off decoding and a later one shows the result.
-                cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
-                cx.background_executor().timer(Duration::from_millis(400)).await;
-                cx.update(|window, cx| {
-                    window.draw(cx).clear(cx);
-                    match capture::save_frame(window, &path) {
-                        Ok(()) => println!("saved {}", path.display()),
-                        Err(err) => eprintln!("screenshot failed: {err:#}"),
-                    }
-                })
-                .ok();
-            }
-            cx.update(|_, cx| cx.quit()).ok();
-        }));
-    }
-
-    fn scroll_to_fragment(&self, fragment: Option<&str>) {
-        let row = fragment
-            .and_then(|f| self.page.as_ref()?.layout.row_for_anchor(f))
-            .unwrap_or(0);
-        self.list_state.scroll_to(ListOffset {
-            item_ix: row,
-            offset_in_item: px(0.),
-        });
-    }
-
-    fn set_url_bar(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let text = SharedString::from(text.to_owned());
-        self.url_bar
-            .update(cx, |state, cx| state.set_value(text, window, cx));
-    }
-
-    fn render_cx(&self, cx: &Context<Self>) -> RenderCx {
-        let click = cx.entity().downgrade();
-        let hover = click.clone();
-        let block_hover = click.clone();
-        let inline_hover = click.clone();
-        let track_hover = self
-            .page
-            .as_ref()
-            .and_then(|p| p.styles.as_ref())
-            .is_some_and(|s| s.has_state_rules());
-        RenderCx {
-            palette: self.palette.clone(),
-            images: self.images.clone(),
-            images_generation: self.images_generation,
-            track_hover,
-            on_block_hover: Rc::new(move |node, hovered, window, cx| {
-                block_hover
-                    .update(cx, |this, cx| {
-                        let changed = if hovered {
-                            this.hover_blocks.insert(node)
-                        } else {
-                            this.hover_blocks.remove(&node)
-                        };
-                        if changed && std::env::var_os("BROWSER_DEBUG").is_some() {
-                            let text = this
-                                .page
-                                .as_ref()
-                                .and_then(|p| Some(p.doc.as_ref()?.text_content(node)))
-                                .unwrap_or_default();
-                            let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
-                            eprintln!("block hover {hovered}: {node:?} {text:?}");
-                        }
-                        if changed {
-                            this.interaction_changed(window, cx);
-                        }
-                    })
-                    .ok();
-            }),
-            on_inline_hover: Rc::new(move |para, node, window, cx| {
-                inline_hover
-                    .update(cx, |this, cx| {
-                        let next = match node {
-                            Some(node) => Some((para, node)),
-                            // Leaving this paragraph only clears hover if it was this one's.
-                            None if this.hover_inline.is_some_and(|(p, _)| p == para) => None,
-                            None => return,
-                        };
-                        if this.hover_inline != next {
-                            if std::env::var_os("BROWSER_DEBUG").is_some() {
-                                let text = node
-                                    .and_then(|n| Some(this.page.as_ref()?.doc.as_ref()?.text_content(n)))
-                                    .unwrap_or_default();
-                                eprintln!("inline hover: paragraph {para} → {node:?} {:?}", text.trim());
-                            }
-                            this.hover_inline = next;
-                            this.interaction_changed(window, cx);
-                        }
-                    })
-                    .ok();
-            }),
-            on_link_click: Rc::new(move |url, window, cx| {
+        let omnibox = cx.new(|cx| Omnibox::new(window, cx));
+        let navigate = cx.subscribe_in(&omnibox, window, |this, _, event: &OmniboxEvent, window, cx| match event {
+            OmniboxEvent::Navigate(url) => {
                 let url = url.clone();
-                click
-                    .update(cx, |this, cx| this.navigate(url, window, cx))
-                    .ok();
-            }),
-            on_link_hover: Rc::new(move |url, _window, cx| {
-                hover
-                    .update(cx, |this, cx| {
-                        if this.hovered_link.as_ref() != url {
-                            this.hovered_link = url.cloned();
-                            cx.notify();
-                        }
-                    })
-                    .ok();
-            }),
+                this.active_tab().update(cx, |tab, cx| tab.navigate(url, window, cx));
+            }
+        });
+        let resize = cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+            for open in &this.tabs {
+                open.tab.update(cx, |tab, cx| tab.viewport_changed(window, cx));
+            }
+        });
+        // Dark mode: the chrome follows, and pages see `prefers-color-scheme`.
+        let appearance = cx.observe_window_appearance(window, |this: &mut Self, window, cx| {
+            apply_theme(window, cx);
+            for open in &this.tabs {
+                open.tab.update(cx, |tab, cx| tab.viewport_changed(window, cx));
+            }
+            cx.notify();
+        });
+        apply_theme(window, cx);
+        let fonts = Rc::new(FontBook::new(cx.text_system().all_font_names()));
+        let mut this = Self {
+            palette: Palette::light(fonts),
+            tabs: Vec::new(),
+            active: 0,
+            omnibox,
+            _subscriptions: vec![navigate, resize, appearance],
+        };
+        this.open_tab(None, true, window, cx);
+        this
+    }
+
+    fn active_tab(&self) -> Entity<Tab> {
+        self.tabs[self.active].tab.clone()
+    }
+
+    /// Open a tab after the active one (or at the end, for Cmd-T).
+    fn open_tab(&mut self, url: Option<Url>, activate: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<Tab> {
+        let palette = self.palette.clone();
+        let tab = cx.new(|cx| Tab::new(palette, cx));
+        let observe = cx.observe_in(&tab, window, |this, tab, window, cx| {
+            if tab == this.active_tab() {
+                this.sync_chrome(window, cx);
+            }
+            cx.notify();
+        });
+        let events = cx.subscribe_in(&tab, window, |this, _, event: &TabEvent, window, cx| match event {
+            TabEvent::OpenInNewTab(url) => {
+                this.open_tab(Some(url.clone()), false, window, cx);
+            }
+            TabEvent::TypeInOmnibox(text) => {
+                // A character at a time, like a person (autocomplete reacts to each).
+                this.omnibox.update(cx, |o, cx| {
+                    o.focus(window, cx);
+                    for end in text.char_indices().map(|(i, c)| i + c.len_utf8()) {
+                        o.type_text(&text[..end], window, cx);
+                    }
+                });
+            }
+        });
+        let ix = if url.is_some() && !self.tabs.is_empty() { self.active + 1 } else { self.tabs.len() };
+        self.tabs.insert(ix, OpenTab { tab: tab.clone(), _subscriptions: [observe, events] });
+        if let Some(url) = url {
+            tab.update(cx, |tab, cx| tab.navigate(url, window, cx));
         }
+        if activate {
+            self.activate(ix, window, cx);
+            if self.active_tab().read(cx).url().is_none() {
+                self.omnibox.update(cx, |o, cx| o.focus(window, cx));
+            }
+        }
+        cx.notify();
+        tab
+    }
+
+    fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.active = ix;
+        let tab = self.active_tab();
+        tab.update(cx, |tab, cx| {
+            tab.focus(window, cx);
+            // It may have been in the background through a resize.
+            tab.viewport_changed(window, cx);
+        });
+        self.sync_chrome(window, cx);
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        if self.tabs.len() == 1 {
+            window.remove_window();
+            return;
+        }
+        self.tabs.remove(ix);
+        if self.active > ix || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.activate(self.active, window, cx);
+    }
+
+    /// Point the omnibox and window title at the active tab.
+    fn sync_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.active_tab().read(cx);
+        let (url, title) = (tab.url(), tab.title());
+        self.omnibox.update(cx, |o, cx| o.set_url(url, window, cx));
+        window.set_window_title(&title);
+    }
+
+    fn cycle(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let n = self.tabs.len() as isize;
+        let ix = (self.active as isize + delta).rem_euclid(n) as usize;
+        self.activate(ix, window, cx);
+    }
+
+    fn render_tab(&self, ix: usize, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme();
+        let tab = self.tabs[ix].tab.read(cx);
+        let active = ix == self.active;
+        let next_active = ix + 1 == self.active;
+        let ChromeColors { strip, surface, .. } = ChromeColors::get(cx);
+        let icon: AnyElement = if tab.is_loading() {
+            Spinner::new().xsmall().color(theme.primary).into_any_element()
+        } else if let Some(image) = tab.favicon() {
+            img(image).size(px(16.)).flex_none().into_any_element()
+        } else {
+            Icon::new(Lucide::Globe).small().text_color(theme.muted_foreground).into_any_element()
+        };
+        // Chrome's active tab flares out into the toolbar at its feet: a square
+        // of the tab's color behind a quarter circle of the strip's color.
+        let foot = |left: bool| {
+            let r = px(TAB_RADIUS);
+            let corner = div().size(r).bg(strip);
+            div()
+                .absolute()
+                .bottom_0()
+                .size(r)
+                .bg(surface)
+                .when(left, |d| d.left(-r))
+                .when(!left, |d| d.right(-r))
+                .child(if left { corner.rounded_br(r) } else { corner.rounded_bl(r) })
+        };
+        div()
+            .id(("tab", ix))
+            .relative()
+            .flex_1()
+            .min_w(px(TAB_MIN_WIDTH))
+            .max_w(px(TAB_MAX_WIDTH))
+            .h(px(TAB_STRIP_HEIGHT - 6.))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .rounded_t(px(TAB_RADIUS))
+            .when(active, |d| d.bg(surface).text_color(theme.foreground).child(foot(true)).child(foot(false)))
+            .when(!active, |d| {
+                d.text_color(theme.muted_foreground)
+                    .hover(|d| d.bg(surface.opacity(0.5)))
+                    // A divider between inactive tabs.
+                    .when(!next_active, |d| {
+                        d.child(div().absolute().right_0().top(px(9.)).bottom(px(9.)).w(px(1.)).bg(theme.border))
+                    })
+            })
+            .child(icon)
+            .child(div().flex_1().min_w_0().truncate().child(tab.title()))
+            .child(
+                div()
+                    .id(("close-tab", ix))
+                    .flex_none()
+                    .rounded_full()
+                    .p(px(2.))
+                    .hover(|d| d.bg(theme.secondary))
+                    .child(Icon::new(Lucide::X).xsmall())
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(ix, window, cx);
+                    })),
+            )
+            // Tabs are buttons, not part of the draggable title bar.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.activate(ix, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close_tab(ix, window, cx);
+                }),
+            )
+    }
+
+    fn render_tab_strip(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let new_tab = div()
+            .id("new-tab")
+            .flex_none()
+            .ml_1()
+            .mb(px(4.))
+            .p_1()
+            .rounded_full()
+            .hover(|d| d.bg(theme.secondary))
+            .child(Icon::new(Lucide::Plus).small())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_tab(None, true, window, cx);
+            }));
+        let tabs: Vec<_> = (0..self.tabs.len()).map(|ix| self.render_tab(ix, cx)).collect();
+        let fullscreen = window.is_fullscreen();
+        TitleBar::new()
+            .h(px(TAB_STRIP_HEIGHT))
+            .bg(ChromeColors::get(cx).strip)
+            .border_b_0()
+            // Room for the traffic lights (not needed in fullscreen).
+            .when(fullscreen, |t| t.pl_2())
+            .child(
+                div()
+                    .h_full()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_end()
+                    .pl_2()
+                    .pr(px(80.))
+                    .children(tabs)
+                    .child(new_tab),
+            )
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let can_back = self.history_ix > 0;
-        let can_forward = self.history_ix + 1 < self.history.len();
+        let tab = self.active_tab().read(cx);
+        let (can_back, can_forward, loading, has_url) =
+            (tab.can_go_back(), tab.can_go_forward(), tab.is_loading(), tab.url().is_some());
         div()
             .flex_none()
+            .h(px(TOOLBAR_HEIGHT))
             .flex()
             .items_center()
             .gap_1()
-            .p_2()
+            .px_2()
+            .bg(ChromeColors::get(cx).surface)
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -744,7 +357,9 @@ impl Browser {
                     .icon(IconName::ArrowLeft)
                     .tooltip("Back")
                     .disabled(!can_back)
-                    .on_click(cx.listener(|this, _, window, cx| this.go_back(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.active_tab().update(cx, |t, cx| t.go_back(window, cx));
+                    })),
             )
             .child(
                 Button::new("forward")
@@ -753,168 +368,95 @@ impl Browser {
                     .icon(IconName::ArrowRight)
                     .tooltip("Forward")
                     .disabled(!can_forward)
-                    .on_click(cx.listener(|this, _, window, cx| this.go_forward(window, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.active_tab().update(cx, |t, cx| t.go_forward(window, cx));
+                    })),
             )
             .child(
                 Button::new("reload")
                     .ghost()
                     .small()
-                    .icon(IconName::RotateCw)
+                    .icon(if loading { Icon::new(Lucide::X) } else { Icon::new(Lucide::RotateCw) })
                     .tooltip("Reload")
-                    .loading(self.loading.is_some())
-                    .disabled(self.history.is_empty())
-                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
+                    .disabled(!has_url)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.active_tab().update(cx, |t, cx| t.reload(window, cx));
+                    })),
             )
-            .child(div().flex_1().child(Input::new(&self.url_bar)))
-    }
-
-    fn render_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        let palette = &self.palette;
-        let message = |text: String, color: Hsla| {
-            div()
-                .p_4()
-                .text_color(color)
-                .child(text)
-                .into_any_element()
-        };
-        if let Some(err) = &self.error {
-            return message(err.clone(), cx.theme().danger);
-        }
-        let Some(page) = &self.page else {
-            let text = if self.loading.is_some() { "Loading…" } else { "Type an address and press Enter." };
-            return message(text.into(), palette.muted);
-        };
-
-        let layout = page.layout.clone();
-        let rcx = self.render_cx(cx);
-        let rcx_fixed = rcx.clone();
-        let last = layout.rows.len().saturating_sub(1);
-        div()
-            .size_full()
-            .child(
-                list(self.list_state.clone(), move |ix, _window, _cx| {
-                    let row = render::render_row(&layout.rows[ix], &rcx);
-                    if ix == last {
-                        div().pb(px(layout.space_after)).child(row).into_any_element()
-                    } else {
-                        row
-                    }
-                })
-                .size_full(),
-            )
-            .vertical_scrollbar(&self.list_state)
-            // `position: fixed` boxes, pinned over the viewport.
-            .when(!page.layout.fixed.is_empty(), |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .children(page.layout.fixed.iter().map(|b| render::render_fixed(b, &rcx_fixed))),
-                )
-            })
-            .into_any_element()
+            .child(div().flex_1().px_1().child(self.omnibox.clone()))
     }
 }
 
-impl Render for Browser {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl Render for Feather {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let accent = theme.primary;
-        let palette = &self.palette;
-        // The page's own background (from <html>/<body>), else the default canvas.
-        let canvas = self
-            .page
-            .as_ref()
-            .and_then(|p| p.layout.canvas)
-            .map(|c| palette.color(c))
-            .unwrap_or(palette.canvas);
-        let status = self.hovered_link.as_ref().map(|url| {
-            div()
-                .absolute()
-                .bottom_0()
-                .left_0()
-                .max_w(relative(0.6))
-                .px_2()
-                .py_0p5()
-                .text_xs()
-                .bg(theme.background)
-                .text_color(theme.muted_foreground)
-                .border_t_1()
-                .border_r_1()
-                .rounded_tr_md()
-                .border_color(theme.border)
-                .truncate()
-                .child(url.to_string())
-        });
-
+        let (bg, fg) = (theme.background, theme.foreground);
         div()
-            .track_focus(&self.focus_handle)
             .key_context("Browser")
-            .on_action(cx.listener(|this, _: &Back, window, cx| this.go_back(window, cx)))
-            .on_action(cx.listener(|this, _: &Forward, window, cx| this.go_forward(window, cx)))
-            .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload(window, cx)))
+            .on_action(cx.listener(|this, _: &Back, window, cx| this.active_tab().update(cx, |t, cx| t.go_back(window, cx))))
+            .on_action(cx.listener(|this, _: &Forward, window, cx| {
+                this.active_tab().update(cx, |t, cx| t.go_forward(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &Reload, window, cx| this.active_tab().update(cx, |t, cx| t.reload(window, cx))))
             .on_action(cx.listener(|this, _: &FocusAddressBar, window, cx| {
-                this.url_bar.update(cx, |state, cx| {
-                    state.focus_handle(cx).focus(window, cx);
-                    state.select_all(window, cx);
-                });
+                this.omnibox.update(cx, |o, cx| o.focus(window, cx))
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.open_tab(None, true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_tab(this.active, window, cx)))
+            .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle(1, window, cx)))
+            .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle(-1, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab1, window, cx| this.activate(0, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab2, window, cx| this.activate(1, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab3, window, cx| this.activate(2, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab4, window, cx| this.activate(3, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab5, window, cx| this.activate(4, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab6, window, cx| this.activate(5, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab7, window, cx| this.activate(6, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectTab8, window, cx| this.activate(7, window, cx)))
+            .on_action(cx.listener(|this, _: &SelectLastTab, window, cx| {
+                this.activate(this.tabs.len() - 1, window, cx)
             }))
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
-            .text_color(theme.foreground)
+            .bg(bg)
+            .text_color(fg)
+            .child(self.render_tab_strip(window, cx))
             .child(self.render_toolbar(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .relative()
-                    .bg(canvas)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            this.mouse_down = true;
-                            this.interaction_changed(window, cx);
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.mouse_down = false;
-                            this.interaction_changed(window, cx);
-                        }),
-                    )
-                    .child(self.render_content(cx))
-                    .when(self.loading.is_some(), |d| {
-                        // Indeterminate progress: a bar sweeping across the top.
-                        d.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .h(px(2.))
-                                .w(relative(0.3))
-                                .bg(accent)
-                                .with_animation(
-                                    "loading-bar",
-                                    Animation::new(Duration::from_millis(900)).repeat(),
-                                    |bar, t| bar.left(relative(t * 1.3 - 0.3)),
-                                ),
-                        )
-                    })
-                    .children(status),
-            )
+            .child(div().flex_1().min_h_0().child(self.active_tab()))
+    }
+}
+
+// gpui-kit embeds only the components' own icons; these are ours.
+gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen]);
+
+/// The components' icons, then ours.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        // (The components' source errors on paths it doesn't have.)
+        match ChromeIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        let mut all = gpui_kit::assets::Assets.list(path).unwrap_or_default();
+        all.extend(ChromeIcons.list(path)?);
+        Ok(all)
     }
 }
 
 fn main() {
-    // The component library's icons are embedded SVGs served through this asset source.
-    // Pages' SVG icons are served alongside the app's own assets.
-    gpui_kit::application().with_assets(render::PageAssets(gpui_kit::assets::Assets)).run(|cx| {
+    // Icons are embedded SVGs served through the asset source; pages' SVG
+    // icons are served alongside them.
+    gpui_kit::application().with_assets(render::PageAssets(AppAssets)).run(|cx| {
         gpui_kit::init(cx);
+        omnibox::init(cx);
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
@@ -923,6 +465,23 @@ fn main() {
             KeyBinding::new("cmd-]", Forward, Some("Browser")),
             KeyBinding::new("cmd-r", Reload, Some("Browser")),
             KeyBinding::new("cmd-l", FocusAddressBar, Some("Browser")),
+            KeyBinding::new("cmd-t", NewTab, Some("Browser")),
+            KeyBinding::new("cmd-w", CloseTab, Some("Browser")),
+            KeyBinding::new("ctrl-tab", NextTab, Some("Browser")),
+            KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Browser")),
+            KeyBinding::new("cmd-shift-]", NextTab, Some("Browser")),
+            KeyBinding::new("cmd-shift-[", PrevTab, Some("Browser")),
+            KeyBinding::new("cmd-alt-right", NextTab, Some("Browser")),
+            KeyBinding::new("cmd-alt-left", PrevTab, Some("Browser")),
+            KeyBinding::new("cmd-1", SelectTab1, Some("Browser")),
+            KeyBinding::new("cmd-2", SelectTab2, Some("Browser")),
+            KeyBinding::new("cmd-3", SelectTab3, Some("Browser")),
+            KeyBinding::new("cmd-4", SelectTab4, Some("Browser")),
+            KeyBinding::new("cmd-5", SelectTab5, Some("Browser")),
+            KeyBinding::new("cmd-6", SelectTab6, Some("Browser")),
+            KeyBinding::new("cmd-7", SelectTab7, Some("Browser")),
+            KeyBinding::new("cmd-8", SelectTab8, Some("Browser")),
+            KeyBinding::new("cmd-9", SelectLastTab, Some("Browser")),
         ]);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
@@ -932,29 +491,64 @@ fn main() {
         .detach();
 
         let args = Args::parse();
+        FORCED_APPEARANCE.set(args.dark).ok();
+        let capturing = args.capture.is_some();
+        History::init(!capturing, cx);
         let bounds = Bounds::centered(None, size(px(args.width), px(args.height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("Browser".into()),
-                ..Default::default()
+                title: Some("Feather".into()),
+                // Traffic lights centered in the tab strip.
+                traffic_light_position: Some(point(px(13.), px(TAB_STRIP_HEIGHT / 2. - 7.))),
+                ..TitleBar::title_bar_options()
             }),
-            ..Default::default()
+            ..TitleBar::window_options()
         };
-        let start_url = args.url.as_deref().and_then(|arg| net::parse_input(arg).ok());
-        let capturing = args.capture.is_some();
+        let urls: Vec<Url> = args.urls.iter().filter_map(|arg| net::parse_input(arg).ok()).collect();
         gpui_kit::open_window(options, cx, |window, cx| {
             cx.new(|cx| {
-                let mut browser = Browser::new(window, cx);
-                browser.capture = args.capture;
-                if let Some(url) = start_url {
-                    browser.navigate(url, window, cx);
+                let mut feather = Feather::new(window, cx);
+                // Extra URLs open as background tabs, each right after the first.
+                let mut urls = urls.into_iter();
+                if urls.len() == 0
+                    && let Some(job) = args.capture.clone()
+                {
+                    // Nothing to load: capture the new tab page.
+                    feather.active_tab().update(cx, |tab, cx| tab.start_capture(job, window, cx));
                 }
-                browser
+                if let Some(url) = urls.next() {
+                    let tab = feather.active_tab();
+                    tab.update(cx, |tab, cx| {
+                        tab.capture = args.capture.clone();
+                        tab.navigate(url, window, cx);
+                    });
+                }
+                for url in urls.rev() {
+                    feather.open_tab(Some(url), false, window, cx);
+                }
+                feather.sync_chrome(window, cx);
+                feather
             })
         })
         .expect("failed to open window");
         // Screenshot runs shouldn't steal focus from whatever you're doing.
         cx.activate(!capturing);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppAssets, Lucide};
+    use gpui_kit::AssetSource as _;
+
+    #[test]
+    fn chrome_icons_load() {
+        for icon in [Lucide::X, Lucide::LockKeyhole, Lucide::Globe, Lucide::Feather] {
+            let path = icon.path();
+            let r = AppAssets.load(&path);
+            println!("{path}: {:?}", r.as_ref().map(|o| o.as_ref().map(|b| b.len())));
+            assert!(matches!(r, Ok(Some(_))), "{path}");
+        }
+    }
 }
