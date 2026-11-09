@@ -947,44 +947,119 @@
       return f;
     }
   }
-  // Canvas: a 2D context that draws nothing (yet), so pages and libraries
-  // that assume one (charts, editors) keep working.
+  // Canvas 2D: the context records operations; before each snapshot they're
+  // replayed natively (tiny-skia) and the canvas shows the result.
+  const dirtyCanvases = new Set();
   function context2d(canvas) {
-    const noop = () => {};
-    const gradient = () => ({ addColorStop: noop });
+    const ops = [];
+    const rec = (...op) => { ops.push(op); if (!dirtyCanvases.has(canvas)) { dirtyCanvases.add(canvas); N.touch(); } };
+    const props = {
+      fillStyle: "#000000", strokeStyle: "#000000", lineWidth: 1, lineCap: "butt", lineJoin: "miter", miterLimit: 10,
+      globalAlpha: 1, globalCompositeOperation: "source-over", lineDashOffset: 0,
+      font: "10px sans-serif", textAlign: "start", textBaseline: "alphabetic", direction: "ltr",
+      shadowBlur: 0, shadowColor: "rgba(0, 0, 0, 0)", shadowOffsetX: 0, shadowOffsetY: 0,
+      imageSmoothingEnabled: true, imageSmoothingQuality: "low", filter: "none",
+    };
+    const recorded = new Set(["fillStyle", "strokeStyle", "lineWidth", "lineCap", "lineJoin", "miterLimit", "globalAlpha", "globalCompositeOperation", "lineDashOffset"]);
+    const style = (v) => (v && v._gradient ? v._gradient : String(v));
+    let stack = [];
+    let matrix = [1, 0, 0, 1, 0, 0];
+    let dash = [];
+    const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
+    const gradient = (g) => ({
+      _gradient: g,
+      addColorStop(offset, color) { g[g.length - 1].push([Number(offset), String(color)]); },
+    });
     const ctx = {
-      canvas, fillStyle: "#000", strokeStyle: "#000", lineWidth: 1, lineCap: "butt", lineJoin: "miter", miterLimit: 10,
-      font: "10px sans-serif", textAlign: "start", textBaseline: "alphabetic", direction: "ltr", globalAlpha: 1,
-      globalCompositeOperation: "source-over", shadowBlur: 0, shadowColor: "rgba(0, 0, 0, 0)", shadowOffsetX: 0, shadowOffsetY: 0,
-      imageSmoothingEnabled: true, lineDashOffset: 0, filter: "none",
-      save: noop, restore: noop, scale: noop, rotate: noop, translate: noop, transform: noop, setTransform: noop, resetTransform: noop,
-      getTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }),
-      clearRect: noop, fillRect: noop, strokeRect: noop, beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
-      bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop, ellipse: noop, rect: noop, roundRect: noop,
-      fill: noop, stroke: noop, clip: noop, isPointInPath: () => false, isPointInStroke: () => false,
-      fillText: noop, strokeText: noop, drawImage: noop, setLineDash: noop, getLineDash: () => [],
+      canvas,
+      _ops: ops,
+      save() { stack.push([Object.assign({}, props), matrix.slice(), dash.slice()]); rec("save"); },
+      restore() { const s = stack.pop(); if (s) { Object.assign(props, s[0]); matrix = s[1]; dash = s[2]; } rec("restore"); },
+      scale(x, y) { matrix = mul(matrix, [x, 0, 0, y, 0, 0]); rec("scale", x, y); },
+      rotate(a) { const c = Math.cos(a), s = Math.sin(a); matrix = mul(matrix, [c, s, -s, c, 0, 0]); rec("rotate", a); },
+      translate(x, y) { matrix = mul(matrix, [1, 0, 0, 1, x, y]); rec("translate", x, y); },
+      transform(a, b, c, d, e, f) { matrix = mul(matrix, [a, b, c, d, e, f]); rec("transform", a, b, c, d, e, f); },
+      setTransform(a, b, c, d, e, f) {
+        if (a && typeof a === "object") ({ a, b, c, d, e, f } = a);
+        if (a === undefined) [a, b, c, d, e, f] = [1, 0, 0, 1, 0, 0];
+        matrix = [a, b, c, d, e, f];
+        rec("setTransform", a, b, c, d, e, f);
+      },
+      resetTransform() { this.setTransform(1, 0, 0, 1, 0, 0); },
+      getTransform() { const [a, b, c, d, e, f] = matrix; return { a, b, c, d, e, f, m11: a, m12: b, m21: c, m22: d, m41: e, m42: f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 }; },
+      beginPath() { rec("beginPath"); }, closePath() { rec("closePath"); },
+      moveTo(x, y) { rec("moveTo", x, y); }, lineTo(x, y) { rec("lineTo", x, y); },
+      quadraticCurveTo(a, b, c, d) { rec("quadraticCurveTo", a, b, c, d); },
+      bezierCurveTo(a, b, c, d, e, f) { rec("bezierCurveTo", a, b, c, d, e, f); },
+      arc(x, y, r, a0, a1, ccw) { rec("arc", x, y, r, a0, a1, ccw ? 1 : 0); },
+      arcTo(x1, y1, x2, y2) { rec("lineTo", x1, y1); rec("lineTo", x2, y2); },
+      ellipse(x, y, rx, ry, rot, a0, a1, ccw) { rec("ellipse", x, y, rx, ry, rot, a0, a1, ccw ? 1 : 0); },
+      rect(x, y, w, h) { rec("rect", x, y, w, h); },
+      roundRect(x, y, w, h, r) { rec("roundRect", x, y, w, h, Array.isArray(r) ? r[0] || 0 : r || 0); },
+      fill(a, b) { rec("fill", typeof a === "string" ? a : typeof b === "string" ? b : "nonzero"); },
+      stroke() { rec("stroke"); },
+      clip() { rec("clip"); },
+      fillRect(x, y, w, h) { rec("fillRect", x, y, w, h); },
+      strokeRect(x, y, w, h) { rec("strokeRect", x, y, w, h); },
+      clearRect(x, y, w, h) { rec("clearRect", x, y, w, h); },
+      isPointInPath() { return false; }, isPointInStroke() { return false; },
+      setLineDash(d) { dash = Array.from(d || [], Number); rec("setLineDash", dash); },
+      getLineDash() { return dash.slice(); },
+      fillText() {}, strokeText() {},
       measureText(text) {
-        const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(this.font)?.[1] || "10");
+        const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(props.font)?.[1] || "10");
         const width = String(text).length * size * 0.55;
         return { width, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2 };
       },
-      createLinearGradient: gradient, createRadialGradient: gradient, createConicGradient: gradient,
-      createPattern: () => ({ setTransform: noop }),
+      drawImage(img, ...args) {
+        if (!img) return;
+        if (img instanceof HTMLCanvasElement) return rec("drawCanvas", img.__id, ...args);
+        const src = img.currentSrc || (img.getAttribute && N.resolve(img.getAttribute("src") || "")) || img.src;
+        if (src) rec("drawImage", String(src), ...args);
+      },
+      createLinearGradient: (x0, y0, x1, y1) => gradient(["linear", x0, y0, x1, y1, []]),
+      createRadialGradient: (x0, y0, r0, x1, y1, r1) => gradient(["radial", x0, y0, r0, x1, y1, r1, []]),
+      createConicGradient: (a, x, y) => gradient(["radial", x, y, 0, x, y, 1, []]),
+      createPattern: () => null,
       createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
       getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
-      putImageData: noop,
+      putImageData() {},
+      getContextAttributes: () => ({ alpha: true, desynchronized: false, colorSpace: "srgb", willReadFrequently: false }),
     };
+    for (const name of Object.keys(props)) {
+      Object.defineProperty(ctx, name, {
+        enumerable: true,
+        get() { return props[name]; },
+        set(v) {
+          props[name] = v;
+          if (recorded.has(name)) rec(name, name === "fillStyle" || name === "strokeStyle" ? style(v) : v);
+        },
+      });
+    }
     return ctx;
+  }
+  // [[canvas id, width, height, ops], ...] for canvases drawn on since the
+  // last snapshot.
+  function flushCanvases() {
+    const out = [];
+    for (const c of dirtyCanvases) {
+      const ctx = c._ctx;
+      if (!ctx) continue;
+      out.push([c.__id, c.width, c.height, ctx._ops.splice(0)]);
+    }
+    dirtyCanvases.clear();
+    return out;
   }
   class HTMLCanvasElement extends HTMLElement {
     getContext(kind) {
       if (kind !== "2d") return null;
       return this._ctx || (this._ctx = context2d(this));
     }
-    get width() { return Number(this.getAttribute("width")) || 300; }
-    set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); }
-    get height() { return Number(this.getAttribute("height")) || 150; }
-    set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); }
+    get width() { const a = this.getAttribute("width"); return a === null ? 300 : Number(a) || 0; }
+    // Setting the size clears the canvas (and its context's state).
+    set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
+    get height() { const a = this.getAttribute("height"); return a === null ? 150 : Number(a) || 0; }
+    set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
     toDataURL() { return "data:,"; }
     toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
@@ -2353,6 +2428,7 @@
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
     __fireTimer: fireTimer,
     __imageEvent: imageEvent,
+    __flushCanvases: flushCanvases,
     __traverse: traverse,
     __dispatchClick(id) {
       const n = wrap(id);

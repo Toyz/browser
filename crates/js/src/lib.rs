@@ -13,6 +13,7 @@
 //! timers live in the JS heap, where Boa's GC can see them.
 
 pub mod cors;
+mod canvas;
 mod dom;
 mod images;
 mod modules;

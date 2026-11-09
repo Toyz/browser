@@ -1755,6 +1755,14 @@ impl Builder<'_> {
                 self.build_image(element, style, c, link);
                 continue;
             }
+            // A canvas scripts drew on carries its pixels as `src`; one they
+            // didn't shows nothing (its fallback content is for no-JS).
+            if tag == "canvas" {
+                if element.attr("src").is_some() {
+                    self.build_image(element, style, c, link);
+                }
+                continue;
+            }
             if tag == "svg" && !element.is_html() {
                 self.build_svg(child, element, style, parent_style, c, link);
                 continue;

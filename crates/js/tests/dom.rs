@@ -575,3 +575,18 @@ fn relative_time_and_date_constructor() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "yesterday | in 3 weeks | 2 years ago | true | 5");
 }
+
+#[test]
+fn canvas_drawing_reaches_the_snapshot() {
+    let doc = run(r##"<body><canvas id="c" width="40" height="20"></canvas><script>
+        const ctx = document.getElementById("c").getContext("2d");
+        const g = ctx.createLinearGradient(0, 0, 40, 0);
+        g.addColorStop(0, "red"); g.addColorStop(1, "blue");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 40, 20);
+        ctx.beginPath(); ctx.arc(20, 10, 5, 0, Math.PI * 2); ctx.fillStyle = "#0f0"; ctx.fill();
+        </script></body>"##);
+    let c = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("c")).unwrap();
+    let src = doc.element(c).unwrap().attr("src").unwrap_or("");
+    assert!(src.starts_with("data:image/png;base64,iVBOR"), "{}", &src[..src.len().min(60)]);
+}

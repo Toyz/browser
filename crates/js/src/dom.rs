@@ -105,6 +105,8 @@ pub(crate) struct Dom {
     pending_scripts: Vec<NodeId>,
     ran: HashSet<NodeId>,
     navigate: Option<Url>,
+    /// `<canvas>` bitmaps (2D contexts' drawing, replayed).
+    canvases: HashMap<NodeId, crate::canvas::Canvas>,
     /// `pushState` / `replaceState` since the last flush: (url, replace).
     url_changes: Vec<(Url, bool)>,
     /// `history.go(n)` asked of the tab.
@@ -176,6 +178,7 @@ impl Runtime {
             navigate: None,
             url_changes: Vec::new(),
             traverse: None,
+            canvases: HashMap::new(),
             submit: None,
             values: HashMap::new(),
             debug: opts.debug,
@@ -392,12 +395,20 @@ impl Runtime {
         self.refresh_listening();
         let styles = if self.dom.borrow().shadows.is_empty() { None } else { Some(self.call_global("__shadowStyles", &[])) };
         let styles = styles.map(|v| shadow_styles(v, &mut self.cx)).unwrap_or_default();
+        let drawn = self.call_global("__flushCanvases", &[]);
+        self.draw_canvases(drawn);
         let cssom = self.call_global("__cssomStyles", &[]);
         let cssom: Vec<(NodeId, String)> = shadow_styles(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
         let mut dom = self.dom.borrow_mut();
         dom.dirty = false;
         self.last_sent = Instant::now();
         let mut doc = flatten(&dom, styles);
+        // Canvases show what was drawn on them.
+        for (&node, canvas) in dom.canvases.iter_mut() {
+            if let Some(e) = doc.element_mut(node) {
+                set_attr(e, "src", canvas.data_url().to_string());
+            }
+        }
         // <style> elements scripts filled through the CSSOM (CSS-in-JS).
         for (style, css) in cssom {
             if doc.get(style).is_some() {
@@ -590,6 +601,53 @@ impl Runtime {
                 Ok(ToJs::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(msg) => self.handle(msg),
                 Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Replay canvases' recorded drawing (`__flushCanvases()`'s answer).
+    fn draw_canvases(&mut self, v: JsValue) {
+        let Some(list) = v.as_object().and_then(|o| JsArray::from_object(o).ok()) else { return };
+        let len = list.length(&mut self.cx).unwrap_or(0);
+        let mut batches = Vec::new();
+        for i in 0..len {
+            let Some(item) = list.get(i, &mut self.cx).ok().and_then(|v| v.as_object()) else { continue };
+            let get = |k: u64, cx: &mut Context| item.get(k, cx).unwrap_or_default();
+            let node = get(0, &mut self.cx).as_number().map(node_from_number);
+            let w = get(1, &mut self.cx).as_number().unwrap_or(300.0) as u32;
+            let h = get(2, &mut self.cx).as_number().unwrap_or(150.0) as u32;
+            let ops = to_arg(&get(3, &mut self.cx), &mut self.cx, 0);
+            let ops: Vec<Vec<crate::canvas::Arg>> = match ops {
+                crate::canvas::Arg::A(list) => list.into_iter().filter_map(|op| if let crate::canvas::Arg::A(v) = op { Some(v) } else { None }).collect(),
+                _ => Vec::new(),
+            };
+            if let Some(node) = node {
+                batches.push((node, w, h, ops));
+            }
+        }
+        let mut dom = self.dom.borrow_mut();
+        for (node, w, h, ops) in batches {
+            // A new size is a new, blank bitmap.
+            if dom.canvases.get(&node).is_none_or(|c| c.size() != (w.max(1), h.max(1)))
+                && let Some(c) = crate::canvas::Canvas::new(w, h)
+            {
+                dom.canvases.insert(node, c);
+            }
+            // Other canvases, for drawImage(canvas).
+            let others: HashMap<u64, tiny_skia::Pixmap> = ops
+                .iter()
+                .filter(|op| matches!(op.first(), Some(crate::canvas::Arg::S(s)) if s == "drawCanvas"))
+                .filter_map(|op| match op.get(1) {
+                    Some(crate::canvas::Arg::N(id)) => {
+                        let other = dom.canvases.get(&node_from_number(*id))?;
+                        Some((*id as u64, other.pixmap().clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let base = dom.doc.url.clone();
+            if let Some(canvas) = dom.canvases.get_mut(&node) {
+                canvas.apply(&ops, &others, &|src| canvas_image(&base, src));
             }
         }
     }
@@ -1615,6 +1673,46 @@ fn flatten(dom: &Dom, styles: Vec<(Option<NodeId>, String)>) -> Document {
         }
     }
     copy
+}
+
+/// A JS value as a canvas operation argument (numbers, strings, arrays).
+fn to_arg(v: &JsValue, cx: &mut Context, depth: u8) -> crate::canvas::Arg {
+    use crate::canvas::Arg;
+    if let Some(n) = v.as_number() {
+        return Arg::N(n);
+    }
+    if let Some(s) = v.as_string() {
+        return Arg::S(s.to_std_string_escaped());
+    }
+    if let Some(b) = v.as_boolean() {
+        return Arg::N(if b { 1.0 } else { 0.0 });
+    }
+    if depth < 4
+        && let Some(arr) = v.as_object().and_then(|o| JsArray::from_object(o).ok())
+    {
+        let len = arr.length(cx).unwrap_or(0);
+        return Arg::A((0..len).map(|i| to_arg(&arr.get(i, cx).unwrap_or_default(), cx, depth + 1)).collect());
+    }
+    Arg::N(0.0)
+}
+
+/// An image for drawImage: decoded once per URL (from the shared cache).
+fn canvas_image(base: &Url, src: &str) -> Option<Arc<tiny_skia::Pixmap>> {
+    thread_local! {
+        static DECODED: RefCell<HashMap<String, Option<Arc<tiny_skia::Pixmap>>>> = RefCell::default();
+    }
+    if let Some(hit) = DECODED.with_borrow(|m| m.get(src).cloned()) {
+        return hit;
+    }
+    let url = base.join(src).ok()?;
+    let pixmap = net::fetch_bytes(&url).ok().and_then(|b| crate::canvas::decode_image(&b)).map(Arc::new);
+    DECODED.with_borrow_mut(|m| {
+        if m.len() > 256 {
+            m.clear();
+        }
+        m.insert(src.to_owned(), pixmap.clone());
+    });
+    pixmap
 }
 
 fn latin1(bytes: &[u8]) -> String {

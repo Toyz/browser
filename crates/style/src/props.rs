@@ -2132,6 +2132,18 @@ fn calc_value<'i>(p: &mut Parser<'i>) -> PResult<'i, CalcVal> {
 // ---------------------------------------------------------------------------
 // Colors
 
+/// A CSS color from a string (`#fff`, `rgb(0 0 0 / 50%)`, `red`...), as
+/// 0xRRGGBBAA; `None` if it isn't one (or depends on context).
+pub fn parse_color_str(text: &str) -> Option<u32> {
+    let mut p = Parser::new(text.trim());
+    match parse_color(&mut p).ok()? {
+        Color::Rgba(v) => Some(v),
+        Color::LightDark(light, _) => Some(light),
+        Color::Foreground | Color::CurrentColor => Some(0x000000ff),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_color<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
     if let Ok(c) = p.try_parse(|p| {
         let name = p.expect_ident()?.to_ascii_lowercase();

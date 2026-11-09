@@ -13,13 +13,18 @@ track, area, map, dialog, noembed, noframes, rp, col, colgroup, [hidden] {
   display: none;
 }
 
+/* Canvases draw like images (once a script has drawn on them). */
+canvas {
+  display: inline-block;
+}
+
 /* Shadow DOM slots only place their content. */
 slot {
   display: contents;
 }
 
 /* Replaced content we can't render yet. */
-math, canvas, video, audio, iframe, object, embed, picture > source {
+math, video, audio, iframe, object, embed, picture > source {
   display: none;
 }
 
