@@ -590,3 +590,40 @@ fn canvas_drawing_reaches_the_snapshot() {
     let src = doc.element(c).unwrap().attr("src").unwrap_or("");
     assert!(src.starts_with("data:image/png;base64,iVBOR"), "{}", &src[..src.len().min(60)]);
 }
+
+#[test]
+fn layout_reaches_scripts() {
+    let doc = html::parse_scripted(
+        r##"<body><div id="box"></div><p id="o"></p><script>
+        const box = document.getElementById("box");
+        const seen = [];
+        new ResizeObserver((entries) => {
+          for (const e of entries) seen.push(e.contentRect.width + "x" + e.contentRect.height);
+          const r = box.getBoundingClientRect();
+          document.getElementById("o").textContent = seen.join(",") + " | " + r.left + "," + r.top + " " + box.offsetWidth + " " + innerWidth;
+        }).observe(box);
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let b = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("box")).unwrap();
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    // The script asked about the box.
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !host.measured.read().unwrap().contains(&b) && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(host.measured.read().unwrap().contains(&b));
+    host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], viewport: (1024.0, 700.0) });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.contains('|') && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "300x150 | 10,20 300 1024");
+}

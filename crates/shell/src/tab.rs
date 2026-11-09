@@ -110,6 +110,13 @@ pub struct Tab {
     script_clicked: bool,
     _refresh: Option<Task<()>>,
     _restyle: Option<Task<()>>,
+    /// Painted boxes of the elements scripts measure ([x, y, w, h] in the
+    /// page's viewport) and the viewport's size, gathered while painting,
+    /// and what the script thread was last told.
+    measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
+    layout_sent: HashMap<NodeId, [f32; 4]>,
+    layout_viewport_sent: (f32, f32),
+    layout_scheduled: Rc<std::cell::Cell<bool>>,
     /// A restyle is building; another was asked for meanwhile.
     restyle_busy: bool,
     restyle_queued: bool,
@@ -213,6 +220,10 @@ impl Tab {
             _restyle: None,
             restyle_busy: false,
             restyle_queued: false,
+            measured_bounds: Rc::default(),
+            layout_sent: HashMap::new(),
+            layout_viewport_sent: (0.0, 0.0),
+            layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
             hover_inline: None,
             mouse_down: false,
@@ -495,6 +506,9 @@ impl Tab {
         self._restyle = None;
         self.restyle_busy = false;
         self.restyle_queued = false;
+        self.measured_bounds.borrow_mut().0.clear();
+        self.layout_sent.clear();
+        self.layout_viewport_sent = (0.0, 0.0);
         self._scroll_end = None;
         self.hover_styler = None;
         self.forms = Default::default();
@@ -542,6 +556,27 @@ impl Tab {
         // The page being replaced isn't kept for Back.
         self.page_ix = self.history_ix;
         self.show(url, true, window, cx);
+    }
+
+    /// Tell the page's scripts where the elements they measure were
+    /// painted (what changed since last time).
+    fn send_layout(&mut self) {
+        self.layout_scheduled.set(false);
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
+        let (rects, viewport) = {
+            let store = self.measured_bounds.borrow();
+            let changed: Vec<(NodeId, [f32; 4])> =
+                store.0.iter().filter(|(n, r)| self.layout_sent.get(n) != Some(r)).map(|(n, r)| (*n, *r)).collect();
+            (changed, store.1)
+        };
+        if rects.is_empty() && viewport == self.layout_viewport_sent {
+            return;
+        }
+        for (n, r) in &rects {
+            self.layout_sent.insert(*n, *r);
+        }
+        self.layout_viewport_sent = viewport;
+        host.send(js::ToJs::Layout { rects, viewport });
     }
 
     /// The page's scripts changed its address (`history.pushState`, or
@@ -1365,6 +1400,34 @@ impl Tab {
             images_generation: self.images_generation,
             fonts_generation: self.fonts_generation,
             track_hover,
+            wants_bounds: {
+                let measured = self.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.clone());
+                Rc::new(move |node| measured.as_ref().is_some_and(|m| m.read().is_ok_and(|m| m.contains(&node))))
+            },
+            on_bounds: {
+                let (store, scheduled, tab) = (self.measured_bounds.clone(), self.layout_scheduled.clone(), cx.entity().downgrade());
+                Rc::new(move |node, bounds, window, cx| {
+                    let rect = [
+                        f32::from(bounds.origin.x),
+                        f32::from(bounds.origin.y) - crate::CHROME_HEIGHT,
+                        f32::from(bounds.size.width),
+                        f32::from(bounds.size.height),
+                    ];
+                    let viewport = window.viewport_size();
+                    let viewport = (f32::from(viewport.width), f32::from(viewport.height) - crate::CHROME_HEIGHT);
+                    let mut store = store.borrow_mut();
+                    store.1 = viewport;
+                    if store.0.get(&node) != Some(&rect) {
+                        store.0.insert(node, rect);
+                        if !scheduled.replace(true) {
+                            let tab = tab.clone();
+                            cx.defer(move |cx| {
+                                tab.update(cx, |this, _| this.send_layout()).ok();
+                            });
+                        }
+                    }
+                })
+            },
             on_block_hover: Rc::new(move |node, hovered, window, cx| {
                 block_hover
                     .update(cx, |this, cx| {

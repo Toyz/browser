@@ -129,6 +129,8 @@ pub type LinkClick = Rc<dyn Fn(&Url, &mut Window, &mut App)>;
 pub type LinkHover = Rc<dyn Fn(Option<&Url>, &mut Window, &mut App)>;
 /// A block's element started (true) or stopped (false) being under the pointer.
 pub type BlockHover = Rc<dyn Fn(page::NodeId, bool, &mut Window, &mut App)>;
+/// An element's painted box (window coordinates), for scripts measuring it.
+pub type BoundsReport = Rc<dyn Fn(page::NodeId, Bounds<Pixels>, &mut Window, &mut App)>;
 /// The inline element under the pointer within paragraph `id` changed.
 pub type InlineHover = Rc<dyn Fn(usize, Option<page::NodeId>, &mut Window, &mut App)>;
 /// Draws a form control's widget (inside the box the page styled for it).
@@ -149,6 +151,9 @@ pub struct RenderCx {
     /// Report hover per element (only when the page has `:hover`-style rules).
     pub track_hover: bool,
     pub on_block_hover: BlockHover,
+    /// Elements whose geometry scripts read: report where they're painted.
+    pub wants_bounds: Rc<dyn Fn(page::NodeId) -> bool>,
+    pub on_bounds: BoundsReport,
     pub on_inline_hover: InlineHover,
     pub controls: ControlRenderer,
 }
@@ -599,6 +604,20 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
 
     let el = match cursor_style(s.cursor) {
         Some(c) => el.cursor(c),
+        None => el,
+    };
+    // Scripts measure this one: an invisible child reports where it lands.
+    let el = match block.node.filter(|&n| (cx.wants_bounds)(n)) {
+        Some(node) => {
+            let report = cx.on_bounds.clone();
+            el.child(
+                canvas(move |bounds, window, cx| report(node, bounds, window, cx), |_, _, _, _| {})
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+            )
+        }
         None => el,
     };
     // `pointer-events: none` and hidden boxes aren't under the mouse.

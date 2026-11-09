@@ -459,7 +459,8 @@ impl Canvas {
         let Some(rect) = Rect::from_xywh(dx.min(dx + dw), dy.min(dy + dh), dw.abs(), dh.abs()) else { return };
         // Image space → canvas user space → device.
         let to_dest = Transform::from_row(dw / sw, 0.0, 0.0, dh / sh, dx - sx * dw / sw, dy - sy * dh / sh);
-        let pattern = Pattern::new(src.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, self.state.alpha, self.state.transform.pre_concat(to_dest));
+        // (fill_path applies the canvas transform to the shader too.)
+        let pattern = Pattern::new(src.as_ref(), SpreadMode::Pad, FilterQuality::Bilinear, self.state.alpha, to_dest);
         let paint = Paint { shader: pattern, anti_alias: true, blend_mode: self.state.blend, ..Paint::default() };
         let path = PathBuilder::from_rect(rect);
         self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.state.transform, self.state.clip.as_ref());
@@ -574,6 +575,25 @@ mod tests {
         assert_eq!(px(19, 0).alpha(), 0);
         assert!(c.data_url().starts_with("data:image/png;base64,iVBOR"));
         assert_eq!(base64(b"Man"), "TWFu");
+        // drawImage, scaled into a clipped rounded rect.
+        let mut src = Pixmap::new(2, 2).unwrap();
+        src.fill(Color::from_rgba8(0, 255, 0, 255));
+        let src = Arc::new(src);
+        let mut d = Canvas::new(20, 20).unwrap();
+        let ops = vec![
+            vec![s("save")],
+            vec![s("translate"), Arg::N(10.0), Arg::N(10.0)],
+            vec![s("scale"), Arg::N(2.0), Arg::N(2.0)],
+            vec![s("beginPath")],
+            vec![s("roundRect"), Arg::N(-4.0), Arg::N(-4.0), Arg::N(8.0), Arg::N(8.0), Arg::N(1.5)],
+            vec![s("clip")],
+            vec![s("drawImage"), s("x.png"), Arg::N(-4.0), Arg::N(-4.0), Arg::N(8.0), Arg::N(8.0)],
+            vec![s("restore")],
+        ];
+        d.apply(&ops, &HashMap::new(), &|_| Some(src.clone()));
+        let p = d.pixmap().pixel(10, 10).unwrap();
+        assert_eq!((p.green(), p.alpha()), (255, 255), "image drawn");
+        assert_eq!(d.pixmap().pixel(0, 0).unwrap().alpha(), 0, "outside the clip");
         assert_eq!(base64(b"Ma"), "TWE=");
     }
 }

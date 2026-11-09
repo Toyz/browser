@@ -145,6 +145,8 @@ pub(crate) struct Runtime {
     rx: mpsc::Receiver<ToJs>,
     updates: async_channel::Sender<FromJs>,
     listening: Arc<RwLock<HashSet<NodeId>>>,
+    /// Elements scripts read the geometry of (the tab reports their boxes).
+    measured: Arc<RwLock<HashSet<NodeId>>>,
     opts: Options,
     modules: Rc<crate::modules::WebModules>,
     hooks: Rc<Hooks>,
@@ -160,6 +162,7 @@ impl Runtime {
         fetch_tx: mpsc::Sender<ToJs>,
         updates: async_channel::Sender<FromJs>,
         listening: Arc<RwLock<HashSet<NodeId>>>,
+        measured: Arc<RwLock<HashSet<NodeId>>>,
     ) -> Runtime {
         let dom = Rc::new(RefCell::new(Dom {
             fetch_tx,
@@ -199,7 +202,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, updates, listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
+        let mut rt = Runtime { cx, dom, rx, updates, listening, measured, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -420,7 +423,15 @@ impl Runtime {
     }
 
     fn refresh_listening(&mut self) {
-        let ids = self.call_global("__listeningIds", &[]);
+        let listening = self.call_global("__listeningIds", &[]);
+        let listening = self.node_set(listening);
+        *self.listening.write().unwrap_or_else(|e| e.into_inner()) = listening;
+        let measured = self.call_global("__measuredIds", &[]);
+        let measured = self.node_set(measured);
+        *self.measured.write().unwrap_or_else(|e| e.into_inner()) = measured;
+    }
+
+    fn node_set(&mut self, ids: JsValue) -> HashSet<NodeId> {
         let mut set = HashSet::new();
         if let Some(arr) = ids.as_object().and_then(|o| JsArray::from_object(o).ok()) {
             let len = arr.length(&mut self.cx).unwrap_or(0);
@@ -432,7 +443,7 @@ impl Runtime {
                 }
             }
         }
-        *self.listening.write().unwrap_or_else(|e| e.into_inner()) = set;
+        set
     }
 
     /// Send the tab the DOM if it changed (at most every `SNAPSHOT_EVERY`).
@@ -522,6 +533,14 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Layout { rects, viewport } => {
+                let flat: Vec<JsValue> = rects
+                    .iter()
+                    .flat_map(|(n, r)| [JsValue::from(node_to_number(*n)), r[0].into(), r[1].into(), r[2].into(), r[3].into()])
+                    .collect();
+                let flat = JsArray::from_iter(flat, &mut self.cx);
+                self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1)]);
+            }
             ToJs::Traverse { delta } => {
                 self.call_global("__traverse", &[JsValue::from(delta)]);
             }
@@ -1705,7 +1724,11 @@ fn canvas_image(base: &Url, src: &str) -> Option<Arc<tiny_skia::Pixmap>> {
         return hit;
     }
     let url = base.join(src).ok()?;
-    let pixmap = net::fetch_bytes(&url).ok().and_then(|b| crate::canvas::decode_image(&b)).map(Arc::new);
+    let fetched = net::fetch_bytes(&url);
+    let pixmap = fetched.as_ref().ok().and_then(|b| crate::canvas::decode_image(b)).map(Arc::new);
+    if pixmap.is_none() && std::env::var_os("BROWSER_DEBUG").is_some() {
+        eprintln!("canvas: can't draw {url}: {:?}", fetched.map(|b| b.iter().take(12).copied().collect::<Vec<u8>>()).map_err(|e| e.to_string()));
+    }
     DECODED.with_borrow_mut(|m| {
         if m.len() > 256 {
             m.clear();

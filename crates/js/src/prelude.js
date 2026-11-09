@@ -662,8 +662,8 @@
     matches(sel) { return N.matches(this.__id, String(sel)); }
     webkitMatchesSelector(sel) { return this.matches(sel); }
     closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
-    getBoundingClientRect() { return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON() { return this; } }; }
-    getClientRects() { return []; }
+    getBoundingClientRect() { const r = measure(this); return r ? domRect(r[0], r[1], r[2], r[3]) : domRect(0, 0, 0, 0); }
+    getClientRects() { const r = measure(this); return r ? [domRect(r[0], r[1], r[2], r[3])] : []; }
     scrollIntoView() {}
     scrollTo() {}
     scroll() {}
@@ -699,13 +699,15 @@
     set popover(v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", v); }
     attachInternals() { return { setFormValue() {}, setValidity() {}, checkValidity() { return true; }, states: new Set(), form: null, labels: [], validity: { valid: true } }; }
     animate() { return { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} }; }
-    get clientWidth() { return 0; }
-    get clientHeight() { return 0; }
-    get offsetWidth() { return 0; }
-    get offsetHeight() { return 0; }
-    get offsetTop() { return 0; }
-    get offsetLeft() { return 0; }
-    get offsetParent() { return null; }
+    // Geometry from the tab's layout (once it has reported this element;
+    // the root element is the viewport).
+    get clientWidth() { return this === document.documentElement ? viewport[0] : Math.round(measure(this)?.[2] || 0); }
+    get clientHeight() { return this === document.documentElement ? viewport[1] : Math.round(measure(this)?.[3] || 0); }
+    get offsetWidth() { return Math.round(measure(this)?.[2] || 0); }
+    get offsetHeight() { return Math.round(measure(this)?.[3] || 0); }
+    get offsetTop() { const r = measure(this); return r ? Math.round(r[1] + pageScroll()) : 0; }
+    get offsetLeft() { return Math.round(measure(this)?.[0] || 0); }
+    get offsetParent() { return this.parentNode && this.parentNode.nodeType === 1 ? document.body : null; }
     get scrollTop() { return 0; }
     set scrollTop(_) {}
     get scrollLeft() { return 0; }
@@ -1624,6 +1626,53 @@
     return { matches, media: q, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} };
   }
 
+  // Layout the tab reports: where measured elements are ([x, y, w, h],
+  // viewport-relative) and the viewport's size.
+  const layoutRects = new Map();
+  const measuredIds = new Set();
+  let viewport = [1280, 800];
+  const pageScroll = () => 0;
+  const domRect = (x, y, width, height) => ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height, toJSON() { return this; } });
+  function measure(el) {
+    if (!el || el.__id === undefined) return null;
+    if (!measuredIds.has(el.__id)) { measuredIds.add(el.__id); N.touch(); }
+    return layoutRects.get(el.__id) || null;
+  }
+  const resizeObservers = new Set();
+  class ResizeObserver {
+    constructor(cb) { this._cb = cb; this._targets = new Map(); }
+    observe(el) {
+      if (!el) return;
+      this._targets.set(el, null);
+      resizeObservers.add(this);
+      if (measure(el)) setTimeout(deliverResizes, 0);
+    }
+    unobserve(el) { this._targets.delete(el); }
+    disconnect() { this._targets.clear(); resizeObservers.delete(this); }
+    takeRecords() { return []; }
+  }
+  // ResizeObserver callbacks for targets whose size is new.
+  function deliverResizes() {
+    for (const ro of resizeObservers) {
+      const entries = [];
+      for (const [el, last] of ro._targets) {
+        const r = layoutRects.get(el.__id);
+        if (!r || (last && last[0] === r[2] && last[1] === r[3])) continue;
+        ro._targets.set(el, [r[2], r[3]]);
+        const size = [{ inlineSize: r[2], blockSize: r[3] }];
+        entries.push({ target: el, contentRect: domRect(0, 0, r[2], r[3]), borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size });
+      }
+      if (entries.length) { try { ro._cb(entries, ro); } catch (e) { reportError(e); } }
+    }
+  }
+  function layout(flat, vw, vh) {
+    const resized = viewport[0] !== vw || viewport[1] !== vh;
+    viewport = [vw, vh];
+    for (let i = 0; i + 4 < flat.length; i += 5) layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
+    deliverResizes();
+    if (resized) window.dispatchEvent(new Event("resize"));
+  }
+
   const observer = (name) => class {
     constructor(cb) { this._cb = cb; }
     observe(target) {
@@ -1704,9 +1753,9 @@
     getComputedStyle: (el) => el.style,
     MutationObserver: observer("MutationObserver"),
     IntersectionObserver: observer("IntersectionObserver"),
-    ResizeObserver: observer("ResizeObserver"),
+    ResizeObserver,
     PerformanceObserver: observer("PerformanceObserver"),
-    innerWidth: 1280, innerHeight: 800, outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
+    outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
     screen: { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24 },
     scrollX: 0, scrollY: 0, pageXOffset: 0, pageYOffset: 0,
     scrollTo() {}, scrollBy() {}, scroll() {},
@@ -1812,6 +1861,10 @@
   };
 
   Object.assign(window, { crypto: cryptoImpl, CryptoKey });
+  // The viewport's size, as the tab last reported it.
+  for (const [name, i] of [["innerWidth", 0], ["innerHeight", 1]]) {
+    Object.defineProperty(window, name, { configurable: true, get: () => viewport[i], set() {} });
+  }
 
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   function base64Encode(s) {
@@ -2428,6 +2481,8 @@
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
     __fireTimer: fireTimer,
     __imageEvent: imageEvent,
+    __layout: layout,
+    __measuredIds() { return Array.from(measuredIds); },
     __flushCanvases: flushCanvases,
     __traverse: traverse,
     __dispatchClick(id) {

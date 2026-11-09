@@ -69,6 +69,9 @@ pub enum ToJs {
     /// An `EventSource` event: `open`, `error`, or a message (type, data,
     /// last event id).
     Sse { id: u32, kind: &'static str, event: String, data: String, last_id: String },
+    /// Where the elements scripts measure are (`[x, y, width, height]`,
+    /// relative to the viewport), and the viewport's size.
+    Layout { rects: Vec<(NodeId, [f32; 4])>, viewport: (f32, f32) },
     /// Back/forward between history entries of this document (made by
     /// `pushState`): `popstate` with the entry `delta` steps away.
     Traverse { delta: i32 },
@@ -99,6 +102,9 @@ pub struct ScriptHost {
     /// Elements with `click` listeners (or `onclick`), as of the last
     /// snapshot: clicks under them wait for scripts before acting.
     pub listening: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>>,
+    /// Elements whose geometry scripts read (getBoundingClientRect,
+    /// ResizeObserver): the tab reports where they are.
+    pub measured: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>>,
 }
 
 impl ScriptHost {
@@ -153,6 +159,8 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
     let (updates_tx, updates) = async_channel::unbounded();
     let (first_tx, first_rx) = mpsc::channel::<Document>();
     let listening = Arc::new(std::sync::RwLock::new(Default::default()));
+    let measured: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>> = Arc::new(std::sync::RwLock::new(Default::default()));
+    let shared_measured = measured.clone();
     let fallback = doc.clone();
     let budget = opts.budget;
     let shared_listening = listening.clone();
@@ -160,7 +168,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         .name("feather-js".into())
         .stack_size(256 << 20)
         .spawn(move || {
-            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening);
+            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening, shared_measured);
             rt.run_initial_scripts();
             // Data the page fetched while loading makes the first paint
             // too, if it's quick.
@@ -172,7 +180,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         return (fallback, None);
     }
     let first = first_rx.recv_timeout(budget).unwrap_or(fallback);
-    (first, Some(ScriptHost { tx, updates, listening }))
+    (first, Some(ScriptHost { tx, updates, listening, measured }))
 }
 
 /// When the next timer is due, for `recv_timeout`.
