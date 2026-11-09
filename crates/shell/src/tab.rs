@@ -999,6 +999,22 @@ impl Tab {
                     cx.background_executor().timer(Duration::from_millis(200)).await;
                 }
             };
+            if job.frames > 0 {
+                for frame in 0..job.frames {
+                    let path = job.frame_path(frame);
+                    cx.update(|window, cx| {
+                        window.draw(cx).clear(cx);
+                        if let Err(err) = capture::save_frame(window, &path) {
+                            eprintln!("screenshot failed: {err:#}");
+                        }
+                    })
+                    .ok();
+                    cx.background_executor().timer(Duration::from_millis(job.interval)).await;
+                }
+                println!("saved {} frames", job.frames);
+                cx.update(|_, cx| cx.quit()).ok();
+                return;
+            }
             if job.wait > 0 {
                 cx.background_executor().timer(Duration::from_millis(job.wait)).await;
             }

@@ -677,7 +677,9 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
             let corners = s.border_radius.map(radius);
             transform::image(i, cx).unwrap_or_else(|| crate::images::picture_rounded(&image, &padded, width, height, corners))
         }
-        Some(ImageState::Failed) | None if natural_width.is_none() => match &i.alt {
+        // Alt text stands in for a broken image (not one still loading:
+        // that's blank, so it doesn't flash).
+        Some(ImageState::Failed) if natural_width.is_none() => match &i.alt {
             Some(alt) => div()
                 .text_sm()
                 .italic()

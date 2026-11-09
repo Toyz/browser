@@ -46,6 +46,10 @@ pub struct CaptureJob {
     pub keys: Option<String>,
     /// Extra time to wait before capturing, ms (scripted pages).
     pub wait: u64,
+    /// Instead: save this many frames from the moment the page shows, one
+    /// every `interval` ms (`out-f1.png`...), to see what loading looks like.
+    pub frames: usize,
+    pub interval: u64,
     /// Click here (window coordinates) before capturing, then let it settle.
     pub click: Option<(f32, f32)>,
     /// Type this into the omnibox before capturing (suggestions, autocomplete).
@@ -53,6 +57,13 @@ pub struct CaptureJob {
 }
 
 impl CaptureJob {
+    /// `out-f3.png`: the third frame of a `--frames` sequence.
+    pub fn frame_path(&self, frame: usize) -> PathBuf {
+        let stem = self.path.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = self.path.extension().map(|e| e.to_string_lossy()).unwrap_or("png".into());
+        self.path.with_file_name(format!("{stem}-f{}.{ext}", frame + 1))
+    }
+
     /// `out.png` for one page; `out-1.png`, `out-2.png`... for several.
     pub fn path_for(&self, page: usize) -> PathBuf {
         if self.pages <= 1 {
@@ -80,6 +91,8 @@ impl Args {
         let mut swipe = None;
         let mut wheel = None;
         let mut wait = 0;
+        let mut frames = 0;
+        let mut interval = 100;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -98,6 +111,8 @@ impl Args {
                         Some((n.parse().ok()?, end))
                     })
                 }
+                "--frames" => frames = it.next().and_then(|n| n.parse().ok()).unwrap_or(10),
+                "--interval" => interval = it.next().and_then(|n| n.parse().ok()).unwrap_or(100),
                 "--wait" => wait = it.next().and_then(|n| n.parse().ok()).unwrap_or(0),
                 "--wheel" => wheel = it.next().and_then(|n| n.parse().ok()),
                 "--click" => {
@@ -130,7 +145,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel, wait });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel, wait, frames, interval });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

@@ -94,6 +94,10 @@ impl KeyframeRun {
 pub struct Animations {
     transitions: HashMap<NodeId, Transition>,
     keyframes: Vec<KeyframeRun>,
+    /// Animations that ran to the end, so a restyle (every DOM update from
+    /// scripts) doesn't start them over: an element runs one again only
+    /// after losing it.
+    finished: std::collections::HashSet<(NodeId, Arc<str>)>,
     /// The layout with this frame's in-between styles.
     pub display: Option<Arc<LayoutTree>>,
 }
@@ -141,12 +145,22 @@ impl Tab {
         }
         let doc = page.doc.clone();
         let mut old = std::mem::take(&mut self.animations.keyframes);
-        let Some(styler) = self.styler(window) else { return };
+        let finished = std::mem::take(&mut self.animations.finished);
+        let Some(styler) = self.styler(window) else {
+            self.animations.finished = finished;
+            return;
+        };
         let now = Instant::now();
         let mut keep: Vec<KeyframeRun> = Vec::new();
+        let mut still: std::collections::HashSet<(NodeId, Arc<str>)> = Default::default();
         for (node, base) in elements {
             for spec in base.animations.iter().flat_map(|a| a.iter()) {
                 if spec.duration <= 0.0 {
+                    continue;
+                }
+                let key = (node, spec.name.clone());
+                if finished.contains(&key) {
+                    still.insert(key);
                     continue;
                 }
                 if let Some(i) = old.iter().position(|r| r.node == node && r.spec.name == spec.name) {
@@ -167,6 +181,7 @@ impl Tab {
             }
         }
         self.animations.keyframes = keep;
+        self.animations.finished = still;
     }
 
     /// Called every render: this frame's in-between layout, and another
@@ -190,7 +205,14 @@ impl Tab {
                 styles.insert(run.node, Arc::new(style));
             }
         }
-        self.animations.keyframes.retain(|r| !r.finished(now));
+        let finished = &mut self.animations.finished;
+        self.animations.keyframes.retain(|r| {
+            let done = r.finished(now);
+            if done {
+                finished.insert((r.node, r.spec.name.clone()));
+            }
+            !done
+        });
         self.animations.display = render::hover::apply(&page.layout, &styles).map(Arc::new);
         if self.animations.is_running() {
             window.request_animation_frame();
