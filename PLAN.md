@@ -152,7 +152,8 @@ Known Phase 1 limits: one font size per paragraph (inline `<small>`/`<sup>` use 
 
 ### Phase 5 — The gnarly bits
 - [x] Layout queries: elements scripts measure report their painted boxes back after each frame (`getBoundingClientRect`, `offsetWidth`, `ResizeObserver`); no synchronous forced layout
-- [ ] `MutationObserver`, `IntersectionObserver` from real layout (it reports everything visible, so lazy images load)
+- [x] `MutationObserver` (records at the native mutations, delivered in a microtask; Polymer's microtasks depend on it)
+- [ ] `IntersectionObserver` from real layout (it reports everything visible, with a non-empty rect, so lazy images load)
 - [ ] Canvas `fillText`, `getImageData`
 - [ ] Cookies and login flows
 - [x] Performance pass 1 (measured with `--bench`): engine/render crates optimized in dev builds; inline layouts + shaped text cached across frames in element state; shaped lines behind `Rc`; restyles reuse unchanged rows (keeping caches); hover restyles re-measure only visible rows; absolute children no longer block row splitting; in-memory subresource cache; back/forward page cache with scroll restore; loading bar. Wikipedia scroll: 39ms → ~1.3ms/frame.
