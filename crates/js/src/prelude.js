@@ -3233,8 +3233,8 @@
   // Debugging: FEATHER_EVAL=probe.js runs in the page FEATHER_EVAL_DELAY ms in.
   const probe = N.debugScript();
   if (probe) {
-    setTimeout(() => {
-      try { (0, eval)(probe[0]); } catch (e) { console.error("FEATHER_EVAL: " + e + "\n" + e.stack); }
-    }, probe[1]);
+    const run = () => { try { (0, eval)(probe[0]); } catch (e) { console.error("FEATHER_EVAL: " + e + "\n" + e.stack); } };
+    // A negative delay: before the page's own scripts (to wrap things they use).
+    if (probe[1] < 0) run(); else setTimeout(run, probe[1]);
   }
 })(globalThis);

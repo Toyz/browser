@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 edition = "2024"
@@ -43,3 +44,9 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.js]
 opt-level = 2
+
+# Boa's AST with a fix: `this` inside an arrow nested in another arrow
+# reached the outer arrow's (lexical, so missing) binding, not the method's.
+# See vendor/README.md.
+[patch.crates-io]
+boa_ast = { path = "vendor/boa_ast" }

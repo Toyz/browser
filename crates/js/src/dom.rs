@@ -317,6 +317,22 @@ impl Runtime {
     }
 
     pub fn run_initial_scripts(&mut self) {
+        // Import maps first: they say what the modules' bare imports mean.
+        let maps: Vec<String> = {
+            let dom = self.dom.borrow();
+            let doc = &dom.doc;
+            doc.descendants(doc.root())
+                .filter(|&n| {
+                    doc.element(n).is_some_and(|e| {
+                        &**e.local_name() == "script" && e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("importmap"))
+                    })
+                })
+                .map(|n| doc.text_content(n))
+                .collect()
+        };
+        for map in maps {
+            self.modules.add_import_map(&map);
+        }
         let scripts: Vec<(NodeId, bool, bool)> = {
             let dom = self.dom.borrow();
             let doc = &dom.doc;

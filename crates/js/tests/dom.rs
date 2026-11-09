@@ -789,6 +789,27 @@ fn nested_template_contents_survive_copies() {
 }
 
 #[test]
+fn private_getters_from_arrows() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const out = [];
+        try {
+          class O {
+            #h; #f;
+            get #g() { return this.#f ? this.#f() : this.#h; }
+            constructor(e) { this.#h = e; this.q = this.#v([1, 2]); }
+            #v(list) { return list.map((n) => { const o = () => this.#g + n; return { o, ...{ k: n } }; }); }
+          }
+          const x = new O("a");
+          out.push(x.q[0].o(), x.q[1].o());
+          class P extends O { constructor() { super("b"); } }
+          out.push(new P().q[0].o());
+        } catch (e) { out.push("ERR " + e); }
+        document.getElementById("o").textContent = out.join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "a1 a2 b1");
+}
+
+#[test]
 fn offset_parent_chains_end() {
     let doc = run(r##"<body><div><span id="s">x</span></div><p id="o"></p><script>
         let n = 0;

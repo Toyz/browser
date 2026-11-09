@@ -1560,6 +1560,21 @@ impl Builder<'_> {
             }
         }
         children.append(&mut c.absolutes);
+        // Block flow is drawn as a flex column, but `flex` means nothing
+        // there: boxes neither grow nor shrink, and a `flex: 1` card's
+        // basis of 0 mustn't override its height.
+        if matches!(kind, BlockKind::Normal | BlockKind::ListItem { .. }) {
+            for child in &mut children {
+                if let LayoutBox::Block(b) = child
+                    && (b.style.flex_shrink != 0.0 || b.style.flex_grow != 0.0 || !b.style.flex_basis.is_auto())
+                {
+                    let st = Arc::make_mut(&mut b.style);
+                    st.flex_shrink = 0.0;
+                    st.flex_grow = 0.0;
+                    st.flex_basis = Length::Auto;
+                }
+            }
+        }
         if kind == BlockKind::Table {
             layout_table(&mut children);
         }
@@ -1570,6 +1585,13 @@ impl Builder<'_> {
                 if let LayoutBox::Block(b) = child {
                     if b.style.min_width.is_auto() {
                         b.min_content = 0.0;
+                    }
+                    // A percentage height in a grid with no height of its
+                    // own is automatic (the row is sized from the content).
+                    if matches!(b.style.height, Length::Percent(_)) && !matches!(style.height, Length::Px(_)) {
+                        Arc::make_mut(&mut b.style).height = Length::Auto;
+                        // ...and so are the percentages inside it, down the chain.
+                        auto_percent_heights(&mut b.children);
                     }
                     // Taffy sizes a clipping grid item with an automatic
                     // height to nothing. Its content fits it by definition,
@@ -1950,6 +1972,24 @@ fn char_em(ch: char, st: &InlineStyle) -> f32 {
         0.6
     };
     if st.font_weight >= 600 { base * 1.07 } else { base }
+}
+
+/// Percentage heights below a box whose height turned out automatic resolve
+/// to `auto` (with nothing to be a percentage of); clips on them go too, as
+/// taffy would size those to nothing.
+fn auto_percent_heights(children: &mut [LayoutBox]) {
+    for child in children {
+        let LayoutBox::Block(b) = child else { continue };
+        if !matches!(b.style.height, Length::Percent(_)) {
+            continue;
+        }
+        let st = Arc::make_mut(&mut b.style);
+        st.height = Length::Auto;
+        if st.overflow != Overflow::Visible && st.max_height.is_auto() {
+            st.overflow = Overflow::Visible;
+        }
+        auto_percent_heights(&mut b.children);
+    }
 }
 
 /// A paragraph that's nothing but one image sized in percentages (`width:

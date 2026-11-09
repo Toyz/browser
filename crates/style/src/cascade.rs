@@ -788,6 +788,28 @@ impl Styler {
         let edges_h = s.padding.top.px_or_zero() + s.padding.bottom.px_or_zero() + s.border_width.top + s.border_width.bottom;
         let content = |outer: f32, edges: f32| if s.border_box { (outer - edges).max(0.0) } else { outer };
         let floating = s.float != Float::None || matches!(s.position, Position::Absolute | Position::Fixed);
+        // A grid item's area is a share of the grid's columns.
+        // (`repeat(auto-fill, minmax(min, 1fr))`: as many as fit.)
+        let auto_cols = match (parent.grid_auto, parent_w) {
+            (Some((min, _)), Some(pw)) if min > 0.0 => {
+                let gap = parent.column_gap.px_or_zero();
+                Some((((pw + gap) / (min + gap)).floor().max(1.0)) as u16)
+            }
+            _ => None,
+        };
+        let parent_w = match (parent.display, parent.grid_columns.or(auto_cols), parent_w) {
+            (Display::Grid | Display::InlineGrid, Some(cols), Some(pw)) if cols > 1 && !floating => {
+                let gap = parent.column_gap.px_or_zero();
+                let span = match s.grid_column {
+                    Some(crate::GridSpan::Full) => cols,
+                    Some(crate::GridSpan::Span(n)) => n.clamp(1, cols),
+                    None => 1,
+                } as f32;
+                let track = (pw - gap * (cols as f32 - 1.0)) / cols as f32;
+                Some(track * span + gap * (span - 1.0))
+            }
+            _ => parent_w,
+        };
         s.est_width = match s.width {
             Length::Px(w) => Some(content(w, edges_w)),
             Length::Percent(p) => parent_w.map(|pw| content(pw * p / 100.0, edges_w)),
