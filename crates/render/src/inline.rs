@@ -978,12 +978,19 @@ fn paint_flow(
                     width - shapes::paint(&ts, "…".into(), px(style.font_size), &run).width
                 })
             });
-            match room {
-                Some(room) if x + shaped.width > room => {
+            // Where the room runs out, if that leaves something to read: a
+            // short label our font draws a little wider than the page's
+            // just gets clipped instead of turning into "…".
+            let cut_at = room.filter(|&room| x + shaped.width > room).and_then(|room| {
+                let full = &para.text[start..stop];
+                let cut = shaped.index_for_x(room - x).unwrap_or(full.len());
+                let cut = (0..=cut.min(full.len())).rev().find(|&i| full.is_char_boundary(i)).unwrap_or(0);
+                (full[..cut].trim_end().chars().count() >= 2 || line.clamped).then_some(cut)
+            });
+            match cut_at {
+                Some(cut) => {
                     // Cut where the room runs out; the rest of the line goes.
                     let full = &para.text[start..stop];
-                    let cut = shaped.index_for_x(room - x).unwrap_or(full.len());
-                    let cut = (0..=cut.min(full.len())).rev().find(|&i| full.is_char_boundary(i)).unwrap_or(0);
                     let kept = format!("{}…", full[..cut].trim_end());
                     let run = text_run(kept.len(), style, palette);
                     let cut_line = shapes::paint(&ts, kept.into(), px(style.font_size), &run);
