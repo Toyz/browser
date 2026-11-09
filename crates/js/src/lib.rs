@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use page::{Document, NodeId};
 use url::Url;
 
-pub use dom::node_from_number;
+pub use dom::{node_from_number, to_html};
 
 /// Fetches a script's source (blocking).
 pub type FetchText = Arc<dyn Fn(&Url) -> Option<String> + Send + Sync>;

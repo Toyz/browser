@@ -1435,6 +1435,7 @@
     }
     get readyState() { return readyState; }
     getSelection() { return selection; }
+    get fonts() { return fontFaceSet; }
     get styleSheets() { return Array.from(this.querySelectorAll("style")).map((el) => el.sheet); }
     get adoptedStyleSheets() { return documentSheets; }
     set adoptedStyleSheets(v) { documentSheets = Array.from(v); N.touch(); }
@@ -2803,12 +2804,36 @@
   };
 
   class MediaQueryList extends EventTarget {}
+  // Web fonts load in the tab; to scripts they're always ready.
+  class FontFace {
+    constructor(family, source, descriptors) {
+      Object.assign(this, { family: String(family), status: "loaded", style: "normal", weight: "normal", display: "auto" }, descriptors || {});
+      this.loaded = Promise.resolve(this);
+    }
+    load() { return Promise.resolve(this); }
+  }
+  const fontFaces = new Set();
+  const fontFaceSet = Object.assign(new EventTarget(), {
+    status: "loaded",
+    get size() { return fontFaces.size; },
+    check: () => true,
+    load: () => Promise.resolve([]),
+    add(f) { fontFaces.add(f); return this; },
+    delete(f) { return fontFaces.delete(f); },
+    has(f) { return fontFaces.has(f); },
+    clear() { fontFaces.clear(); },
+    forEach(cb) { fontFaces.forEach((f) => cb(f, f, this)); },
+    values() { return fontFaces.values(); },
+    [Symbol.iterator]() { return fontFaces.values(); },
+    onloading: null, onloadingdone: null, onloadingerror: null,
+  });
+  fontFaceSet.ready = Promise.resolve(fontFaceSet);
   class NamedNodeMap {}
 
   Object.assign(window, {
     DOMRect, DOMRectReadOnly, DOMPoint, DOMPointReadOnly: DOMPoint, DOMMatrix, DOMMatrixReadOnly: DOMMatrix,
     Range, StaticRange, Selection, XMLSerializer, Path2D, CSS: CSSApi, CSSStyleDeclaration,
-    structuredClone: (v) => structuredCloneImpl(v), BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap,
+    structuredClone: (v) => structuredCloneImpl(v), BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap, FontFace,
     Audio: function Audio(src) { const a = document.createElement("audio"); if (src !== undefined) a.setAttribute("src", src); return a; },
     Option: function Option(text, value, defaultSelected, selected) {
       const o = document.createElement("option");

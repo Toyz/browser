@@ -1556,6 +1556,15 @@ fn queue_scripts(dom: &mut Dom, id: NodeId) {
 
 const VOID: &[&str] = &["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"];
 
+/// The whole document as HTML (debugging: what the tab renders).
+pub fn to_html(doc: &Document) -> String {
+    let mut out = String::new();
+    for &c in doc.children(doc.root()) {
+        serialize(doc, c, &mut out);
+    }
+    out
+}
+
 fn serialize(doc: &Document, id: NodeId, out: &mut String) {
     match &doc.node(id).data {
         NodeData::Text(t) => {

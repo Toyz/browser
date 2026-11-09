@@ -50,6 +50,10 @@ impl Tab {
     /// Scripts changed the DOM: show the new one (restyled; stylesheets
     /// re-read only if they changed).
     fn script_dom(&mut self, doc: Arc<page::Document>, window: &mut Window, cx: &mut Context<Self>) {
+        // Debugging: FEATHER_DUMP_DOM=file.html keeps the latest snapshot.
+        if let Some(path) = std::env::var_os("FEATHER_DUMP_DOM") {
+            std::fs::write(path, js::to_html(&doc)).ok();
+        }
         let Some(page) = &mut self.page else { return };
         let sheets_changed = page.doc.as_ref().is_none_or(|old| loader::style_key(old) != loader::style_key(&doc));
         page.title = doc.title();
