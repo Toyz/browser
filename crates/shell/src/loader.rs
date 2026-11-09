@@ -23,8 +23,23 @@ pub struct LoadedPage {
     /// `<meta http-equiv="refresh" content="N;url=...">`: go there after N seconds.
     pub refresh: Option<(f32, Url)>,
     /// Source code shown in a code editor instead (CSS, JS, JSON responses;
-    /// `view-source:`): (language, text).
-    pub source: Option<(&'static str, Arc<str>)>,
+    /// `view-source:`).
+    pub source: Option<Source>,
+}
+
+#[derive(Clone)]
+pub struct Source {
+    pub language: &'static str,
+    pub raw: Arc<str>,
+    /// Pretty-printed, when the raw text looks minified.
+    pub pretty: Option<Arc<str>>,
+}
+
+impl Source {
+    fn new(language: &'static str, raw: &str) -> Self {
+        let pretty = crate::pretty::looks_minified(raw).then(|| crate::pretty::pretty(language, raw).into());
+        Self { language, raw: raw.into(), pretty }
+    }
 }
 
 /// The language to highlight a non-HTML response as, if it's code.
@@ -74,7 +89,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
             doc: None,
             styles: None,
             signature: Vec::new(),
-            source: Some(("html", response.body.into())),
+            source: Some(Source::new("html", &response.body)),
         });
     }
     let response = match post {
@@ -89,7 +104,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
         return Ok(LoadedPage {
             favicon: default_favicon(&response.url),
             refresh: None,
-            source: code_language(response.content_type.as_deref(), &response.url).map(|l| (l, Arc::from(&*response.body))),
+            source: code_language(response.content_type.as_deref(), &response.url).map(|l| Source::new(l, &response.body)),
             url: response.url,
             title: None,
             layout: Arc::new(render::build_plain_text(&response.body)),

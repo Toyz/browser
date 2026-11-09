@@ -87,8 +87,10 @@ pub struct Tab {
     /// Bumped per page shown, so hover reports from the previous page's last
     /// frame (with that document's node ids) are ignored.
     page_gen: u64,
-    /// The code editor showing a source page (CSS/JS/JSON, `view-source:`).
+    /// The code editor showing a source page (CSS/JS/JSON, `view-source:`),
+    /// and whether it shows the pretty-printed version.
     source_editor: Option<Entity<gpui_kit::component::input::EditorState>>,
+    source_pretty: bool,
     /// Form controls' widgets and state.
     forms: forms::Forms,
     /// A form `POST` waiting for its navigation to start loading.
@@ -149,6 +151,7 @@ impl Tab {
             hover_styler: None,
             forms: Default::default(),
             source_editor: None,
+            source_pretty: false,
             pending_post: None,
             element_state: Arc::default(),
             capture: None,
@@ -360,9 +363,12 @@ impl Tab {
         let favicon = page.favicon.clone();
         let refresh = page.refresh.clone();
         // Source code goes in a (read-only) code editor, highlighted.
-        self.source_editor = page.source.clone().map(|(language, text)| {
+        // Minified code opens un-minified.
+        self.source_pretty = page.source.as_ref().is_some_and(|s| s.pretty.is_some());
+        self.source_editor = page.source.clone().map(|source| {
+            let text = source.pretty.clone().unwrap_or(source.raw.clone());
             let text = SharedString::from(text.to_string());
-            cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx).language(language).default_value(text))
+            cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx).language(source.language).default_value(text))
         });
         // Images the new page shares with the last one (logos, icons, sprites)
         // stay loaded: they appear in the first frame instead of popping in.
@@ -993,10 +999,35 @@ impl Tab {
             return self.render_new_tab(cx);
         };
         if let Some(editor) = &self.source_editor {
+            let theme = cx.theme();
+            let pretty = self.source_pretty;
+            let toggle = div()
+                .id("pretty-print")
+                .absolute()
+                .bottom_3()
+                .right_5()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(if pretty { theme.primary } else { theme.background })
+                .text_color(if pretty { theme.primary_foreground } else { theme.foreground })
+                .text_xs()
+                .cursor_pointer()
+                .shadow_md()
+                .child(Icon::new(Lucide::Braces).size(px(14.)))
+                .child(if pretty { "Pretty" } else { "Raw" })
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_pretty(window, cx)));
             return div()
                 .size_full()
-                .bg(cx.theme().background)
+                .relative()
+                .bg(theme.background)
                 .child(gpui_kit::component::input::Editor::new(editor).readonly(true).appearance(false).size_full())
+                .child(toggle)
                 .into_any_element();
         }
 
@@ -1031,6 +1062,21 @@ impl Tab {
                 )
             })
             .into_any_element()
+    }
+
+    /// Switch a source page between pretty-printed and raw.
+    fn toggle_pretty(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.page.as_ref().and_then(|p| p.source.clone()) else { return };
+        let Some(editor) = self.source_editor.clone() else { return };
+        self.source_pretty = !self.source_pretty;
+        let text = if self.source_pretty {
+            source.pretty.clone().unwrap_or_else(|| crate::pretty::pretty(source.language, &source.raw).into())
+        } else {
+            source.raw.clone()
+        };
+        let text = SharedString::from(text.to_string());
+        editor.update(cx, |e, cx| e.set_value(text, window, cx));
+        cx.notify();
     }
 
     /// No page yet: the Feather start page, with your most visited sites.

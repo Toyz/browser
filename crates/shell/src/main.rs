@@ -9,6 +9,7 @@ mod capture;
 mod history;
 mod loader;
 mod omnibox;
+mod pretty;
 mod tab;
 
 use std::rc::Rc;
@@ -435,7 +436,7 @@ impl Render for Feather {
 }
 
 // gpui-kit embeds only the components' own icons; these are ours.
-gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen, Check, ChevronDown]);
+gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen, Check, ChevronDown, Braces]);
 
 /// The components' icons, then ours.
 struct AppAssets;
