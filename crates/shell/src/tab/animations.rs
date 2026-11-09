@@ -13,6 +13,7 @@ use std::time::Instant;
 use gpui_kit::*;
 use page::NodeId;
 use render::LayoutTree;
+use render::hover::AnimKey;
 use style::{AnimDirection, Animation, ComputedStyle, Easing};
 
 use super::Tab;
@@ -36,7 +37,8 @@ impl Transition {
 }
 
 struct KeyframeRun {
-    node: NodeId,
+    /// The element, or its `::before` (1) / `::after` (2) box.
+    node: AnimKey,
     spec: Animation,
     /// The element's style the frames were computed from.
     base: Arc<ComputedStyle>,
@@ -99,7 +101,7 @@ pub struct Animations {
     /// Animations that ran to the end, so a restyle (every DOM update from
     /// scripts) doesn't start them over: an element runs one again only
     /// after losing it.
-    finished: std::collections::HashSet<(NodeId, Arc<str>)>,
+    finished: std::collections::HashSet<(AnimKey, Arc<str>)>,
     /// The layout with this frame's in-between styles.
     pub display: Option<Arc<LayoutTree>>,
 }
@@ -154,7 +156,7 @@ impl Tab {
         };
         let now = Instant::now();
         let mut keep: Vec<KeyframeRun> = Vec::new();
-        let mut still: std::collections::HashSet<(NodeId, Arc<str>)> = Default::default();
+        let mut still: std::collections::HashSet<(AnimKey, Arc<str>)> = Default::default();
         for (node, base) in elements {
             for spec in base.animations.iter().flat_map(|a| a.iter()) {
                 if spec.duration <= 0.0 {
@@ -178,9 +180,9 @@ impl Tab {
                 };
                 // Custom properties (`--angle`) restyle the element per
                 // frame: sample them (a few per 100ms of the cycle).
-                if let (Some(custom), Some(doc)) = (styler.keyframe_custom(&spec.name), doc.as_deref()) {
+                if let (Some(custom), Some(doc), (element, 0)) = (styler.keyframe_custom(&spec.name), doc.as_deref(), node) {
                     let samples = ((spec.duration * 30.0) as usize).clamp(8, 120);
-                    let frames = render::hover::custom_property_frames(doc, styler, node, &custom, samples);
+                    let frames = render::hover::custom_property_frames(doc, styler, element, &custom, samples);
                     keep.push(KeyframeRun { node, spec: spec.clone(), base: base.clone(), frames, start });
                     continue;
                 }
@@ -202,10 +204,10 @@ impl Tab {
         }
         let Some(page) = &self.page else { return };
         let now = Instant::now();
-        let mut styles: HashMap<NodeId, Arc<ComputedStyle>> = HashMap::new();
+        let mut styles: HashMap<AnimKey, Arc<ComputedStyle>> = HashMap::new();
         self.animations.transitions.retain(|node, t| {
             let (style, running) = t.at(now);
-            styles.insert(*node, Arc::new(style));
+            styles.insert((*node, 0), Arc::new(style));
             running
         });
         // Animations override transitions.

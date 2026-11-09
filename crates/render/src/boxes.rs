@@ -105,6 +105,9 @@ pub struct Block {
     pub cell: Option<CellLayout>,
     /// A section heading (h1–h6, or a wrapper starting with one); floats stop at these.
     pub heading: bool,
+    /// A `::before` (1) or `::after` (2) box: its element and which. They
+    /// have no node of their own, but animate like elements do.
+    pub pseudo: Option<(NodeId, u8)>,
 }
 
 /// A form control (`<input>`, `<textarea>`, `<select>`) as the page built it.
@@ -272,6 +275,7 @@ impl Block {
                     colspan: 1,
                     cell: None,
                     heading: false,
+                    pseudo: None,
                 }));
                 row += 1;
             }
@@ -297,6 +301,7 @@ impl Block {
             colspan: 1,
             cell: None,
             heading: false,
+            pseudo: None,
         }
     }
 
@@ -628,6 +633,7 @@ pub fn build_plain_text(text: &str) -> LayoutTree {
         colspan: 1,
         cell: None,
         heading: false,
+        pseudo: None,
     };
     if let Some(p) = inline.finish(1, style) {
         block.children.push(LayoutBox::Paragraph(Arc::new(p)));
@@ -822,8 +828,8 @@ impl Builder<'_> {
             }
             Some(self.synthetic_block(ps, BlockKind::Normal, Vec::new()))
         };
-        let before_box = boxed(Pseudo::Before);
-        let after_box = boxed(Pseudo::After);
+        let before_box = boxed(Pseudo::Before).map(|b| Block { pseudo: Some((id, 1)), ..b });
+        let after_box = boxed(Pseudo::After).map(|b| Block { pseudo: Some((id, 2)), ..b });
         let one = |which| {
             let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
             if unseen(&ps) {
@@ -1320,6 +1326,7 @@ impl Builder<'_> {
             colspan: 1,
             cell: None,
             heading: false,
+            pseudo: None,
         };
         place(self, block, c);
     }
@@ -1338,6 +1345,7 @@ impl Builder<'_> {
             colspan: 1,
             cell: None,
             heading: false,
+            pseudo: None,
         }
     }
 
@@ -1384,6 +1392,7 @@ impl Builder<'_> {
                     colspan: 1,
                     cell: None,
                     heading: false,
+                    pseudo: None,
                 };
                 Generated::place(Some(empty), c, link);
             }
@@ -1681,6 +1690,7 @@ impl Builder<'_> {
             colspan,
             cell: None,
             heading,
+            pseudo: None,
         }
     }
 

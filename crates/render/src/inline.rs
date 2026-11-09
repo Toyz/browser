@@ -279,7 +279,7 @@ fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
 /// An inline image's natural size, CSS px.
 fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
     let s = &image.style;
-    let intrinsic = match cx.images.borrow().get(&*image.src) {
+    let intrinsic = match crate::view::shown_image(image, cx) {
         Some(ImageState::Ready { width, height, .. }) => Some((width / image.density, height / image.density)),
         _ => None,
     };
@@ -741,7 +741,7 @@ fn place(
                     InlineObject::Image(image) => {
                         let (w, h) = (m.width, m.ascent);
                         let (t, r, b, l) = edges(&image.style);
-                        let picture = match cx.images.borrow().get(&*image.src) {
+                        let picture = match &crate::view::shown_image(image, cx) {
                             Some(ImageState::Ready { image: picture, padded, width, height }) => div()
                                 .w(w - l - r)
                                 .h(h - t - b)

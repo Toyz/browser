@@ -159,7 +159,7 @@ pub fn patch(
     };
     styler.set_state(new.clone());
     let mut styles = Styles::new(doc, styler);
-    let mut changes: HashMap<NodeId, Arc<ComputedStyle>> = HashMap::new();
+    let mut changes: Changes = HashMap::new();
     let mut changed: Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)> = Vec::new();
     // Blocks gaining or losing a background: fine for a box, but a container
     // that was split into rows is drawn differently with one (as a wrapper).
@@ -189,7 +189,7 @@ pub fn patch(
             appearing.push(id);
         }
         changed.push((id, old_style.clone(), new_style.clone()));
-        changes.insert(id, new_style);
+        changes.insert((id, 0), new_style);
     }
     if !appearing.is_empty() {
         let mut boxes = HashSet::new();
@@ -218,7 +218,7 @@ pub fn patch(
 
 /// Copy these elements' paint properties into the layout (`None`: none of
 /// them are in it). Hover patches and animation frames both come through here.
-pub fn apply(layout: &LayoutTree, changes: &HashMap<NodeId, Arc<ComputedStyle>>) -> Option<LayoutTree> {
+pub fn apply(layout: &LayoutTree, changes: &Changes) -> Option<LayoutTree> {
     let mut tree = layout.clone();
     let mut touched = false;
     for row in &mut tree.rows {
@@ -291,14 +291,16 @@ pub fn custom_property_frames(
 }
 
 /// Every element in the layout with CSS animations, and its style.
-pub fn animated_elements(layout: &LayoutTree) -> Vec<(NodeId, Arc<ComputedStyle>)> {
-    fn walk(b: &LayoutBox, out: &mut Vec<(NodeId, Arc<ComputedStyle>)>) {
+/// Every element (or `::before`/`::after` box) in the layout with CSS
+/// animations, and its style.
+pub fn animated_elements(layout: &LayoutTree) -> Vec<(AnimKey, Arc<ComputedStyle>)> {
+    fn walk(b: &LayoutBox, out: &mut Vec<(AnimKey, Arc<ComputedStyle>)>) {
         match b {
             LayoutBox::Block(block) => {
-                if let Some(n) = block.node
+                if let Some(k) = block_key(block)
                     && block.style.animations.is_some()
                 {
-                    out.push((n, block.style.clone()));
+                    out.push((k, block.style.clone()));
                 }
                 block.children.iter().for_each(|c| walk(c, out));
             }
@@ -309,7 +311,7 @@ pub fn animated_elements(layout: &LayoutTree) -> Vec<(NodeId, Arc<ComputedStyle>
                             if let Some(n) = a.node
                                 && a.style.animations.is_some()
                             {
-                                out.push((n, a.style.clone()));
+                                out.push(((n, 0), a.style.clone()));
                             }
                         }
                         InlineObject::BlockBox(b) => walk(&LayoutBox::Block((**b).clone()), out),
@@ -325,9 +327,9 @@ pub fn animated_elements(layout: &LayoutTree) -> Vec<(NodeId, Arc<ComputedStyle>
         for w in row.wrappers.iter() {
             if let Some(n) = w.node
                 && w.style.animations.is_some()
-                && !out.iter().any(|(m, _)| *m == n)
+                && !out.iter().any(|(m, _)| *m == (n, 0))
             {
-                out.push((n, w.style.clone()));
+                out.push(((n, 0), w.style.clone()));
             }
         }
         walk(&row.content, &mut out);
@@ -348,7 +350,22 @@ fn pseudos(roots: &[NodeId], styles: &mut Styles) -> Vec<Option<ComputedStyle>> 
     out
 }
 
-type Changes = HashMap<NodeId, Arc<ComputedStyle>>;
+/// New paint styles: by element, or one of its `::before` (1) / `::after`
+/// (2) boxes (0 is the element itself).
+pub type AnimKey = (NodeId, u8);
+type Changes = HashMap<AnimKey, Arc<ComputedStyle>>;
+
+fn has(ch: &Changes, n: NodeId) -> bool {
+    ch.contains_key(&(n, 0))
+}
+
+fn get(ch: &Changes, n: NodeId) -> Option<&Arc<ComputedStyle>> {
+    ch.get(&(n, 0))
+}
+
+fn block_key(b: &Block) -> Option<AnimKey> {
+    b.node.map(|n| (n, 0)).or(b.pseudo)
+}
 
 /// Which fields differ (debugging aid).
 fn style_diff(a: &ComputedStyle, b: &ComputedStyle) -> String {
@@ -394,16 +411,16 @@ fn patched(style: &Arc<ComputedStyle>, new: &ComputedStyle) -> Arc<ComputedStyle
 }
 
 fn row_mentions(row: &Row, ch: &Changes) -> bool {
-    row.wrappers.iter().any(|w| w.node.is_some_and(|n| ch.contains_key(&n)))
+    row.wrappers.iter().any(|w| w.node.is_some_and(|n| has(ch, n)))
         || mentions(&row.content, ch)
         || row.absolutes.iter().any(|b| mentions(b, ch))
 }
 
 fn patch_row(row: &mut Row, ch: &Changes) {
-    if row.wrappers.iter().any(|w| w.node.is_some_and(|n| ch.contains_key(&n))) {
+    if row.wrappers.iter().any(|w| w.node.is_some_and(|n| has(ch, n))) {
         let mut wrappers = row.wrappers.to_vec();
         for w in &mut wrappers {
-            if let Some(new) = w.node.and_then(|n| ch.get(&n)) {
+            if let Some(new) = w.node.and_then(|n| get(ch, n)) {
                 w.style = patched(&w.style, new);
             }
         }
@@ -424,15 +441,15 @@ fn mentions(b: &LayoutBox, ch: &Changes) -> bool {
 }
 
 fn block_mentions(b: &Block, ch: &Changes) -> bool {
-    b.node.is_some_and(|n| ch.contains_key(&n)) || b.children.iter().any(|c| mentions(c, ch))
+    block_key(b).is_some_and(|k| ch.contains_key(&k)) || b.children.iter().any(|c| mentions(c, ch))
 }
 
 fn para_mentions(p: &Paragraph, ch: &Changes) -> bool {
-    p.spans.iter().any(|s| s.style.node.is_some_and(|n| ch.contains_key(&n)))
+    p.spans.iter().any(|s| s.style.node.is_some_and(|n| has(ch, n)))
         || p.objects.iter().any(|o| match o {
             InlineObject::Image(_) => false,
             InlineObject::Block(a) => {
-                a.node.is_some_and(|n| ch.contains_key(&n)) || a.content.as_ref().is_some_and(|c| para_mentions(c, ch))
+                a.node.is_some_and(|n| has(ch, n)) || a.content.as_ref().is_some_and(|c| para_mentions(c, ch))
             }
             InlineObject::BlockBox(b) => block_mentions(b, ch),
         })
@@ -451,7 +468,7 @@ fn patch_box(b: &mut LayoutBox, ch: &Changes) {
 }
 
 fn patch_block(b: &mut Block, ch: &Changes) {
-    if let Some(new) = b.node.and_then(|n| ch.get(&n)) {
+    if let Some(new) = block_key(b).and_then(|k| ch.get(&k)) {
         b.style = patched(&b.style, new);
     }
     for c in &mut b.children {
@@ -463,7 +480,7 @@ fn patch_block(b: &mut Block, ch: &Changes) {
 
 fn patch_para(p: &mut Paragraph, ch: &Changes) {
     for span in &mut p.spans {
-        let Some(new) = span.style.node.and_then(|n| ch.get(&n)) else { continue };
+        let Some(new) = span.style.node.and_then(|n| get(ch, n)) else { continue };
         let s = &mut span.style;
         s.color = if new.visible { new.color } else { style::Color::TRANSPARENT };
         if s.background.is_some() {
@@ -478,7 +495,7 @@ fn patch_para(p: &mut Paragraph, ch: &Changes) {
         match object {
             InlineObject::Image(_) => {}
             InlineObject::Block(a) => {
-                if let Some(new) = a.node.and_then(|n| ch.get(&n)) {
+                if let Some(new) = a.node.and_then(|n| get(ch, n)) {
                     a.style = patched(&a.style, new);
                 }
                 if let Some(content) = &mut a.content

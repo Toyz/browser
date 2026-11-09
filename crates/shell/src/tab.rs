@@ -90,6 +90,8 @@ pub struct Tab {
     prerender: Option<Prerender>,
     _hover_timer: Option<Task<()>>,
     images: ImageStore,
+    /// What each image element last showed (see `RenderCx::shown_images`).
+    shown_images: Rc<std::cell::RefCell<HashMap<NodeId, Arc<url::Url>>>>,
     images_pending: usize,
     /// Bumped per finished image (invalidates cached inline layouts).
     images_generation: u64,
@@ -209,6 +211,7 @@ impl Tab {
             prerender: None,
             _hover_timer: None,
             images: ImageStore::default(),
+            shown_images: Rc::default(),
             images_pending: 0,
             images_generation: 0,
             fonts_generation: 0,
@@ -506,6 +509,7 @@ impl Tab {
                 .borrow_mut()
                 .retain(|url, state| wanted.contains(url) && matches!(state, ImageState::Ready { .. }));
         }
+        self.shown_images.borrow_mut().clear();
         self.page = Some(page);
         self.page_gen += 1;
         // Work for the previous page must not land on this one.
@@ -1430,6 +1434,7 @@ impl Tab {
             }),
             palette: self.palette.clone(),
             images: self.images.clone(),
+            shown_images: self.shown_images.clone(),
             images_generation: self.images_generation,
             fonts_generation: self.fonts_generation,
             track_hover,

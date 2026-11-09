@@ -1,6 +1,6 @@
 //! Layout tree → GPUI elements.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -141,6 +141,10 @@ pub type ControlRenderer = Rc<dyn Fn(&Control, &ComputedStyle, &mut Window, &mut
 pub struct RenderCx {
     pub palette: Palette,
     pub images: ImageStore,
+    /// The picture each `<img>`/`<canvas>` last showed: drawn until a new
+    /// `src` is ready (a canvas gets a new one every frame it changes, and
+    /// blanking while each decodes made animations flicker).
+    pub shown_images: Rc<RefCell<HashMap<page::NodeId, Arc<url::Url>>>>,
     /// Bumped whenever an image finishes loading (cached inline layouts with
     /// images in them must be redone: their sizes may have changed).
     pub images_generation: u64,
@@ -381,8 +385,11 @@ fn apply_position(d: Div, s: &ComputedStyle) -> Div {
     // which is what a relative offset does. Percentages are of its own size.
     // Of the border box: with `box-sizing: border-box` that's the width itself.
     let (ew, eh) = if s.border_box { (0.0, 0.0) } else { (s.horizontal_edges(), s.vertical_edges()) };
+    let later = SHIFT_LATER.replace(false);
     let own = |o: style::Offset, size: style::Length, edges: f32| match size {
         style::Length::Px(w) => o.resolve(w + edges),
+        // Moved after layout instead (see `Shifted`).
+        _ if later => o.px,
         // Unknown size: an estimate (a line of text) beats ignoring it.
         _ if o.pct != 0.0 => o.resolve(s.font_size * 1.4 + edges),
         _ => o.px,
@@ -537,8 +544,100 @@ trait Pipe: Sized {
 impl<T> Pipe for T {}
 
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    // `translateX(-130%)` on a box whose size only layout knows (a shimmer
+    // stretched by `inset: 0`): shifted once it's laid out.
+    let later = later_translate(&block.style);
+    if later != (0.0, 0.0) {
+        let outer = SHIFT_LATER.replace(true);
+        let el = transform::within(block.style.rotate, || render_block_inner(block, cx, margin, in_flow));
+        SHIFT_LATER.set(outer);
+        return Shifted { child: Some(el), pct: later }.into_any_element();
+    }
     // A rotated box rotates the icons inside it (all GPUI can turn).
     transform::within(block.style.rotate, || render_block_inner(block, cx, margin, in_flow))
+}
+
+thread_local! {
+    /// The block being rendered moves by its percentage translation after
+    /// layout ([`Shifted`]); `apply_position` leaves that part out.
+    static SHIFT_LATER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The percentages of a translation along axes whose size isn't fixed
+/// (fractions of the laid-out width and height).
+fn later_translate(s: &ComputedStyle) -> (f32, f32) {
+    let unknown = |size: CssLength| !matches!(size, CssLength::Px(_));
+    let x = if unknown(s.width) { s.translate.0.pct / 100.0 } else { 0.0 };
+    let y = if unknown(s.height) { s.translate.1.pct / 100.0 } else { 0.0 };
+    (x, y)
+}
+
+/// A box moved after layout by fractions of its own size: what
+/// `transform: translate(%)` does.
+struct Shifted {
+    child: Option<AnyElement>,
+    pct: (f32, f32),
+}
+
+impl IntoElement for Shifted {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Shifted {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let id = self.child.as_mut().expect("child").request_layout(window, cx);
+        (id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let offset = point(bounds.size.width * self.pct.0, bounds.size.height * self.pct.1);
+        let child = self.child.as_mut().expect("child");
+        window.with_element_offset(offset, |window| child.prepaint(window, cx));
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(child) = &mut self.child {
+            child.paint(window, cx);
+        }
+    }
 }
 
 fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
@@ -696,9 +795,29 @@ fn invisible(s: &ComputedStyle) -> ComputedStyle {
     s
 }
 
+/// The image's picture: its `src` once that's loaded, until then the one
+/// the element showed before.
+pub(crate) fn shown_image(i: &ImageBox, cx: &RenderCx) -> Option<ImageState> {
+    let state = cx.images.borrow().get(&*i.src).cloned();
+    let Some(node) = i.node else { return state };
+    if matches!(state, Some(ImageState::Ready { .. })) {
+        let before = cx.shown_images.borrow_mut().insert(node, i.src.clone());
+        // A canvas's old frames aren't wanted again.
+        if let Some(old) = before.filter(|old| old.scheme() == "data" && **old != *i.src) {
+            cx.images.borrow_mut().remove(&*old);
+        }
+        return state;
+    }
+    let before = cx.shown_images.borrow().get(&node).cloned()?;
+    match cx.images.borrow().get(&*before) {
+        Some(ready @ ImageState::Ready { .. }) => Some(ready.clone()),
+        _ => state,
+    }
+}
+
 fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElement {
     let s = &*i.style;
-    let state = cx.images.borrow().get(&*i.src).cloned();
+    let state = shown_image(i, cx);
     let intrinsic = match &state {
         Some(ImageState::Ready { width, height, .. }) => Some((width / i.density, height / i.density)),
         _ => None,
