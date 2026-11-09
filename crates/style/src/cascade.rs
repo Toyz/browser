@@ -628,12 +628,14 @@ impl Styler {
             });
         }
         self.cascade(&mut style, parent, matched);
-        if el_is_root(doc, id) {
+        let root = el_is_root(doc, id);
+        if root {
             self.root_font_size.set(style.font_size);
             if !style.display.is_block_level() && style.display != Display::None {
                 style.display = Display::Block;
             }
         }
+        self.estimate_size(&mut style, parent, root);
         style
     }
 
@@ -765,17 +767,57 @@ impl Styler {
         Some(out)
     }
 
-    fn resolve_cx(&self, font_size: f32) -> ResolveCx {
+    fn resolve_cx(&self, font_size: f32, container: Option<(f32, f32)>) -> ResolveCx {
+        let (container_width, container_height) = container.unwrap_or((self.env.width, self.env.height));
         ResolveCx {
             font_size,
             root_font_size: self.root_font_size.get(),
             viewport_width: self.env.width,
             viewport_height: self.env.height,
+            container_width,
+            container_height,
+        }
+    }
+
+    /// Guess the element's content size from its style and its parent's
+    /// guess, and make it the container-unit basis below a query container.
+    fn estimate_size(&self, s: &mut ComputedStyle, parent: &ComputedStyle, root: bool) {
+        let parent_w = if root { Some(self.env.width) } else { parent.est_width };
+        let parent_h = if root { Some(self.env.height) } else { parent.est_height };
+        let edges_w = s.padding.left.px_or_zero() + s.padding.right.px_or_zero() + s.border_width.left + s.border_width.right;
+        let edges_h = s.padding.top.px_or_zero() + s.padding.bottom.px_or_zero() + s.border_width.top + s.border_width.bottom;
+        let content = |outer: f32, edges: f32| if s.border_box { (outer - edges).max(0.0) } else { outer };
+        let floating = s.float != Float::None || matches!(s.position, Position::Absolute | Position::Fixed);
+        s.est_width = match s.width {
+            Length::Px(w) => Some(content(w, edges_w)),
+            Length::Percent(p) => parent_w.map(|pw| content(pw * p / 100.0, edges_w)),
+            Length::Auto if s.display.is_block_level() && !floating => parent_w.map(|pw| {
+                (pw - s.margin.left.px_or_zero() - s.margin.right.px_or_zero() - edges_w).max(0.0)
+            }),
+            // Inline boxes don't size the blocks inside them: those span
+            // the containing block (`<li><span><div>` chains).
+            Length::Auto if matches!(s.display, Display::Inline | Display::Contents) => parent_w,
+            Length::Auto => None,
+        };
+        if let (Some(w), Length::Px(max)) = (s.est_width, s.max_width) {
+            s.est_width = Some(w.min(content(max, edges_w)));
+        }
+        s.est_height = match s.height {
+            Length::Px(h) => Some(content(h, edges_h)),
+            Length::Percent(p) => parent_h.map(|ph| content(ph * p / 100.0, edges_h)),
+            Length::Auto if matches!(s.display, Display::Inline | Display::Contents) => parent_h,
+            Length::Auto => None,
+        };
+        if s.container_type > 0 {
+            let fallback = s.query_container.unwrap_or((self.env.width, self.env.height));
+            let w = s.est_width.unwrap_or(fallback.0);
+            let h = if s.container_type == 2 { s.est_height.unwrap_or(fallback.1) } else { fallback.1 };
+            s.query_container = Some((w, h));
         }
     }
 
     fn apply(&self, s: &mut ComputedStyle, parent: &ComputedStyle, d: &Decl) {
-        let cx = self.resolve_cx(s.font_size);
+        let cx = self.resolve_cx(s.font_size, s.query_container);
         let len = |spec: &LenSpec| spec.resolve(&cx);
         match d {
             Decl::Display(v) => s.display = *v,
@@ -960,6 +1002,7 @@ impl Styler {
             Decl::ZIndex(v) => s.z_index = *v,
             Decl::ObjectFit(v) => s.object_fit = *v,
             Decl::TextEllipsis(v) => s.text_ellipsis = *v,
+            Decl::ContainerType(v) => s.container_type = *v,
             Decl::LineClamp(v) => s.line_clamp = *v,
             Decl::ColorScheme(v) => s.dark = *v && self.env.dark,
             Decl::VerticalAlign(crate::props::VAlignSpec::Keyword(k)) => s.vertical_align = *k,
@@ -981,7 +1024,7 @@ impl Styler {
                 s.font_size = match spec {
                     FontSizeSpec::Smaller => parent_size / 1.2,
                     FontSizeSpec::Larger => parent_size * 1.2,
-                    FontSizeSpec::Len(l) => match l.resolve(&self.resolve_cx(parent_size)) {
+                    FontSizeSpec::Len(l) => match l.resolve(&self.resolve_cx(parent_size, parent.query_container)) {
                         Length::Px(v) => v,
                         Length::Percent(p) => parent_size * p / 100.0,
                         Length::Auto => parent_size,
@@ -1520,6 +1563,17 @@ mod tests {
             style = styler.compute(doc, id, &style);
         }
         style
+    }
+
+    #[test]
+    fn container_query_units() {
+        let (doc, s) = styled(
+            r#"<section><div><span><p>x</p></span></div></section>"#,
+            "section { width: 400px } div { container-type: inline-size; width: 50%; padding: 0 } p { font-size: 10cqi; width: 50cqw }",
+        );
+        let p = style_of(&doc, &s, "p");
+        assert_eq!(p.font_size, 20.0);
+        assert_eq!(p.width, Length::Px(100.0));
     }
 
     #[test]

@@ -861,7 +861,8 @@ impl Builder<'_> {
                 out.push(LayoutBox::Block(float));
                 continue;
             }
-            // Consecutive floats on the same side stack in one column.
+            // Consecutive floats on the same side line up, wrapping when
+            // they run out of room (tiles, nav items, thumbnails).
             let side = float.style.float;
             let mut floats = vec![LayoutBox::Block(float)];
             while let Some(LayoutBox::Block(next)) = iter.peek() {
@@ -886,9 +887,23 @@ impl Builder<'_> {
                 floats.pop().unwrap()
             } else {
                 let mut st = ComputedStyle::anonymous(parent);
-                st.display = Display::Block;
+                st.display = Display::Flex;
+                // A box as wide as its content (`width: max-content`) never
+                // runs out of room.
+                st.flex_wrap = !parent.fit_width;
                 st.flex_shrink = 0.0;
-                LayoutBox::Block(self.synthetic_block(st, BlockKind::Normal, floats))
+                st.align_items = Some(style::Align::Start);
+                // Right floats run from the right edge, the first outermost.
+                if side == Float::Right {
+                    floats.reverse();
+                    st.justify_content = Some(Justify::End);
+                }
+                for f in &mut floats {
+                    if let LayoutBox::Block(b) = f {
+                        Arc::make_mut(&mut b.style).flex_shrink = 0.0;
+                    }
+                }
+                LayoutBox::Block(self.synthetic_block(st, BlockKind::Flex, floats))
             };
             if beside.is_empty() {
                 // Nothing to sit beside: just push it to its side.

@@ -30,6 +30,8 @@ impl MediaEnv {
             root_font_size: 16.0,
             viewport_width: self.width,
             viewport_height: self.height,
+            container_width: self.width,
+            container_height: self.height,
         };
         match spec.resolve(&cx) {
             crate::values::Length::Px(v) => Some(v),

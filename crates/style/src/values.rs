@@ -81,6 +81,9 @@ pub struct Lin {
     pub vh: f32,
     pub vmin: f32,
     pub vmax: f32,
+    /// Container query units: % of the query container's width / height.
+    pub cqw: f32,
+    pub cqh: f32,
     pub pct: f32,
 }
 
@@ -95,6 +98,8 @@ impl std::ops::Add for Lin {
             vh: self.vh + o.vh,
             vmin: self.vmin + o.vmin,
             vmax: self.vmax + o.vmax,
+            cqw: self.cqw + o.cqw,
+            cqh: self.cqh + o.cqh,
             pct: self.pct + o.pct,
         }
     }
@@ -118,6 +123,8 @@ impl Lin {
             vh: self.vh + o.vh,
             vmin: self.vmin + o.vmin,
             vmax: self.vmax + o.vmax,
+            cqw: self.cqw + o.cqw,
+            cqh: self.cqh + o.cqh,
             pct: self.pct + o.pct,
         }
     }
@@ -131,6 +138,8 @@ impl Lin {
             vh: self.vh * k,
             vmin: self.vmin * k,
             vmax: self.vmax * k,
+            cqw: self.cqw * k,
+            cqh: self.cqh * k,
             pct: self.pct * k,
         }
     }
@@ -148,6 +157,8 @@ impl Lin {
             + self.vh * cx.viewport_height / 100.0
             + self.vmin * cx.viewport_width.min(cx.viewport_height) / 100.0
             + self.vmax * cx.viewport_width.max(cx.viewport_height) / 100.0
+            + self.cqw * cx.container_width / 100.0
+            + self.cqh * cx.container_height / 100.0
     }
 
     pub fn resolve(&self, cx: &ResolveCx) -> Length {
@@ -242,6 +253,9 @@ pub struct ResolveCx {
     pub root_font_size: f32,
     pub viewport_width: f32,
     pub viewport_height: f32,
+    /// The nearest query container's size (the viewport without one).
+    pub container_width: f32,
+    pub container_height: f32,
 }
 
 /// A color as the page asked for it. Theme-relative variants (from the UA

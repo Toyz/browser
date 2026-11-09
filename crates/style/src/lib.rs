@@ -160,6 +160,15 @@ pub struct ComputedStyle {
     /// The used color scheme is dark: the page allows it (`color-scheme`)
     /// and the user prefers it.
     pub dark: bool,
+    /// `container-type`: 0 none, 1 inline-size, 2 size.
+    pub container_type: u8,
+    /// The size container query units refer to (inherited; `None`: the
+    /// viewport).
+    pub query_container: Option<(f32, f32)>,
+    /// A guess at this element's content size from the cascade alone (px
+    /// widths, percentages of the parent's guess), for container units.
+    pub est_width: Option<f32>,
+    pub est_height: Option<f32>,
     pub custom: CustomProps,
 }
 
@@ -253,6 +262,10 @@ impl ComputedStyle {
             visible: true,
             cursor: Cursor::Auto,
             dark: false,
+            container_type: 0,
+            query_container: None,
+            est_width: None,
+            est_height: None,
             custom: CustomProps::default(),
         }
     }
@@ -276,6 +289,7 @@ impl ComputedStyle {
             visible: parent.visible,
             cursor: parent.cursor,
             dark: parent.dark,
+            query_container: parent.query_container,
             custom: parent.custom.clone(),
             svg_paint: parent.svg_paint.clone(),
             text_fill: parent.text_fill,

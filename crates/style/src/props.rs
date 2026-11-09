@@ -197,6 +197,8 @@ pub enum Decl {
     ZIndex(Option<i32>),
     ObjectFit(crate::ObjectFit),
     TextEllipsis(bool),
+    /// `container-type` (0 normal, 1 inline-size, 2 size).
+    ContainerType(u8),
     LineClamp(Option<u32>),
     /// `color-scheme` allows dark.
     ColorScheme(bool),
@@ -563,6 +565,20 @@ fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PR
                 _ => crate::ObjectFit::Fill,
             };
             out.push(D::ObjectFit(fit));
+        }
+        "container-type" | "container" => {
+            // `container: name / inline-size`: the type follows the slash.
+            let mut kind = 0;
+            while let Ok(token) = p.next() {
+                if let Token::Ident(id) = token {
+                    match id.to_ascii_lowercase().as_str() {
+                        "inline-size" => kind = 1,
+                        "size" => kind = 2,
+                        _ => {}
+                    }
+                }
+            }
+            out.push(D::ContainerType(kind));
         }
         "pointer-events" => {
             let v = ident(p)?;
@@ -2005,10 +2021,13 @@ pub(crate) fn unit_lin(value: f32, unit: &str) -> Option<Lin> {
         "em" | "cap" | "ic" | "lh" => l.em = value,
         "ex" | "ch" => l.em = value * 0.5,
         "rem" | "rlh" | "rch" | "rex" => l.rem = value,
-        "vw" | "svw" | "lvw" | "dvw" | "vi" | "svi" | "lvi" | "dvi" | "cqw" | "cqi" => l.vw = value,
-        "vh" | "svh" | "lvh" | "dvh" | "vb" | "svb" | "lvb" | "dvb" | "cqh" | "cqb" => l.vh = value,
-        "vmin" | "svmin" | "lvmin" | "dvmin" | "cqmin" => l.vmin = value,
-        "vmax" | "svmax" | "lvmax" | "dvmax" | "cqmax" => l.vmax = value,
+        "vw" | "svw" | "lvw" | "dvw" | "vi" | "svi" | "lvi" | "dvi" => l.vw = value,
+        "vh" | "svh" | "lvh" | "dvh" | "vb" | "svb" | "lvb" | "dvb" => l.vh = value,
+        "vmin" | "svmin" | "lvmin" | "dvmin" => l.vmin = value,
+        "vmax" | "svmax" | "lvmax" | "dvmax" => l.vmax = value,
+        // (cqmin/cqmax: the inline size, which is the smaller one mostly.)
+        "cqw" | "cqi" | "cqmin" | "cqmax" => l.cqw = value,
+        "cqh" | "cqb" => l.cqh = value,
         _ => return None,
     }
     Some(l)
