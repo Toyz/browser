@@ -575,6 +575,7 @@ pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
         positioned: 0,
         opacity: 1.0,
         fixed: Vec::new(),
+        avail: styler.env().width,
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
@@ -633,6 +634,42 @@ struct Builder<'a> {
     /// The product of the opacities of the elements we're inside: boxes
     /// lifted out of them (absolute, fixed) take it along.
     opacity: f32,
+    /// Roughly how wide the current containing block's content is: the
+    /// viewport, less the margins, borders and padding and the widths and
+    /// max-widths on the way down. `auto-fill` grids pick their column
+    /// count from it (layout proper happens later, in GPUI).
+    avail: f32,
+}
+
+/// The content width of a box with `style` in a containing block `avail`
+/// wide (see `Builder::avail`).
+fn content_width(style: &ComputedStyle, avail: f32) -> f32 {
+    let px = |l: Length| match l {
+        Length::Px(v) => Some(v),
+        Length::Percent(p) => Some(avail * p / 100.0),
+        Length::Auto => None,
+    };
+    let edges = px(style.padding.left).unwrap_or(0.0)
+        + px(style.padding.right).unwrap_or(0.0)
+        + style.border_width.left
+        + style.border_width.right;
+    let outer = |w: f32| if style.border_box { w } else { w + edges };
+    let mut width = match px(style.width) {
+        Some(w) => outer(w),
+        None => avail - px(style.margin.left).unwrap_or(0.0) - px(style.margin.right).unwrap_or(0.0),
+    };
+    if let Some(max) = px(style.max_width) {
+        width = width.min(outer(max));
+    }
+    if let Some(min) = px(style.min_width) {
+        width = width.max(outer(min));
+    }
+    (width - edges).max(0.0)
+}
+
+/// How many `repeat(auto-fill, minmax(min, 1fr))` columns fit in `width`.
+fn auto_columns(width: f32, min: f32, gap: f32) -> u16 {
+    (((width + gap) / (min + gap).max(1.0)).floor() as i64).clamp(1, 64) as u16
 }
 
 /// Accumulates the children of one block while walking its subtree.
@@ -1366,7 +1403,24 @@ impl Builder<'_> {
             self.flush(&mut c);
         }
         Generated::place(generated.before_box.take(), &mut c, link);
+        let outer_avail = self.avail;
+        let content = content_width(&style, outer_avail);
+        let mut style = style;
+        if kind == BlockKind::Grid
+            && let Some((min, _)) = style.grid_auto
+        {
+            let cols = auto_columns(content, min, style.column_gap.px_or_zero());
+            Arc::make_mut(&mut style).grid_columns = Some(cols);
+        }
+        self.avail = match (&kind, style.grid_columns) {
+            (BlockKind::Grid, Some(n)) if style.grid_tracks.is_none() && style.grid_areas.is_none() => {
+                let n = n.max(1) as f32;
+                (content - style.column_gap.px_or_zero() * (n - 1.0)) / n
+            }
+            _ => content,
+        };
         self.build_children(id, &style, &mut c, link, blockify);
+        self.avail = outer_avail;
         if let Some((text, st)) = &generated.after {
             c.inline.push_text(text, st, link);
         }
@@ -1382,6 +1436,26 @@ impl Builder<'_> {
             c.children
         };
         let mut children = children;
+        // `auto-fit`: empty tracks collapse, so the items share the row.
+        if kind == BlockKind::Grid
+            && let Some((_, true)) = style.grid_auto
+        {
+            let used: u16 = children
+                .iter()
+                .map(|ch| match ch {
+                    LayoutBox::Block(b) => match b.style.grid_column {
+                        Some(GridSpan::Span(n)) => n.max(1),
+                        _ => 1,
+                    },
+                    _ => 1,
+                })
+                .sum();
+            if let Some(cols) = style.grid_columns
+                && used.max(1) < cols
+            {
+                Arc::make_mut(&mut style).grid_columns = Some(used.max(1));
+            }
+        }
         children.append(&mut c.absolutes);
         if kind == BlockKind::Table {
             layout_table(&mut children);

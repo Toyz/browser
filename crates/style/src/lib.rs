@@ -70,6 +70,9 @@ pub struct ComputedStyle {
     pub flex_shrink: f32,
     pub flex_basis: Length,
     pub grid_columns: Option<u16>,
+    /// `repeat(auto-fill | auto-fit, minmax(<px>, 1fr))`: the minimum
+    /// track size and whether it's `auto-fit`. Layout picks the count.
+    pub grid_auto: Option<(f32, bool)>,
     pub grid_column: Option<GridSpan>,
     /// Explicit column tracks, when they aren't all equal (`12rem 1fr`).
     pub grid_tracks: Option<Arc<[Track]>>,
@@ -180,6 +183,7 @@ impl ComputedStyle {
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             grid_columns: None,
+            grid_auto: None,
             grid_column: None,
             grid_tracks: None,
             grid_areas: None,

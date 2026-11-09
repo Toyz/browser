@@ -784,15 +784,23 @@ impl Styler {
             Decl::FlexGrow(v) => s.flex_grow = v.max(0.0),
             Decl::FlexShrink(v) => s.flex_shrink = v.max(0.0),
             Decl::FlexBasis(v) => s.flex_basis = len(v),
-            Decl::GridColumns(GridCols::None) => s.grid_columns = None,
-            Decl::GridColumns(GridCols::Count(n)) => s.grid_columns = Some(*n),
-            Decl::GridColumns(GridCols::AutoFill(min)) => {
+            Decl::GridColumns(GridCols::None) => {
+                s.grid_columns = None;
+                s.grid_auto = None;
+            }
+            Decl::GridColumns(GridCols::Count(n)) => {
+                s.grid_columns = Some(*n);
+                s.grid_auto = None;
+            }
+            Decl::GridColumns(GridCols::AutoFill(min, fit)) => {
                 let min = match len(min) {
                     Length::Px(v) if v > 0.0 => v,
                     _ => 200.0,
                 };
-                // Unknown container width: estimate from the viewport.
+                // Layout knows the container's width better (see
+                // `grid_auto`); this is the fallback.
                 s.grid_columns = Some(((self.env.width - 32.0) / min).floor().clamp(1.0, 12.0) as u16);
+                s.grid_auto = Some((min, *fit));
             }
             Decl::GridColumn(v) => s.grid_column = *v,
             Decl::GridTracks(None) => s.grid_tracks = None,
@@ -1216,6 +1224,27 @@ fn apply_wide(s: &mut ComputedStyle, parent: &ComputedStyle, name: &str, wide: W
         "max-height" => s.max_height = src.max_height,
         "min-height" => s.min_height = src.min_height,
         "opacity" => s.opacity = src.opacity,
+        "gap" | "grid-gap" => {
+            s.row_gap = src.row_gap;
+            s.column_gap = src.column_gap;
+        }
+        "row-gap" | "grid-row-gap" => s.row_gap = src.row_gap,
+        "column-gap" | "grid-column-gap" => s.column_gap = src.column_gap,
+        "align-items" => s.align_items = src.align_items,
+        "align-self" => s.align_self = src.align_self,
+        "align-content" => s.align_content = src.align_content,
+        "justify-content" => s.justify_content = src.justify_content,
+        "flex-direction" => s.flex_direction = src.flex_direction,
+        "flex-wrap" => s.flex_wrap = src.flex_wrap,
+        "flex-grow" => s.flex_grow = src.flex_grow,
+        "flex-shrink" => s.flex_shrink = src.flex_shrink,
+        "flex-basis" => s.flex_basis = src.flex_basis,
+        "flex" => {
+            s.flex_grow = src.flex_grow;
+            s.flex_shrink = src.flex_shrink;
+            s.flex_basis = src.flex_basis;
+        }
+        "cursor" => s.cursor = src.cursor,
         "text-decoration" | "text-decoration-line" => {
             s.underline = parent.underline || src.underline;
             s.strikethrough = parent.strikethrough || src.strikethrough;
@@ -1429,6 +1458,22 @@ mod tests {
         let b = style_of(&doc, &s, "b");
         assert_eq!(b.gradients.as_ref().unwrap()[0].shape, GradientShape::Linear(180.0));
         assert_eq!(b.background_repeat, BgRepeat { x: true, y: false });
+        // The checkerboard idiom, and angle stops.
+        let (doc, s) = styled(
+            r#"<p>x</p><em>y</em>"#,
+            "p { background: repeating-conic-gradient(#222 0% 25%, #111 0% 50%) 0 0 / 20px 20px } \
+             em { background: conic-gradient(from 90deg at 25% 75%, red 0deg 90deg, blue 0.5turn) }",
+        );
+        let p = style_of(&doc, &s, "p");
+        let g = &p.gradients.as_ref().unwrap()[0];
+        assert!(g.repeating);
+        assert_eq!(g.shape, GradientShape::Conic { from: 0.0, at: BgPos::CENTER });
+        assert_eq!(g.stops.len(), 4);
+        let em = style_of(&doc, &s, "em");
+        let g = &em.gradients.as_ref().unwrap()[0];
+        assert_eq!(g.shape, GradientShape::Conic { from: 90.0, at: BgPos { x: 0.25, y: 0.75 } });
+        assert_eq!(g.stops[1].pos, Some(StopPos::Px(90.0)));
+        assert_eq!(g.stops[2].pos, Some(StopPos::Px(180.0)));
     }
 
     #[test]

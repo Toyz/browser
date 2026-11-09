@@ -198,7 +198,7 @@ fn simple_linear(g: &Gradient, (w, h): (f32, f32)) -> Option<f32> {
             let (dx, dy) = (sx * h, sy * w);
             Some(dx.atan2(-dy).to_degrees().rem_euclid(360.0))
         }
-        GradientShape::Radial { .. } => None,
+        GradientShape::Radial { .. } | GradientShape::Conic { .. } => None,
     }
 }
 
@@ -255,6 +255,9 @@ fn rasterize(g: &Gradient, colors: &[Rgba], tile: (f32, f32), (pw, ph): (u32, u3
     enum Line {
         Linear { dir: (f32, f32), len: f32 },
         Radial { center: (f32, f32), radii: (f32, f32) },
+        /// Angle around `center` from `from` (radians), as a fraction of a
+        /// turn.
+        Conic { center: (f32, f32), from: f32 },
     }
     let line = match g.shape {
         GradientShape::Linear(deg) => {
@@ -299,10 +302,13 @@ fn rasterize(g: &Gradient, colors: &[Rgba], tile: (f32, f32), (pw, ph): (u32, u3
             };
             Line::Radial { center: (cx, cy), radii: (radii.0.max(1e-3), radii.1.max(1e-3)) }
         }
+        GradientShape::Conic { from, at } => Line::Conic { center: (tw * at.x, th * at.y), from: from.to_radians() },
     };
     let length = match &line {
         Line::Linear { len, .. } => *len,
         Line::Radial { radii, .. } => radii.0,
+        // Positions in degrees (`Px`) or fractions of a turn.
+        Line::Conic { .. } => 360.0,
     }
     .max(1e-3);
     let stops = resolve_stops(&g.stops, colors, length);
@@ -338,6 +344,11 @@ fn rasterize(g: &Gradient, colors: &[Rgba], tile: (f32, f32), (pw, ph): (u32, u3
                 Line::Radial { center, radii } => {
                     let (dx, dy) = ((px_ - center.0) / radii.0, (py - center.1) / radii.1);
                     (dx * dx + dy * dy).sqrt()
+                }
+                Line::Conic { center, from } => {
+                    // 0 at the top, clockwise.
+                    let a = (px_ - center.0).atan2(-(py - center.1)) - from;
+                    a.rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
                 }
             };
             let [r, g_, b, a] = color_at(t);

@@ -654,6 +654,10 @@ pub enum GradientShape {
     /// y: -1 top / 1 bottom), whose angle depends on the box's shape.
     LinearCorner(f32, f32),
     Radial { circle: bool, size: RadialSize, at: BgPos },
+    /// `conic-gradient(from <deg> at <pos>, ...)`: stop positions are
+    /// fractions of a turn (angle stops are stored as `Px(degrees)` over a
+    /// 360-long line).
+    Conic { from: f32, at: BgPos },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

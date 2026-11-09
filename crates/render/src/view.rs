@@ -477,6 +477,13 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     children
         .iter()
         .map(|child| {
+            // Unwrapped text as a flex item can't shrink below its width
+            // (its automatic minimum size), so it needs no scroller.
+            if let LayoutBox::Paragraph(p) = child
+                && !p.style.white_space.wraps()
+            {
+                return div().flex_none().child(crate::inline::InlineFlow::new(p.clone(), cx)).into_any_element();
+            }
             let el = render_box(child, cx, child.margin(), false);
             if is_out_of_flow(child) { clipped_deferred(el) } else { el }
         })

@@ -84,8 +84,9 @@ pub enum WeightSpec {
 pub enum GridCols {
     None,
     Count(u16),
-    /// `repeat(auto-fill, minmax(<min>, 1fr))`: as many as fit.
-    AutoFill(LenSpec),
+    /// `repeat(auto-fill, minmax(<min>, 1fr))`: as many as fit. `true` for
+    /// `auto-fit` (empty tracks collapse, so the items stretch).
+    AutoFill(LenSpec, bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1185,6 +1186,7 @@ fn parse_grid_columns<'i>(p: &mut Parser<'i>) -> PResult<'i, GridCols> {
     }
     let mut count: u32 = 0;
     let mut auto_fill = None;
+    let mut fit = false;
     while !p.is_exhausted() {
         match p.next()?.clone() {
             Token::SquareBracketBlock => {} // line names
@@ -1192,7 +1194,10 @@ fn parse_grid_columns<'i>(p: &mut Parser<'i>) -> PResult<'i, GridCols> {
                 p.parse_nested_block(|p| {
                     let n = match p.next()?.clone() {
                         Token::Number { int_value: Some(n), .. } => Some(n.max(1) as u32),
-                        Token::Ident(_) => None, // auto-fill / auto-fit
+                        Token::Ident(ref i) => {
+                            fit = i.eq_ignore_ascii_case("auto-fit");
+                            None
+                        }
                         _ => return err(p),
                     };
                     p.expect_comma()?;
@@ -1229,7 +1234,7 @@ fn parse_grid_columns<'i>(p: &mut Parser<'i>) -> PResult<'i, GridCols> {
         }
     }
     Ok(match auto_fill {
-        Some(min) if count == 0 => GridCols::AutoFill(min),
+        Some(min) if count == 0 => GridCols::AutoFill(min, fit),
         _ => GridCols::Count(count.clamp(1, 64) as u16),
     })
 }
@@ -1576,15 +1581,18 @@ impl ImageLayer {
 }
 
 /// A whole `*-gradient()`: the shape and every color stop. (Positioned
-/// just after the function token; `conic-gradient` isn't supported.)
+/// just after the function token.)
 fn parse_gradient<'i>(p: &mut Parser<'i>, name: &str) -> PResult<'i, Gradient> {
     let repeating = name.starts_with("repeating-");
     let radial = name.contains("radial");
-    if !radial && !name.contains("linear") {
+    let conic = name.contains("conic");
+    if !radial && !conic && !name.contains("linear") {
         return err(p);
     }
     p.parse_nested_block(|p| {
-        let mut shape = if radial {
+        let mut shape = if conic {
+            GradientShape::Conic { from: 0.0, at: BgPos::CENTER }
+        } else if radial {
             GradientShape::Radial { circle: false, size: RadialSize::FarthestCorner, at: BgPos::CENTER }
         } else {
             GradientShape::Linear(180.0)
@@ -1594,7 +1602,18 @@ fn parse_gradient<'i>(p: &mut Parser<'i>, name: &str) -> PResult<'i, Gradient> {
         let starts_with_color = parse_color(p).is_ok();
         p.reset(&state);
         if !starts_with_color {
-            if radial {
+            if conic {
+                let (mut from, mut at) = (0.0, BgPos::CENTER);
+                while !p.is_exhausted() {
+                    match p.next()?.clone() {
+                        Token::Comma => break,
+                        Token::Ident(id) if id.eq_ignore_ascii_case("from") => from = p.try_parse(parse_angle).unwrap_or(0.0),
+                        Token::Ident(id) if id.eq_ignore_ascii_case("at") => at = parse_bg_position(p).unwrap_or(BgPos::CENTER),
+                        _ => {}
+                    }
+                }
+                shape = GradientShape::Conic { from, at };
+            } else if radial {
                 let (mut circle, mut size, mut at) = (false, RadialSize::FarthestCorner, BgPos::CENTER);
                 let mut lengths = Vec::new();
                 while !p.is_exhausted() {
@@ -1686,6 +1705,10 @@ fn parse_gradient<'i>(p: &mut Parser<'i>, name: &str) -> PResult<'i, Gradient> {
 fn stop_px(value: f32, unit: &str) -> f32 {
     match unit.to_ascii_lowercase().as_str() {
         "em" | "rem" => value * 16.0,
+        // Conic stops: angles, as degrees.
+        "turn" => value * 360.0,
+        "rad" => value.to_degrees(),
+        "grad" => value * 0.9,
         _ => value,
     }
 }
@@ -2338,7 +2361,7 @@ mod tests {
         );
         assert_eq!(
             parse("grid-template-columns", "repeat(auto-fill, minmax(200px, 1fr))"),
-            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0))), Decl::GridTracks(None)]
+            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridTracks(None)]
         );
     }
 

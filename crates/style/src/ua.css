@@ -13,6 +13,11 @@ track, area, map, dialog, noembed, noframes, rp, col, colgroup, [hidden] {
   display: none;
 }
 
+/* Shadow DOM slots only place their content. */
+slot {
+  display: contents;
+}
+
 /* Replaced content we can't render yet. */
 math, canvas, video, audio, iframe, object, embed, picture > source {
   display: none;
