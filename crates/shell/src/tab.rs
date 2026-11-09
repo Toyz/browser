@@ -84,6 +84,8 @@ pub struct Tab {
     /// Bumped per page shown, so hover reports from the previous page's last
     /// frame (with that document's node ids) are ignored.
     page_gen: u64,
+    /// A styler kept for patching hover changes (keyed by media signature).
+    hover_styler: Option<(Vec<bool>, style::Styler)>,
     /// The interaction state the current layout was styled with.
     element_state: Arc<ElementState>,
     /// Screenshot job from the command line, run once the first page loads.
@@ -134,6 +136,7 @@ impl Tab {
             scrolling_until: None,
             _scroll_end: None,
             page_gen: 0,
+            hover_styler: None,
             element_state: Arc::default(),
             capture: None,
             _capture_task: None,
@@ -339,6 +342,7 @@ impl Tab {
         }
         self.page = Some(page);
         self.page_gen += 1;
+        self.hover_styler = None;
         self.hover_blocks.clear();
         self.hover_inline = None;
         self.hovered_link = None;
@@ -537,8 +541,50 @@ impl Tab {
                 return;
             }
         }
-        if self.current_state() != *self.element_state {
-            self.restyle(Duration::from_millis(16), window, cx);
+        let state = Arc::new(self.current_state());
+        if *state == *self.element_state {
+            return;
+        }
+        let started = std::time::Instant::now();
+        match self.patch_paint(&state, window) {
+            Some(patched) => {
+                if let Some(layout) = patched
+                    && let Some(page) = &mut self.page
+                {
+                    // Same geometry: nothing to re-measure.
+                    page.layout = Arc::new(layout);
+                }
+                self.element_state = state;
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("hover patched in {:?}", started.elapsed());
+                }
+                cx.notify();
+                // Rules the patch can't see (`:has(:hover)`, `a:hover + b`)
+                // get caught by a full restyle once the pointer settles.
+                self.restyle(Duration::from_millis(600), window, cx);
+            }
+            None => self.restyle(Duration::from_millis(16), window, cx),
+        }
+    }
+
+    /// Try to apply an interaction state change as a paint-only patch.
+    /// `Some(None)`: nothing visible changed; `None`: needs a full restyle.
+    fn patch_paint(&mut self, state: &Arc<ElementState>, window: &Window) -> Option<Option<render::LayoutTree>> {
+        let page = self.page.as_ref()?;
+        let (doc, styles) = (page.doc.as_ref()?, page.styles.as_ref()?);
+        let env = media_env(window);
+        let signature = styles.signature(&env);
+        if page.signature != signature {
+            return None;
+        }
+        if self.hover_styler.as_ref().is_none_or(|(sig, _)| *sig != signature) {
+            self.hover_styler = Some((signature, styles.styler_with_state(env, self.element_state.clone())));
+        }
+        let (_, styler) = self.hover_styler.as_mut()?;
+        match render::hover::patch(&page.layout, doc, styler, &self.element_state, state) {
+            render::hover::Patch::Unchanged => Some(None),
+            render::hover::Patch::Painted(layout) => Some(Some(layout)),
+            render::hover::Patch::NeedsRestyle => None,
         }
     }
 

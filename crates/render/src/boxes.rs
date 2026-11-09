@@ -338,6 +338,7 @@ pub enum InlineObject {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomicBox {
+    pub node: Option<NodeId>,
     pub style: Arc<ComputedStyle>,
     pub content: Option<Arc<Paragraph>>,
 }
@@ -428,6 +429,8 @@ impl Paragraph {
 /// A container that's been split across rows; each row re-creates it around its slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wrapper {
+    /// The split container's element (for hover restyles).
+    pub node: Option<NodeId>,
     pub indent_left: f32,
     pub indent_right: f32,
     pub style: Arc<ComputedStyle>,
@@ -447,6 +450,19 @@ pub struct Row {
     /// Absolutely positioned children of a split container, placed relative
     /// to this (the container's first) row.
     pub absolutes: Vec<LayoutBox>,
+    /// Vertical space around each wrapper this row starts or ends (parallel
+    /// to `wrappers`): margins above go outside its background, the bottom
+    /// padding inside it.
+    pub edges: Vec<WrapperEdge>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WrapperEdge {
+    /// Above the wrapper's box (its top margin), on the row that starts it.
+    pub above: f32,
+    /// Inside the wrapper's box after the content (padding-bottom and the
+    /// last child's margin), on the row that ends it.
+    pub below: f32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -802,6 +818,17 @@ impl Builder<'_> {
         if kind == BlockKind::Table {
             layout_table(&mut children);
         }
+        if kind == BlockKind::Grid {
+            // Grid tracks are `minmax(0, 1fr)`: items shrink to their column
+            // whatever their content (CSS's automatic minimum is 0 there).
+            for child in &mut children {
+                if let LayoutBox::Block(b) = child
+                    && b.style.min_width.is_auto()
+                {
+                    b.min_content = 0.0;
+                }
+            }
+        }
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         let element = self.doc.element(id);
         let tag_is_heading =
@@ -992,7 +1019,7 @@ impl Builder<'_> {
                         _ => None,
                     };
                     let object = match content {
-                        Some(content) => InlineObject::Block(AtomicBox { style: style.clone(), content }),
+                        Some(content) => InlineObject::Block(AtomicBox { node: Some(child), style: style.clone(), content }),
                         None => InlineObject::BlockBox(Arc::new(block)),
                     };
                     c.inline.push_object(object, &style, link);
@@ -1202,6 +1229,11 @@ fn block_intrinsic(s: &ComputedStyle, kind: &BlockKind, children: &[LayoutBox]) 
     if let Length::Px(limit) = s.outer_width(s.max_width) {
         min = min.min(limit);
         max = max.min(limit);
+    }
+    // A box that clips its content (`overflow: hidden`, `truncate`) never
+    // forces anything wider: its automatic minimum width is 0.
+    if s.overflow != Overflow::Visible && !matches!(s.width, Length::Px(_)) {
+        min = 0.0;
     }
     if let Length::Px(m) = s.outer_width(s.min_width) {
         min = min.max(m);
@@ -1760,6 +1792,7 @@ fn flatten(root: Block) -> LayoutTree {
     let mut f = Flattener {
         tree: LayoutTree::default(),
         pending_space: 0.,
+        starting: Vec::new(),
         pending_anchors: Vec::new(),
         wrappers: Arc::from([]),
     };
@@ -1775,6 +1808,8 @@ fn flatten(root: Block) -> LayoutTree {
 struct Flattener {
     tree: LayoutTree,
     pending_space: f32,
+    /// Wrappers started since the last row: (depth, space above them).
+    starting: Vec<(usize, f32)>,
     pending_anchors: Vec<String>,
     wrappers: Arc<[Wrapper]>,
 }
@@ -1784,12 +1819,22 @@ impl Flattener {
         self.pending_anchors.append(&mut block.anchors);
         let s = block.style.clone();
         let px = |l: Length| l.px_or_zero();
-        self.pending_space = self.pending_space.max(px(s.margin.top)) + px(s.padding.top);
+        let wrapped = block.needs_wrapper();
+        let depth = self.wrappers.len();
+        if wrapped {
+            // Margins (collapsed with what's pending) go above the box; the
+            // padding is inside it, so it stays pending for the first row.
+            let above = self.pending_space.max(px(s.margin.top));
+            self.starting.push((depth, above));
+            self.pending_space = px(s.padding.top);
+        } else {
+            self.pending_space = self.pending_space.max(px(s.margin.top)) + px(s.padding.top);
+        }
 
         let saved_wrappers = self.wrappers.clone();
-        let (inner_left, inner_right) = if block.needs_wrapper() {
+        let (inner_left, inner_right) = if wrapped {
             let mut wrappers = self.wrappers.to_vec();
-            wrappers.push(Wrapper { indent_left, indent_right, style: s.clone() });
+            wrappers.push(Wrapper { node: block.node, indent_left, indent_right, style: s.clone() });
             self.wrappers = wrappers.into();
             (0.0, 0.0)
         } else {
@@ -1810,7 +1855,9 @@ impl Flattener {
         if !absolutes.is_empty() {
             if first_row == self.tree.rows.len() {
                 // No in-flow content: an empty row to hang them on.
+                let edges = self.edges();
                 self.tree.rows.push(Row {
+                    edges,
                     wrappers: self.wrappers.clone(),
                     space_before: 0.0,
                     indent_left: inner_left,
@@ -1834,7 +1881,33 @@ impl Flattener {
             self.tree.rows[first_row].absolutes.extend(absolutes);
         }
         self.wrappers = saved_wrappers;
-        self.pending_space = self.pending_space.max(px(s.margin.bottom)) + px(s.padding.bottom);
+        if !wrapped {
+            self.pending_space = self.pending_space.max(px(s.margin.bottom)) + px(s.padding.bottom);
+        } else if self.tree.rows.len() > first_row {
+            // Close the box on its last row: the rest of its content's space
+            // and its padding inside, then its margin outside.
+            let last = self.tree.rows.last_mut().expect("rows were added");
+            if let Some(edge) = last.edges.get_mut(depth) {
+                edge.below += self.pending_space + px(s.padding.bottom);
+            }
+            self.pending_space = px(s.margin.bottom);
+        } else {
+            // Nothing in it: it was never drawn.
+            let above = self.starting.iter().find(|(d, _)| *d == depth).map(|&(_, a)| a).unwrap_or(0.0);
+            self.starting.retain(|(d, _)| *d < depth);
+            self.pending_space = above.max(px(s.margin.bottom));
+        }
+    }
+
+    /// Start a row: claim the space above any wrappers it opens.
+    fn edges(&mut self) -> Vec<WrapperEdge> {
+        let mut edges = vec![WrapperEdge::default(); self.wrappers.len()];
+        for (depth, above) in self.starting.drain(..) {
+            if let Some(e) = edges.get_mut(depth) {
+                e.above = above;
+            }
+        }
+        edges
     }
 
     fn visit(&mut self, child: LayoutBox, indent_left: f32, indent_right: f32) {
@@ -1873,7 +1946,9 @@ impl Flattener {
                 let margin = content.margin();
                 // Rows can't express auto/percent horizontal margins as an indent; zero them
                 // here and let the row render them on the content itself.
+                let edges = self.edges();
                 self.tree.rows.push(Row {
+                    edges,
                     wrappers: self.wrappers.clone(),
                     space_before: self.pending_space.max(margin.top.px_or_zero()),
                     indent_left,

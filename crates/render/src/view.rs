@@ -210,8 +210,9 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
-    for wrapper in row.wrappers.iter().rev() {
+    for (depth, wrapper) in row.wrappers.iter().enumerate().rev() {
         let s = &wrapper.style;
+        let edge = row.edges.get(depth).copied().unwrap_or_default();
         inner = div()
             .w_full()
             .flex()
@@ -219,10 +220,12 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             // Padding, not margin: margins would add to the full width and overflow.
             .pl(px(wrapper.indent_left))
             .pr(px(wrapper.indent_right))
+            .pt(px(edge.above))
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .pb(px(edge.below))
                     .ml(len(s.margin.left))
                     .mr(len(s.margin.right))
                     .pl(definite(s.padding.left))

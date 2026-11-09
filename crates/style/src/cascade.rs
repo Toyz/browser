@@ -392,6 +392,12 @@ impl Styler {
         StyleData::from_sheets(sheets, None).styler(env)
     }
 
+    /// Style for a different interaction state (hover, focus...), keeping
+    /// everything that doesn't depend on it: the rules, indexes and caches.
+    pub fn set_state(&mut self, state: Arc<ElementState>) {
+        self.state = state;
+    }
+
     pub fn env(&self) -> &MediaEnv {
         &self.env
     }

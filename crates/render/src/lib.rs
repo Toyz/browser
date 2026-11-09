@@ -4,6 +4,7 @@
 //! turns its rows into GPUI elements on demand, one row per virtualized list item.
 
 pub mod boxes;
+pub mod hover;
 pub mod images;
 pub mod inline;
 pub mod view;
