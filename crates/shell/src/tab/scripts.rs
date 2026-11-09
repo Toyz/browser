@@ -69,6 +69,8 @@ impl Tab {
                 if let Some(page) = &mut this.page {
                     page.styles = Some(styles);
                 }
+                // New rules may use web fonts nothing asked for yet.
+                this.load_fonts(cx);
                 this.restyle(Duration::ZERO, window, cx);
             })
             .ok();

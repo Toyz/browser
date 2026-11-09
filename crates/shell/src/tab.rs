@@ -95,7 +95,10 @@ pub struct Tab {
     images_generation: u64,
     /// Bumped when web fonts arrive.
     fonts_generation: u64,
-    _fonts_task: Option<Task<()>>,
+    /// Web font fetches for this page, and the font files they asked for
+    /// (scripts adding styles can ask for more later).
+    _fonts_tasks: Vec<Task<()>>,
+    fonts_requested: HashSet<String>,
     _image_task: Option<Task<()>>,
     favicon: Option<Arc<Image>>,
     _favicon_task: Option<Task<()>>,
@@ -195,7 +198,8 @@ impl Tab {
             images_pending: 0,
             images_generation: 0,
             fonts_generation: 0,
-            _fonts_task: None,
+            _fonts_tasks: Vec::new(),
+            fonts_requested: HashSet::new(),
             _image_task: None,
             favicon: None,
             _favicon_task: None,
@@ -493,6 +497,8 @@ impl Tab {
         self.hovered_link = None;
         self.element_state = Arc::default();
         self.load_images(cx);
+        self._fonts_tasks.clear();
+        self.fonts_requested.clear();
         self.load_fonts(cx);
         let site = self.page.as_ref().map(|p| p.url.clone());
         self.load_favicon(site, favicon, cx);
@@ -556,8 +562,7 @@ impl Tab {
     }
 
     /// Fetch the page's web fonts, register them, then re-lay out its text.
-    fn load_fonts(&mut self, cx: &mut Context<Self>) {
-        self._fonts_task = None;
+    pub(super) fn load_fonts(&mut self, cx: &mut Context<Self>) {
         if std::env::var_os("FEATHER_NO_WEBFONTS").is_some() {
             return;
         }
@@ -582,7 +587,7 @@ impl Tab {
                     }
                     continue;
                 }
-                if !used.contains(&face.family.to_lowercase()) {
+                if !used.contains(&face.family.to_lowercase()) || self.fonts_requested.contains(src) {
                     continue;
                 }
                 if let Some(i) = fetch.iter().position(|(u, _, _)| u == src) {
@@ -601,7 +606,8 @@ impl Tab {
         if fetch.is_empty() {
             return;
         }
-        self._fonts_task = Some(cx.spawn(async move |this, cx| {
+        self.fonts_requested.extend(fetch.iter().map(|(src, _, _)| src.clone()));
+        self._fonts_tasks.push(cx.spawn(async move |this, cx| {
             let tasks: Vec<_> = fetch
                 .into_iter()
                 .map(|(src, families, weights)| {

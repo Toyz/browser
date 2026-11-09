@@ -187,7 +187,10 @@ impl Runtime {
         let mut cx = Context::builder().module_loader(modules.clone()).host_hooks(hooks.clone()).build().expect("a JS context");
         // Runaway loops end with an exception instead of a stuck thread.
         cx.runtime_limits_mut().set_loop_iteration_limit(200_000_000);
-        cx.runtime_limits_mut().set_recursion_limit(2048);
+        // Deep enough for big framework bundles (Boa's value stack defaults
+        // to 10k entries; browsers allow ~10k nested calls).
+        cx.runtime_limits_mut().set_recursion_limit(10_000);
+        cx.runtime_limits_mut().set_stack_size_limit(1 << 20);
         declarative_shadow_roots(&mut dom.borrow_mut());
         install_natives(&mut cx, &dom);
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
