@@ -2608,7 +2608,14 @@
     arrayBuffer() { return this._consume().then((t) => new TextEncoder().encode(t).buffer); }
     blob() { return this._consume().then((t) => new Blob([t], { type: this.headers.get("content-type") || "" })); }
     formData() { return this._consume().then((t) => { const f = new FormData(); new URLSearchParams(t).forEach((v, k) => f.append(k, v)); return f; }); }
-    clone() { const r = new Response(this._text, this); Object.assign(r, { type: this.type, url: this.url, redirected: this.redirected }); return r; }
+    clone() {
+      if (this.bodyUsed) throw new TypeError("Response.clone: Body has already been consumed.");
+      const r = new Response(this._text, this);
+      Object.assign(r, { type: this.type, url: this.url, redirected: this.redirected });
+      // A body still arriving: both read it when it's there.
+      if (this._full) r._full = this._full;
+      return r;
+    }
     static json(data, init) { const r = new Response(JSON.stringify(data), init); r.headers.set("content-type", "application/json"); return r; }
     static error() { const r = new Response(null, { status: 0 }); r.type = "error"; return r; }
     static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: url } }); }

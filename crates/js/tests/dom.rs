@@ -810,6 +810,19 @@ fn private_getters_from_arrows() {
 }
 
 #[test]
+fn cloned_responses_read_the_body() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        let resolve;
+        const r = new Response("");
+        r._full = new Promise((res) => { resolve = res; });
+        const c = r.clone();
+        Promise.all([r.text(), c.text()]).then(([a, b]) => { document.getElementById("o").textContent = a + "|" + b; });
+        resolve("body");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "body|body");
+}
+
+#[test]
 fn offset_parent_chains_end() {
     let doc = run(r##"<body><div><span id="s">x</span></div><p id="o"></p><script>
         let n = 0;
