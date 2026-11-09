@@ -722,6 +722,17 @@ fn platform_extras() {
 }
 
 #[test]
+fn document_all_is_falsy_but_not_undefined() {
+    let doc = run(r##"<body><div id="d"></div><p id="o"></p><script>
+        let u;
+        const all = document.all;
+        const out = [!!all, typeof all, all == undefined, u === all, all.length > 2, all.namedItem("d").id];
+        document.getElementById("o").textContent = out.join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "false undefined true false true d");
+}
+
+#[test]
 fn template_content_persists_and_attributes_are_seen() {
     let doc = run(r##"<body><p id="o"></p><script>
         const t = document.createElement("template");

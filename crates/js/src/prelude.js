@@ -1534,6 +1534,18 @@
   }
 
   const document = wrap(N.root());
+  {
+    // Falsy and == undefined, like browsers' (pages detect old IE with it).
+    const all = N.htmlAll();
+    const elements = () => Array.from(document.getElementsByTagName("*"));
+    Object.defineProperties(all, {
+      length: { get: () => elements().length },
+      item: { value: (i) => (typeof i === "number" ? elements()[i] : all.namedItem(i)) || null },
+      namedItem: { value: (name) => elements().find((e) => e.id === name || e.getAttribute("name") === name) || null },
+      [Symbol.iterator]: { value: () => elements()[Symbol.iterator]() },
+    });
+    Object.defineProperty(Document.prototype, "all", { configurable: true, get: () => all });
+  }
 
   // ---- window ----------------------------------------------------------
 

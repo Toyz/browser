@@ -1462,6 +1462,13 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let args = response_args(id, result, cx);
         Ok(JsArray::from_iter(args, cx).into())
     }));
+    // `document.all`: an object that's falsy and `== undefined` (Annex B's
+    // [[IsHTMLDDA]]), so feature checks treat it as absent but `x ===
+    // document.all` doesn't match `undefined`.
+    add("htmlAll", 0, Box::new(|_, _, cx| {
+        let proto = cx.intrinsics().constructors().object().prototype();
+        Ok(JsObject::from_proto_and_data(Some(proto), boa_engine::builtins::is_html_dda::IsHTMLDDA).into())
+    }));
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
