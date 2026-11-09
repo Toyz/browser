@@ -1324,6 +1324,20 @@
   const HTMLHeadElement = plain("HTMLHeadElement"), HTMLHtmlElement = plain("HTMLHtmlElement"), HTMLMetaElement = plain("HTMLMetaElement");
   const HTMLBRElement = plain("HTMLBRElement"), HTMLHRElement = plain("HTMLHRElement"), HTMLPreElement = plain("HTMLPreElement");
   const HTMLDialogElement = plain("HTMLDialogElement"), HTMLDetailsElement = plain("HTMLDetailsElement");
+  // More interfaces pages test with `instanceof`, by tag.
+  const moreElements = {
+    title: "HTMLTitleElement", fieldset: "HTMLFieldSetElement", legend: "HTMLLegendElement", progress: "HTMLProgressElement",
+    output: "HTMLOutputElement", datalist: "HTMLDataListElement", object: "HTMLObjectElement", embed: "HTMLEmbedElement",
+    area: "HTMLAreaElement", map: "HTMLMapElement", track: "HTMLTrackElement", blockquote: "HTMLQuoteElement", q: "HTMLQuoteElement",
+    ins: "HTMLModElement", del: "HTMLModElement", time: "HTMLTimeElement", data: "HTMLDataElement", meter: "HTMLMeterElement",
+    menu: "HTMLMenuElement", caption: "HTMLTableCaptionElement", thead: "HTMLTableSectionElement", tbody: "HTMLTableSectionElement",
+    tfoot: "HTMLTableSectionElement", col: "HTMLTableColElement", colgroup: "HTMLTableColElement", nav: null,
+  };
+  const moreElementClasses = {};
+  for (const [tag, name] of Object.entries(moreElements)) {
+    if (!name) continue;
+    moreElementClasses[tag] = moreElementClasses[name] || (moreElementClasses[name] = plain(name));
+  }
   const SVGElement = plain("SVGElement", Element);
   // SVG elements have style, dataset, focus()... too (HTMLOrSVGElement).
   for (const key of Reflect.ownKeys(HTMLElement.prototype)) {
@@ -1343,6 +1357,7 @@
     html: HTMLHtmlElement, meta: HTMLMetaElement, br: HTMLBRElement, hr: HTMLHRElement, pre: HTMLPreElement, dialog: HTMLDialogElement, details: HTMLDetailsElement,
     svg: SVGSVGElement, path: SVGPathElement, g: SVGGElement,
   };
+  for (const tag of Object.keys(moreElements)) if (moreElementClasses[tag]) elementClasses[tag] = moreElementClasses[tag];
 
   class DocumentFragment extends Node {
     getElementById(id) { return this.querySelector("#" + cssEscape(id)); }
@@ -2114,7 +2129,33 @@
     HTMLTableRowElement, HTMLTableCellElement, HTMLLabelElement, HTMLPictureElement, HTMLSourceElement, HTMLSlotElement,
     HTMLUnknownElement, HTMLBodyElement, HTMLHeadElement, HTMLHtmlElement, HTMLMetaElement, HTMLBRElement, HTMLHRElement,
     HTMLPreElement, HTMLDialogElement, HTMLDetailsElement,
+    ...Object.fromEntries(Object.entries(moreElementClasses).filter(([k]) => /^HTML/.test(k))),
     NodeList, HTMLCollection: NodeList, DOMTokenList,
+    // Interfaces checked with `instanceof` / `typeof` (nothing makes most of these yet).
+    FileList: class FileList extends Array { item(i) { return this[i] || null; } },
+    DataTransfer: class DataTransfer {
+      constructor() { this._data = new Map(); this.items = []; this.files = []; this.types = []; this.dropEffect = "none"; this.effectAllowed = "all"; }
+      setData(type, value) { this._data.set(type, String(value)); this.types = Array.from(this._data.keys()); }
+      getData(type) { return this._data.get(type) || ""; }
+      clearData(type) { if (type) this._data.delete(type); else this._data.clear(); this.types = Array.from(this._data.keys()); }
+      setDragImage() {}
+    },
+    ImageData: class ImageData {
+      constructor(a, b, c) {
+        if (a instanceof Uint8ClampedArray) { this.data = a; this.width = b; this.height = c ?? a.length / 4 / b; }
+        else { this.width = a; this.height = b; this.data = new Uint8ClampedArray(a * b * 4); }
+        this.colorSpace = "srgb";
+      }
+    },
+    CustomElementRegistry: class CustomElementRegistry {},
+    ResizeObserverEntry: class ResizeObserverEntry {},
+    CompositionEvent: class CompositionEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.data = i.data || ""; } },
+    SubmitEvent: class SubmitEvent extends Event { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter || null; } },
+    XPathResult: Object.assign(class XPathResult {}, { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 }),
+    VisualViewport: class VisualViewport extends EventTarget {},
+    ReportingObserver: class ReportingObserver { observe() {} disconnect() {} takeRecords() { return []; } },
+    CSSRule,
+    XMLDocument: Document, HTMLDocument: Document,
     Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent, InputEvent, FocusEvent, PointerEvent: MouseEvent,
     URL, URLSearchParams,
     DOMParser: class {
