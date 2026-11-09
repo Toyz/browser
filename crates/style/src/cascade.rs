@@ -755,6 +755,8 @@ impl Styler {
             Decl::BorderRadius(corner, v) => s.border_radius[*corner] = non_auto(len(v)),
             Decl::BackgroundColor(c) => s.background = Some(*c),
             Decl::BackgroundImage(c) => s.background_image = *c,
+            Decl::Gradients(g) => s.gradients = g.clone(),
+            Decl::BackgroundRepeat(r) => s.background_repeat = *r,
             Decl::BackgroundUrl(u) => s.background_url = u.clone(),
             Decl::BackgroundSize(v) => s.background_size = resolve_bg_size(v, &cx),
             Decl::BackgroundPosition(v) => s.background_position = *v,
@@ -1119,6 +1121,22 @@ fn finalize(s: &mut ComputedStyle) {
     if s.background_image == Some(Color::CurrentColor) {
         s.background_image = Some(s.color);
     }
+    if let Some(layers) = &s.gradients {
+        let (color, dark) = (s.color, s.dark);
+        let resolve = |c: Color| match scheme_color(c, dark) {
+            Color::CurrentColor => color,
+            c => c,
+        };
+        s.gradients = Some(
+            layers
+                .iter()
+                .map(|g| Gradient {
+                    stops: g.stops.iter().map(|st| GradientStop { color: resolve(st.color), pos: st.pos }).collect(),
+                    ..g.clone()
+                })
+                .collect(),
+        );
+    }
     // Out-of-flow boxes are always block-level ("blockified").
     if matches!(s.position, Position::Absolute | Position::Fixed)
         && matches!(s.display, Display::Inline | Display::InlineBlock)
@@ -1181,6 +1199,7 @@ fn apply_wide(s: &mut ComputedStyle, parent: &ComputedStyle, name: &str, wide: W
         n if n.starts_with("background") => {
             s.background = src.background;
             s.background_image = src.background_image;
+            s.gradients = src.gradients.clone();
         }
         // Each border property resets just itself (`border-radius: inherit`
         // used to wipe the whole border).
@@ -1359,6 +1378,31 @@ mod tests {
             style = styler.compute(doc, id, &style);
         }
         style
+    }
+
+    #[test]
+    fn gradients_parse_fully() {
+        let (doc, s) = styled(
+            r#"<p>x</p><em>y</em><b>z</b>"#,
+            "p { background: radial-gradient(circle at 30% 30%, #fff, red 60%, blue) } \
+             em { background: repeating-linear-gradient(45deg, red 0 10px, blue 10px 20px) no-repeat, linear-gradient(to top right, red, blue) } \
+             b { background-image: linear-gradient(red, blue); background-repeat: repeat-x }",
+        );
+        let p = style_of(&doc, &s, "p");
+        let g = &p.gradients.as_ref().unwrap()[0];
+        assert_eq!(g.shape, GradientShape::Radial { circle: true, size: RadialSize::FarthestCorner, at: BgPos { x: 0.3, y: 0.3 } });
+        assert_eq!(g.stops.len(), 3);
+        assert_eq!(g.stops[1].pos, Some(StopPos::Fraction(0.6)));
+        let em = style_of(&doc, &s, "em");
+        let layers = em.gradients.as_ref().unwrap();
+        assert_eq!(layers.len(), 2);
+        assert!(layers[0].repeating);
+        assert_eq!(layers[0].stops.len(), 4, "two positions make two stops");
+        assert_eq!(layers[1].shape, GradientShape::LinearCorner(1.0, -1.0));
+        assert_eq!(em.background_repeat, BgRepeat { x: false, y: false });
+        let b = style_of(&doc, &s, "b");
+        assert_eq!(b.gradients.as_ref().unwrap()[0].shape, GradientShape::Linear(180.0));
+        assert_eq!(b.background_repeat, BgRepeat { x: true, y: false });
     }
 
     #[test]

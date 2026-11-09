@@ -240,6 +240,7 @@ impl Block {
             slice_style.border_width = Edges::all(0.0);
             slice_style.background = None;
             slice_style.background_image = None;
+            slice_style.gradients = None;
             slice_style.background_url = None;
             slice_style.width = Length::Auto;
             slice_style.min_width = Length::Auto;
@@ -1454,11 +1455,13 @@ impl Builder<'_> {
                 if tag == "body" {
                     style.background = None;
                     style.background_image = None;
+                    style.gradients = None;
                 }
             }
             if tag == "html" {
                 style.background = None;
                 style.background_image = None;
+                style.gradients = None;
             }
             // `html, body { height: 100%; overflow: ... }` size and scroll the
             // *viewport*; the page list does both, so drop them here (it keeps

@@ -106,6 +106,7 @@ pub fn mix(from: &ComputedStyle, to: &ComputedStyle, t: f32) -> ComputedStyle {
     s.scale = (mix_f(from.scale.0, to.scale.0, t), mix_f(from.scale.1, to.scale.1, t));
     s.shadows = mix_shadows(from, to, t);
     if t < 0.5 {
+        s.gradients = from.gradients.clone();
         s.underline = from.underline;
         s.strikethrough = from.strikethrough;
         s.visible = from.visible;
@@ -119,7 +120,7 @@ pub fn changed_properties(a: &ComputedStyle, b: &ComputedStyle) -> Vec<&'static 
     if a.color != b.color {
         out.push("color");
     }
-    if a.background != b.background || a.background_image != b.background_image {
+    if a.background != b.background || a.background_image != b.background_image || a.gradients != b.gradients {
         out.push("background-color");
     }
     if a.border_color != b.border_color {

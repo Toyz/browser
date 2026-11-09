@@ -5,6 +5,7 @@
 
 pub mod animate;
 pub mod boxes;
+pub mod gradient;
 pub mod hover;
 pub mod images;
 pub mod inline;

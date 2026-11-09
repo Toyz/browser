@@ -637,3 +637,57 @@ pub enum Cursor {
     ResizeColumn,
     ResizeRow,
 }
+
+/// A CSS gradient image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Gradient {
+    pub shape: GradientShape,
+    pub stops: Vec<GradientStop>,
+    pub repeating: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradientShape {
+    /// Degrees: 0 points up, clockwise.
+    Linear(f32),
+    /// `to top right` and friends: towards a corner (x: -1 left / 1 right,
+    /// y: -1 top / 1 bottom), whose angle depends on the box's shape.
+    LinearCorner(f32, f32),
+    Radial { circle: bool, size: RadialSize, at: BgPos },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadialSize {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+    /// Radii, px.
+    Explicit(f32, f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub color: Color,
+    pub pos: Option<StopPos>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StopPos {
+    /// Of the gradient line (0..1).
+    Fraction(f32),
+    Px(f32),
+}
+
+/// `background-repeat`, per axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BgRepeat {
+    pub x: bool,
+    pub y: bool,
+}
+
+impl Default for BgRepeat {
+    fn default() -> Self {
+        BgRepeat { x: true, y: true }
+    }
+}

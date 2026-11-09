@@ -316,7 +316,7 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .rounded_tr(radius(s.border_radius[1]))
         .rounded_br(radius(s.border_radius[2]))
         .rounded_bl(radius(s.border_radius[3]))
-        .when_some(s.painted_background(), |d, bg| d.bg(palette.color(bg)))
+        .when_some(s.box_background(), |d, bg| d.bg(palette.color(bg)))
         // GPUI sizes border boxes; CSS's default content-box sizes exclude padding/border.
         .when(!s.width.is_auto(), |d| d.w(len(s.outer_width(s.width))))
         .when(!s.height.is_auto(), |d| d.h(len(s.outer_height(s.height))))
@@ -502,7 +502,13 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         .when(fill, |d| d.w_full())
         .when(s.min_width.is_auto(), |d| d.min_w(px(block.min_content)));
     let scrolls = s.overflow == Overflow::Scroll && (!s.height.is_auto() || !s.max_height.is_auto());
-    // Background image / mask icon, painted first (behind the content).
+    // Gradients, then a background image / mask icon, painted first
+    // (behind the content).
+    let base = match crate::gradient::GradientFill::new(s, &cx.palette) {
+        Some(fill) if s.position == style::Position::Static => base.relative().child(fill),
+        Some(fill) => base.child(fill),
+        None => base,
+    };
     let base = match image_layer(s, cx) {
         // The layer is positioned inside the box: make it a containing
         // block, unless it's positioned already (`.relative()` would undo that).

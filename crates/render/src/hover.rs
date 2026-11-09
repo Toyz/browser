@@ -43,6 +43,8 @@ fn copy_paint(to: &mut ComputedStyle, from: &ComputedStyle) {
     to.color = from.color;
     to.background = from.background;
     to.background_image = from.background_image;
+    to.gradients = from.gradients.clone();
+    to.background_repeat = from.background_repeat;
     to.border_color = from.border_color;
     to.border_radius = from.border_radius;
     to.opacity = from.opacity;

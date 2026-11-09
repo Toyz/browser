@@ -499,6 +499,9 @@ impl Tab {
     /// Fetch the page's web fonts, register them, then re-lay out its text.
     fn load_fonts(&mut self, cx: &mut Context<Self>) {
         self._fonts_task = None;
+        if std::env::var_os("FEATHER_NO_WEBFONTS").is_some() {
+            return;
+        }
         let Some(page) = &self.page else { return };
         let Some(styles) = &page.styles else { return };
         let page_url = page.url.clone();

@@ -100,6 +100,9 @@ pub struct ComputedStyle {
     pub background_url: Option<Arc<str>>,
     pub background_size: BgSize,
     pub background_position: BgPos,
+    pub background_repeat: BgRepeat,
+    /// `background-image` gradients, top layer first.
+    pub gradients: Option<Arc<[Gradient]>>,
     /// Generated content (`::before`/`::after` only); `None` = none/normal.
     pub content: Option<Arc<[ContentItem]>>,
 
@@ -186,6 +189,8 @@ impl ComputedStyle {
             background_url: None,
             background_size: BgSize::Auto,
             background_position: BgPos::TOP_LEFT,
+            background_repeat: BgRepeat { x: true, y: true },
+            gradients: None,
             content: None,
             underline: false,
             strikethrough: false,
@@ -263,6 +268,15 @@ impl ComputedStyle {
         self.background_image
             .or(self.background)
             .filter(|c| !c.is_transparent())
+    }
+
+    /// The background color a box paints under its gradients (with no
+    /// gradients, the gradient stand-in color, if any, as before).
+    pub fn box_background(&self) -> Option<Color> {
+        if self.gradients.is_some() && !self.masked {
+            return self.background.filter(|c| !c.is_transparent());
+        }
+        self.painted_background()
     }
 
     /// The color a mask stencil is filled with (the unmasked background).
