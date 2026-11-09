@@ -35,6 +35,11 @@ pub fn parse_input(input: &str) -> Result<Url> {
         };
         return Url::from_file_path(&path).map_err(|()| anyhow::anyhow!("not a valid path: {input}"));
     }
+    // `view-source:https://...`: the page's HTML, highlighted.
+    if let Some(inner) = input.strip_prefix("view-source:") {
+        let inner = parse_input(inner)?;
+        return Url::parse(&format!("view-source:{inner}")).context("not a valid address");
+    }
     match Url::parse(input) {
         Ok(url) if matches!(url.scheme(), "http" | "https" | "file") => Ok(url),
         // "localhost:8080" parses with scheme "localhost"; treat it as a host.

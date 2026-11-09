@@ -29,7 +29,7 @@ use url::Url;
 actions!(
     feather,
     [
-        Quit, Back, Forward, Reload, FocusAddressBar, NewTab, CloseTab, NextTab, PrevTab,
+        Quit, Back, Forward, Reload, FocusAddressBar, NewTab, CloseTab, NextTab, PrevTab, ViewSource,
         SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectLastTab,
     ]
 );
@@ -405,6 +405,11 @@ impl Render for Feather {
                 this.open_tab(None, true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| this.close_tab(this.active, window, cx)))
+            .on_action(cx.listener(|this, _: &ViewSource, window, cx| {
+                if let Some(url) = this.active_tab().read(cx).source_url() {
+                    this.open_tab(Some(url), true, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle(1, window, cx)))
             .on_action(cx.listener(|this, _: &PrevTab, window, cx| this.cycle(-1, window, cx)))
             .on_action(cx.listener(|this, _: &SelectTab1, window, cx| this.activate(0, window, cx)))
@@ -467,6 +472,8 @@ fn main() {
             KeyBinding::new("cmd-l", FocusAddressBar, Some("Browser")),
             KeyBinding::new("cmd-t", NewTab, Some("Browser")),
             KeyBinding::new("cmd-w", CloseTab, Some("Browser")),
+            KeyBinding::new("cmd-alt-u", ViewSource, Some("Browser")),
+            KeyBinding::new("cmd-u", ViewSource, Some("Browser")),
             KeyBinding::new("ctrl-tab", NextTab, Some("Browser")),
             KeyBinding::new("ctrl-shift-tab", PrevTab, Some("Browser")),
             KeyBinding::new("cmd-shift-]", NextTab, Some("Browser")),

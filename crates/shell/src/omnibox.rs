@@ -268,7 +268,7 @@ impl Render for Omnibox {
             _ if focused => Lucide::Search,
             Some("https") => Lucide::LockKeyhole,
             Some("file") if self.url.as_ref().is_some_and(|u| u.path().ends_with('/')) => Lucide::FolderOpen,
-            Some("file") => Lucide::File,
+            Some("file") | Some("view-source") => Lucide::File,
             Some(_) => Lucide::TriangleAlert,
             None => Lucide::Search,
         };

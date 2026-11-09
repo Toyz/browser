@@ -87,6 +87,8 @@ pub struct Tab {
     /// Bumped per page shown, so hover reports from the previous page's last
     /// frame (with that document's node ids) are ignored.
     page_gen: u64,
+    /// The code editor showing a source page (CSS/JS/JSON, `view-source:`).
+    source_editor: Option<Entity<gpui_kit::component::input::EditorState>>,
     /// Form controls' widgets and state.
     forms: forms::Forms,
     /// A form `POST` waiting for its navigation to start loading.
@@ -146,6 +148,7 @@ impl Tab {
             page_gen: 0,
             hover_styler: None,
             forms: Default::default(),
+            source_editor: None,
             pending_post: None,
             element_state: Arc::default(),
             capture: None,
@@ -161,6 +164,15 @@ impl Tab {
             None if self.loading.is_some() => "Loading…".into(),
             None => "New Tab".into(),
         }
+    }
+
+    /// `view-source:` for the page on screen.
+    pub fn source_url(&self) -> Option<Url> {
+        let url = self.page.as_ref()?.url.clone();
+        if url.scheme() == "view-source" {
+            return None;
+        }
+        Url::parse(&format!("view-source:{url}")).ok()
     }
 
     pub fn url(&self) -> Option<Url> {
@@ -347,6 +359,11 @@ impl Tab {
         }
         let favicon = page.favicon.clone();
         let refresh = page.refresh.clone();
+        // Source code goes in a (read-only) code editor, highlighted.
+        self.source_editor = page.source.clone().map(|(language, text)| {
+            let text = SharedString::from(text.to_string());
+            cx.new(|cx| gpui_kit::component::input::EditorState::new(window, cx).language(language).default_value(text))
+        });
         // Images the new page shares with the last one (logos, icons, sprites)
         // stay loaded: they appear in the first frame instead of popping in.
         {
@@ -975,6 +992,13 @@ impl Tab {
         let Some(page) = &self.page else {
             return self.render_new_tab(cx);
         };
+        if let Some(editor) = &self.source_editor {
+            return div()
+                .size_full()
+                .bg(cx.theme().background)
+                .child(gpui_kit::component::input::Editor::new(editor).readonly(true).appearance(false).size_full())
+                .into_any_element();
+        }
 
         let layout = page.layout.clone();
         let rcx = self.render_cx(cx);

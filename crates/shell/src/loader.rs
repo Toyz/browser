@@ -22,6 +22,24 @@ pub struct LoadedPage {
     pub favicon: Option<Url>,
     /// `<meta http-equiv="refresh" content="N;url=...">`: go there after N seconds.
     pub refresh: Option<(f32, Url)>,
+    /// Source code shown in a code editor instead (CSS, JS, JSON responses;
+    /// `view-source:`): (language, text).
+    pub source: Option<(&'static str, Arc<str>)>,
+}
+
+/// The language to highlight a non-HTML response as, if it's code.
+fn code_language(content_type: Option<&str>, url: &Url) -> Option<&'static str> {
+    let ct = content_type.unwrap_or_default().to_ascii_lowercase();
+    let ext = url.path().rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    if ct.contains("json") || ext == "json" {
+        Some("json")
+    } else if ct.contains("css") || ext == "css" {
+        Some("css")
+    } else if ct.contains("javascript") || ct.contains("ecmascript") || matches!(ext.as_str(), "js" | "mjs" | "cjs") {
+        Some("javascript")
+    } else {
+        None
+    }
 }
 
 impl LoadedPage {
@@ -44,6 +62,21 @@ pub fn may_load(page: &Url, url: &Url) -> bool {
 
 /// Fetch → parse → style → build boxes. Blocking: run it in the background.
 pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Result<LoadedPage> {
+    if url.scheme() == "view-source" {
+        let inner = Url::parse(url.path()).map_err(|e| anyhow::anyhow!("bad view-source URL: {e}"))?;
+        let response = net::fetch(&inner)?;
+        return Ok(LoadedPage {
+            favicon: default_favicon(&response.url),
+            refresh: None,
+            title: Some(format!("view-source:{}", response.url)),
+            url: url.clone(),
+            layout: Arc::new(LayoutTree::default()),
+            doc: None,
+            styles: None,
+            signature: Vec::new(),
+            source: Some(("html", response.body.into())),
+        });
+    }
     let response = match post {
         Some(body) => net::fetch_post(url, body)?,
         None => net::fetch(url)?,
@@ -56,6 +89,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
         return Ok(LoadedPage {
             favicon: default_favicon(&response.url),
             refresh: None,
+            source: code_language(response.content_type.as_deref(), &response.url).map(|l| (l, Arc::from(&*response.body))),
             url: response.url,
             title: None,
             layout: Arc::new(render::build_plain_text(&response.body)),
@@ -75,6 +109,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>) -> anyhow::Resu
     Ok(LoadedPage {
         favicon: favicon(&doc).or_else(|| default_favicon(&response.url)),
         refresh: meta_refresh(&doc),
+        source: None,
         url: response.url,
         title: doc.title(),
         layout: Arc::new(layout),
