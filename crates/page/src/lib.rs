@@ -242,9 +242,45 @@ impl Document {
     /// Copy `id` (and everything under it) from `other` into this document,
     /// unattached.
     pub fn import(&mut self, other: &Document, id: NodeId) -> NodeId {
-        let copy = self.create(other.node(id).data.clone());
+        let mut data = other.node(id).data.clone();
+        // A template's contents live outside its children: copy them too
+        // (the id is `other`'s, meaningless here).
+        let contents = match &mut data {
+            NodeData::Element(e) => e.template_contents.take(),
+            _ => None,
+        };
+        let copy = self.create(data);
+        if let Some(c) = contents {
+            let c = self.import(other, c);
+            if let Some(NodeData::Element(e)) = self.data_mut(copy) {
+                e.template_contents = Some(c);
+            }
+        }
         for &child in other.children(id) {
             let c = self.import(other, child);
+            self.append(copy, c);
+        }
+        copy
+    }
+
+    /// Deep-copy `id` within this document, unattached (template contents
+    /// included, as cloning a template does).
+    pub fn clone_subtree(&mut self, id: NodeId) -> NodeId {
+        let mut data = self.node(id).data.clone();
+        let contents = match &mut data {
+            NodeData::Element(e) => e.template_contents.take(),
+            _ => None,
+        };
+        let children = self.children(id).to_vec();
+        let copy = self.create(data);
+        if let Some(c) = contents {
+            let c = self.clone_subtree(c);
+            if let Some(NodeData::Element(e)) = self.data_mut(copy) {
+                e.template_contents = Some(c);
+            }
+        }
+        for child in children {
+            let c = self.clone_subtree(child);
             self.append(copy, c);
         }
         copy

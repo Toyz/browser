@@ -1007,10 +1007,13 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let mut dom = d.borrow_mut();
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::null()) };
         let copy = if deep {
-            let snapshot = dom.doc.clone();
-            dom.doc.import(&snapshot, n)
+            dom.doc.clone_subtree(n)
         } else {
-            let data = dom.doc.node(n).data.clone();
+            let mut data = dom.doc.node(n).data.clone();
+            // A shallow copy of a template starts with empty contents.
+            if let NodeData::Element(e) = &mut data {
+                e.template_contents = None;
+            }
             dom.doc.create(data)
         };
         Ok(JsValue::from(node_to_number(copy)))
@@ -1163,6 +1166,14 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("touch", 0, Box::new(|d, _, _| {
         d.borrow_mut().dirty = true;
         Ok(JsValue::undefined())
+    }));
+    // FEATHER_EVAL=probe.js (FEATHER_EVAL_DELAY ms): [source, delay] or null.
+    add("debugScript", 0, Box::new(|_, _, cx| {
+        let Some(src) = std::env::var_os("FEATHER_EVAL").and_then(|p| std::fs::read_to_string(p).ok()) else {
+            return Ok(JsValue::null());
+        };
+        let delay: f64 = std::env::var("FEATHER_EVAL_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(5000.0);
+        Ok(JsArray::from_iter([JsValue::from(js_string!(src)), JsValue::from(delay)], cx).into())
     }));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));

@@ -744,6 +744,65 @@ fn intersection_observer_reports_a_visible_rect() {
 }
 
 #[test]
+fn mutation_observers() {
+    let doc = run(r##"<body><div id="d" class="a"><p>x</p></div><p id="o"></p><script>
+        const out = [];
+        const d = document.getElementById("d");
+        new MutationObserver((records) => {
+            for (const r of records) out.push(r.type + ":" + (r.attributeName || r.addedNodes.length + "/" + r.removedNodes.length) + (r.oldValue !== null ? "=" + r.oldValue : ""));
+            document.getElementById("o").textContent = out.join(" ");
+        }).observe(d, { childList: true, attributes: true, attributeOldValue: true, subtree: true, characterData: true });
+        d.className = "b";
+        d.appendChild(document.createElement("span"));
+        d.firstChild.remove();
+        d.querySelector("span").setAttribute("x", "1");
+        // Polymer's microtask trick: a text node's data changing.
+        const t = document.createTextNode("");
+        let ticks = 0;
+        new MutationObserver(() => { ticks++; out.push("tick" + ticks); document.getElementById("o").textContent = out.join(" "); }).observe(t, { characterData: true });
+        t.textContent = "1";
+        out.push("sync");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "sync attributes:class=a childList:1/0 childList:0/1 attributes:x tick1");
+}
+
+#[test]
+fn nested_template_contents_survive_copies() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const t = document.createElement("template");
+        t.innerHTML = '<div><template id="inner"><span>[[x]]</span></template></div>';
+        const inner = t.content.querySelector("#inner");
+        const copy = document.importNode(t.content, true).querySelector("#inner");
+        const out = [inner.content.firstChild.localName, copy.content.firstChild.localName, copy.content.textContent];
+        const s = document.createElement("template");
+        s.content.appendChild(document.createElement("b"));
+        out.push(s.cloneNode(true).content.firstChild.localName, s.cloneNode(false).content.childNodes.length);
+        document.getElementById("o").textContent = out.join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "span span [[x]] b 0");
+}
+
+#[test]
+fn template_contents_are_inert() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        let made = 0;
+        customElements.define("x-rep", class extends HTMLElement { constructor() { super(); made++; } });
+        const t = document.createElement("template");
+        t.innerHTML = '<div><x-rep items="[[list]]"></x-rep></div>';
+        const inside = t.content.querySelector("x-rep");
+        inside.removeAttribute("items");
+        // Made by the content's own document (as Polymer does for <template is>): not upgraded either.
+        t.content.firstChild.appendChild(t.content.ownerDocument.createElement("x-rep"));
+        const before = made;
+        const copy = document.importNode(t.content, true);
+        const stamped = copy.querySelector("x-rep");
+        document.body.appendChild(copy);
+        document.getElementById("o").textContent = [before, made, stamped.hasAttribute("items"), stamped instanceof HTMLElement].join(" ");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "0 2 false true");
+}
+
+#[test]
 fn template_content_persists_and_attributes_are_seen() {
     let doc = run(r##"<body><p id="o"></p><script>
         const t = document.createElement("template");

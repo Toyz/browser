@@ -258,6 +258,148 @@
     N.insert = (p, c, b) => { if (N.tag(c) === "script") N.log("trace", "insert <script type=" + N.getAttr(c, "type") + " src=" + N.getAttr(c, "src") + "> into <" + N.tag(p) + ">"); insert(p, c, b); };
     N.setText = (id, t) => { if (N.children(id).length > 3) N.log("trace", "setText " + describe(id) + "\n" + new Error().stack); setText(id, t); };
   }
+  // ---- MutationObserver: records made at the native mutations, delivered
+  // in a microtask (Polymer runs its own microtasks this way).
+  const mutationRegs = new Map(); // node id -> [{ observer, options }]
+  const pendingObservers = new Set();
+  let deliveryQueued = false;
+  function interested(target, type, name) {
+    let out = null;
+    for (let n = target, self = true; n !== null && n !== undefined; n = N.parent(n), self = false) {
+      const regs = mutationRegs.get(n);
+      if (!regs) continue;
+      for (const { observer, options: o } of regs) {
+        if (!self && !o.subtree) continue;
+        if (type === "childList" && !o.childList) continue;
+        if (type === "characterData" && !o.characterData) continue;
+        if (type === "attributes" && (!o.attributes || (o.attributeFilter && !o.attributeFilter.includes(name)))) continue;
+        (out || (out = new Map())).set(observer, o);
+      }
+    }
+    return out;
+  }
+  function queueRecord(observers, record) {
+    for (const [observer, o] of observers) {
+      const keepOld = record.type === "attributes" ? o.attributeOldValue : o.characterDataOldValue;
+      observer._records.push(keepOld ? record : { ...record, oldValue: null });
+      pendingObservers.add(observer);
+    }
+    if (!deliveryQueued) {
+      deliveryQueued = true;
+      Promise.resolve().then(deliverMutations);
+    }
+  }
+  function deliverMutations() {
+    deliveryQueued = false;
+    const observers = Array.from(pendingObservers);
+    pendingObservers.clear();
+    for (const observer of observers) {
+      const records = observer.takeRecords();
+      if (records.length) {
+        try { observer._cb.call(observer, records, observer); } catch (e) { reportError(e); }
+      }
+    }
+  }
+  const siblingsOf = (parent, first, last) => {
+    const kids = N.children(parent);
+    const i = kids.indexOf(first), j = kids.indexOf(last);
+    return [i > 0 ? kids[i - 1] : null, j >= 0 && j + 1 < kids.length ? kids[j + 1] : null];
+  };
+  const childListRecord = (target, added, removed, prev, next) => ({
+    type: "childList", target, addedNodes: added, removedNodes: removed, previousSibling: prev, nextSibling: next,
+    attributeName: null, attributeNamespace: null, oldValue: null,
+  });
+  {
+    const insert = N.insert, remove = N.remove, setAttr = N.setAttr, removeAttr = N.removeAttr, setText = N.setText;
+    N.insert = (p, c, b) => {
+      if (!mutationRegs.size) return insert(p, c, b);
+      const fragment = N.nodeType(c) === 11 && N.shadowHost(c) === null;
+      const moving = fragment ? N.children(c) : [c];
+      const from = fragment ? c : N.parent(c);
+      const leaving = from !== null && from !== undefined && moving.length ? interested(from, "childList") : null;
+      const leftAt = leaving ? siblingsOf(from, moving[0], moving[moving.length - 1]) : null;
+      insert(p, c, b);
+      if (leaving) queueRecord(leaving, childListRecord(from, [], moving, ...leftAt));
+      const watchers = moving.length ? interested(p, "childList") : null;
+      if (watchers) queueRecord(watchers, childListRecord(p, moving, [], ...siblingsOf(p, moving[0], moving[moving.length - 1])));
+    };
+    N.remove = (id) => {
+      const p = mutationRegs.size ? N.parent(id) : null;
+      const watchers = p !== null && p !== undefined ? interested(p, "childList") : null;
+      const at = watchers ? siblingsOf(p, id, id) : null;
+      remove(id);
+      if (watchers) queueRecord(watchers, childListRecord(p, [], [id], ...at));
+    };
+    N.setAttr = (id, name, value) => {
+      const watchers = mutationRegs.size ? interested(id, "attributes", String(name)) : null;
+      const old = watchers ? N.getAttr(id, name) : null;
+      setAttr(id, name, value);
+      if (watchers) queueRecord(watchers, { type: "attributes", target: id, addedNodes: [], removedNodes: [], previousSibling: null, nextSibling: null, attributeName: String(name), attributeNamespace: null, oldValue: old });
+    };
+    N.removeAttr = (id, name) => {
+      const watchers = mutationRegs.size && N.getAttr(id, name) !== null ? interested(id, "attributes", String(name)) : null;
+      const old = watchers ? N.getAttr(id, name) : null;
+      removeAttr(id, name);
+      if (watchers) queueRecord(watchers, { type: "attributes", target: id, addedNodes: [], removedNodes: [], previousSibling: null, nextSibling: null, attributeName: String(name), attributeNamespace: null, oldValue: old });
+    };
+    N.setText = (id, text) => {
+      if (!mutationRegs.size) return setText(id, text);
+      const type = N.nodeType(id);
+      if (type === 3 || type === 8) {
+        const watchers = interested(id, "characterData");
+        const old = watchers ? N.text(id) : null;
+        setText(id, text);
+        if (watchers) queueRecord(watchers, { type: "characterData", target: id, addedNodes: [], removedNodes: [], previousSibling: null, nextSibling: null, attributeName: null, attributeNamespace: null, oldValue: old });
+        return;
+      }
+      const watchers = interested(id, "childList");
+      const removed = watchers ? N.children(id) : [];
+      setText(id, text);
+      if (watchers) queueRecord(watchers, childListRecord(id, N.children(id), removed, null, null));
+    };
+  }
+  class MutationObserver {
+    constructor(cb) {
+      if (typeof cb !== "function") throw new TypeError("MutationObserver needs a callback");
+      this._cb = cb;
+      this._records = [];
+      this._targets = new Set();
+    }
+    observe(target, options = {}) {
+      if (!target || target.__id === undefined) throw new TypeError("MutationObserver.observe: not a Node");
+      const o = { ...options };
+      if (o.attributeOldValue || o.attributeFilter) o.attributes = o.attributes !== false;
+      if (o.characterDataOldValue) o.characterData = o.characterData !== false;
+      if (!o.childList && !o.attributes && !o.characterData) throw new TypeError("MutationObserver.observe: nothing to observe");
+      if (o.attributeFilter) o.attributeFilter = Array.from(o.attributeFilter, String);
+      const regs = mutationRegs.get(target.__id) || [];
+      const existing = regs.find((r) => r.observer === this);
+      if (existing) existing.options = o; else regs.push({ observer: this, options: o });
+      mutationRegs.set(target.__id, regs);
+      this._targets.add(target.__id);
+    }
+    disconnect() {
+      for (const id of this._targets) {
+        const regs = (mutationRegs.get(id) || []).filter((r) => r.observer !== this);
+        if (regs.length) mutationRegs.set(id, regs); else mutationRegs.delete(id);
+      }
+      this._targets.clear();
+      this._records = [];
+    }
+    takeRecords() {
+      const out = this._records.map((r) => ({
+        ...r,
+        target: wrap(r.target),
+        addedNodes: nodeList(r.addedNodes.map(wrap)),
+        removedNodes: nodeList(r.removedNodes.map(wrap)),
+        previousSibling: r.previousSibling === null ? null : wrap(r.previousSibling),
+        nextSibling: r.nextSibling === null ? null : wrap(r.nextSibling),
+      }));
+      this._records = [];
+      return out;
+    }
+  }
+
   const wrappers = new Map();
   const isNode = (v) => v && typeof v === "object" && v.__id !== undefined;
 
@@ -445,8 +587,20 @@
     w = Object.create(proto);
     Object.defineProperty(w, "__id", { value: id });
     wrappers.set(id, w);
-    if (type === 1 && registry.size && registry.has(N.tag(id))) upgrade(w);
+    if (type === 1 && registry.size && !creatingInert && registry.has(N.tag(id)) && !inert(id)) upgrade(w);
     return w;
+  }
+  // Template contents are inert: custom elements there aren't upgraded
+  // (frameworks read their binding attributes before stamping copies).
+  const inertFragments = new Set();
+  let creatingInert = false;
+  function inert(id) {
+    for (let n = N.parent(id); n !== null && n !== undefined; n = N.parent(n)) {
+      const t = N.nodeType(n);
+      if (t === 11) return inertFragments.has(n);
+      if (t === 1 && N.tag(n) === "template") return true;
+    }
+    return false;
   }
   const ids = (list) => list.map(wrap);
   function toNode(v) {
@@ -491,7 +645,11 @@
     get lastChild() { const c = N.children(this.__id); return wrap(c.length ? c[c.length - 1] : null); }
     get nextSibling() { return sibling(this, 1, false); }
     get previousSibling() { return sibling(this, -1, false); }
-    get ownerDocument() { return document; }
+    get ownerDocument() {
+      // Template contents belong to an inert document of their own.
+      const id = this.__id;
+      return inertFragments.has(id) || inert(id) ? inertDocument : document;
+    }
     get isConnected() { return N.connected(this.__id); }
     get textContent() { return N.text(this.__id); }
     set textContent(v) { N.setText(this.__id, v === null || v === undefined ? "" : String(v)); }
@@ -979,12 +1137,21 @@
     get content() {
       // Parsed templates keep their contents in a fragment of their own.
       const parsed = N.templateContent(this.__id);
-      if (parsed !== null) return wrap(parsed);
+      if (parsed !== null) { inertFragments.add(parsed); return wrap(parsed); }
       // A script-made template: one fragment for good, holding what
       // innerHTML/appendChild put in the element.
-      if (!this._content) this._content = document.createDocumentFragment();
+      if (!this._content) { this._content = document.createDocumentFragment(); inertFragments.add(this._content.__id); }
       while (this.firstChild) this._content.appendChild(this.firstChild);
       return this._content;
+    }
+    cloneNode(deep) {
+      const copy = super.cloneNode(deep);
+      // A script-made template's contents are ours to copy.
+      if (deep && this._content) {
+        copy._content = this._content.cloneNode(true);
+        inertFragments.add(copy._content.__id);
+      }
+      return copy;
     }
   }
   // Canvas 2D: the context records operations; before each snapshot they're
@@ -1534,6 +1701,13 @@
   }
 
   const document = wrap(N.root());
+  // The template contents' owner: what it makes isn't upgraded until it's
+  // copied (or moved) into the document.
+  const inertDocument = Object.create(document);
+  inertDocument.createElement = (tag) => {
+    creatingInert = true;
+    try { return wrap(N.createElement(String(tag))); } finally { creatingInert = false; }
+  };
   {
     // Falsy and == undefined, like browsers' (pages detect old IE with it).
     const all = N.htmlAll();
@@ -1949,7 +2123,7 @@
     localStorage: storage("local"), sessionStorage: storage("session"),
     matchMedia,
     getComputedStyle: (el) => el.style,
-    MutationObserver: observer("MutationObserver"),
+    MutationObserver, MutationRecord: class MutationRecord {},
     IntersectionObserver: observer("IntersectionObserver"), IntersectionObserverEntry,
     ResizeObserver, NodeFilter, TreeWalker,
     PerformanceObserver: observer("PerformanceObserver"),
@@ -3020,4 +3194,11 @@
       return out;
     },
   });
+  // Debugging: FEATHER_EVAL=probe.js runs in the page FEATHER_EVAL_DELAY ms in.
+  const probe = N.debugScript();
+  if (probe) {
+    setTimeout(() => {
+      try { (0, eval)(probe[0]); } catch (e) { console.error("FEATHER_EVAL: " + e + "\n" + e.stack); }
+    }, probe[1]);
+  }
 })(globalThis);
