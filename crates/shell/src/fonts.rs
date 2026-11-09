@@ -55,8 +55,19 @@ const INSTANCE_WEIGHTS: [u16; 6] = [300, 400, 500, 600, 700, 800];
 /// name: the font itself, or for a variable font, a static instance per
 /// common weight (GPUI can't set variation axes, so a variable font would
 /// draw every weight as its default).
-pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16)) -> Vec<(Vec<u8>, String)> {
+/// `fallback` names a file that doesn't name itself (the CSS family).
+pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16), fallback: Option<&str>) -> Vec<(Vec<u8>, String)> {
     let Some((data, family)) = decode(bytes) else { return Vec::new() };
+    // Webfonts with their names blanked out: the platform won't load those,
+    // so they get the page's name for them.
+    let (data, family) = match family {
+        Some(family) => (data, family),
+        None => {
+            let Some(fallback) = fallback.map(str::trim).filter(|f| !f.is_empty()) else { return Vec::new() };
+            let Some(data) = renamed(&data, fallback) else { return Vec::new() };
+            (data, fallback.to_owned())
+        }
+    };
     let variable = ttf_parser::Face::parse(&data, 0).is_ok_and(|f| f.is_variable());
     if !variable {
         return vec![(data, family)];
@@ -65,13 +76,13 @@ pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16)) -> Vec<(Vec<u8>, String)>
     let instances: Vec<(Vec<u8>, String)> = INSTANCE_WEIGHTS
         .iter()
         .filter(|w| (lo..=hi).contains(*w))
-        .filter_map(|&w| instance(&data, w).map(|d| (d, family.clone())))
+        .filter_map(|&w| instance(&data, w, &family).map(|d| (d, family.clone())))
         .collect();
     if instances.is_empty() { vec![(data, family)] } else { instances }
 }
 
 /// A static instance of a variable font at `weight` (other axes at default).
-fn instance(data: &[u8], weight: u16) -> Option<Vec<u8>> {
+fn instance(data: &[u8], weight: u16, family: &str) -> Option<Vec<u8>> {
     use allsorts::binary::read::ReadScope;
     use allsorts::font_data::FontData;
     use allsorts::tables::variable_fonts::fvar::FvarTable;
@@ -93,12 +104,8 @@ fn instance(data: &[u8], weight: u16) -> Option<Vec<u8>> {
     }
     // Every instance still carries the variable font's names; CoreText and
     // font-kit key fonts by PostScript name, so give each its own.
-    let (family, italic) = {
-        let face = ttf_parser::Face::parse(&bytes, 0).ok()?;
-        let get = |id: u16| face.names().into_iter().filter(|n| n.name_id == id).find_map(|n| n.to_string());
-        let family = get(ttf_parser::name_id::TYPOGRAPHIC_FAMILY).or_else(|| get(ttf_parser::name_id::FAMILY))?;
-        (family, face.is_italic())
-    };
+    let family = family.to_owned();
+    let italic = ttf_parser::Face::parse(&bytes, 0).ok()?.is_italic();
     let style = format!("{}{}", weight_name(weight), if italic { " Italic" } else { "" });
     let postscript: String = format!("{family}-{style}").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
     let name = name_table(&[
@@ -110,6 +117,24 @@ fn instance(data: &[u8], weight: u16) -> Option<Vec<u8>> {
         (17, style),
     ]);
     replace_table(&bytes, *b"name", &name)
+}
+
+/// The font with a fresh `name` table (Windows and Mac records for its
+/// family and style): for files whose names the platform can't read.
+pub fn renamed(data: &[u8], family: &str) -> Option<Vec<u8>> {
+    let face = ttf_parser::Face::parse(data, 0).ok()?;
+    let (weight, italic) = (face.weight().to_number(), face.is_italic());
+    let style = format!("{}{}", weight_name(weight), if italic { " Italic" } else { "" });
+    let postscript: String = format!("{family}-{style}").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let name = name_table(&[
+        (1, family.to_owned()),
+        (2, if italic { "Italic".into() } else { "Regular".into() }),
+        (4, format!("{family} {style}")),
+        (6, postscript),
+        (16, family.to_owned()),
+        (17, style),
+    ]);
+    replace_table(data, *b"name", &name)
 }
 
 fn weight_name(weight: u16) -> &'static str {
@@ -214,8 +239,8 @@ fn replace_table(font: &[u8], tag: [u8; 4], data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Decode a downloaded font: (sfnt data, its family name).
-pub fn decode(bytes: Vec<u8>) -> Option<(Vec<u8>, String)> {
+/// Decode a downloaded font: (sfnt data, its family name if it has one).
+pub fn decode(bytes: Vec<u8>) -> Option<(Vec<u8>, Option<String>)> {
     if bytes.len() > MAX_FONT_BYTES {
         return None;
     }
@@ -235,13 +260,27 @@ pub fn decode(bytes: Vec<u8>) -> Option<(Vec<u8>, String)> {
     };
     // The typographic family groups weights under one name; the legacy one
     // may say "Inter Medium".
-    let family = name(ttf_parser::name_id::TYPOGRAPHIC_FAMILY).or_else(|| name(ttf_parser::name_id::FAMILY))?;
+    let named = |id| name(id).filter(|n: &String| !n.trim().is_empty());
+    let family = named(ttf_parser::name_id::TYPOGRAPHIC_FAMILY).or_else(|| named(ttf_parser::name_id::FAMILY));
     Some((data, family))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `FONT=file.woff2 cargo test -p shell --bin feather font_names -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn font_names() {
+        let bytes = std::fs::read(std::env::var("FONT").unwrap()).unwrap();
+        let (data, family) = decode(bytes).unwrap();
+        let face = ttf_parser::Face::parse(&data, 0).unwrap();
+        println!("family {family:?} tag {:?} tables {}", &data[..4], face.tables().name.is_some());
+        for n in face.names() {
+            println!("platform {:?} enc {} lang {} id {} -> {:?}", n.platform_id, n.encoding_id, n.language_id, n.name_id, n.to_string());
+        }
+    }
 
     #[test]
     fn prefers_woff2() {

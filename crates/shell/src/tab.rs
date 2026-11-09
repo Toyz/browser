@@ -666,7 +666,8 @@ impl Tab {
                             return Some((src, families, Vec::new()));
                         }
                         let bytes = net::fetch_bytes(&url);
-                        let decoded = bytes.as_ref().map(|b| crate::fonts::decode_all(b.clone(), weights)).unwrap_or_default();
+                        let fallback = families.first().map(String::as_str);
+                        let decoded = bytes.as_ref().map(|b| crate::fonts::decode_all(b.clone(), weights, fallback)).unwrap_or_default();
                         if std::env::var_os("BROWSER_DEBUG").is_some() {
                             eprintln!("web font {src}: {:?} bytes -> {} fonts", bytes.as_ref().map(|b| b.len()).map_err(|e| e.to_string()), decoded.len());
                         }
@@ -676,32 +677,44 @@ impl Tab {
                 .collect();
             let results = futures::future::join_all(tasks).await;
             this.update(cx, |this, cx| {
-                let mut faces = Vec::new();
-                let mut aliases = Vec::new();
+                let debug = std::env::var_os("BROWSER_DEBUG").is_some();
+                let mut any = false;
                 for (src, families, decoded) in results.into_iter().flatten() {
                     let family = decoded.first().map(|(_, f)| f.clone());
-                    for (data, _) in decoded {
-                        faces.push(std::borrow::Cow::Owned(data));
+                    // One file at a time, and a panic in the platform's font
+                    // code (CoreText finding no family name in a file we could
+                    // read) only loses that file. Such files get a second go
+                    // with names written afresh.
+                    let add = |faces: Vec<Vec<u8>>| -> bool {
+                        let faces: Vec<_> = faces.into_iter().map(std::borrow::Cow::Owned).collect();
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cx.text_system().add_fonts(faces))) {
+                            Ok(Ok(())) => true,
+                            Ok(Err(err)) => {
+                                if debug {
+                                    eprintln!("web font {src} rejected: {err:#}");
+                                }
+                                false
+                            }
+                            Err(_) => false,
+                        }
+                    };
+                    let data: Vec<Vec<u8>> = decoded.iter().map(|(d, _)| d.clone()).collect();
+                    let added = !data.is_empty()
+                        && (add(data)
+                            || add(decoded.iter().filter_map(|(d, f)| crate::fonts::renamed(d, f)).collect()));
+                    if !added && !decoded.is_empty() {
+                        eprintln!("web font {src} couldn't be loaded");
                     }
-                    if let Some(family) = &family {
-                        aliases.extend(families.into_iter().map(|css| (css, family.clone())));
+                    if added && let Some(family) = &family {
+                        for css in families {
+                            this.palette.fonts.add(&css, family);
+                        }
+                        any = true;
                     }
-                    cx.global_mut::<crate::fonts::WebFonts>().loaded.insert(src, family);
+                    cx.global_mut::<crate::fonts::WebFonts>().loaded.insert(src, family.filter(|_| added));
                 }
-                if faces.is_empty() {
-                    return;
-                }
-                let added = cx.text_system().add_fonts(faces);
-                if let Err(err) = &added
-                    && std::env::var_os("BROWSER_DEBUG").is_some()
-                {
-                    eprintln!("web fonts rejected: {err:#}");
-                }
-                if added.is_ok() {
-                    for (css, family) in aliases {
-                        this.palette.fonts.add(&css, &family);
-                    }
-                    if std::env::var_os("BROWSER_DEBUG").is_some() {
+                if any {
+                    if debug {
                         eprintln!("web fonts loaded for {}", this.page.as_ref().map(|p| p.url.to_string()).unwrap_or_default());
                     }
                     this.fonts_changed(cx);
