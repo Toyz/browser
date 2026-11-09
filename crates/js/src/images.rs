@@ -12,6 +12,8 @@ use crate::ToJs;
 struct Job {
     id: u32,
     url: Url,
+    /// Any resource (a <link>'s): success is just fetching it.
+    any: bool,
     reply: mpsc::Sender<ToJs>,
 }
 
@@ -33,7 +35,8 @@ fn queue() -> &'static Mutex<mpsc::Sender<Job>> {
                             Err(_) => return,
                         };
                         let Ok(job) = job else { return };
-                        let size = net::fetch_bytes(&job.url).ok().and_then(|bytes| size_of(&bytes));
+                        let fetched = net::fetch_bytes(&job.url).ok();
+                        let size = if job.any { fetched.map(|_| (0, 0)) } else { fetched.and_then(|bytes| size_of(&bytes)) };
                         job.reply.send(ToJs::Image { id: job.id, size }).ok();
                     }
                 })
@@ -69,10 +72,11 @@ fn size_of(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((300, 150))
 }
 
-/// Start loading `url`; `ToJs::Image { id, .. }` arrives when it's done.
-pub fn load(id: u32, url: Url, reply: mpsc::Sender<ToJs>) {
+/// Start loading `url`; `ToJs::Image { id, .. }` arrives when it's done
+/// (`any`: not necessarily an image; its size is 0x0).
+pub fn load(id: u32, url: Url, any: bool, reply: mpsc::Sender<ToJs>) {
     if let Ok(q) = queue().lock() {
-        q.send(Job { id, url, reply }).ok();
+        q.send(Job { id, url, any, reply }).ok();
     }
 }
 

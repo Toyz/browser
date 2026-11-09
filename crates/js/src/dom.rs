@@ -1156,21 +1156,24 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         crate::sse::open(id, dom.doc.url.clone(), url.clone(), credentials, closed, dom.fetch_tx.clone());
         Ok(js_str(url.as_str()))
     }));
-    // imageLoad(id, url): fetch an image in the background.
-    add("imageLoad", 2, Box::new(|d, a, cx| {
-        let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
-        let href = arg_string(a, 1, cx)?;
-        let mut dom = d.borrow_mut();
-        // Counted like a fetch: the first paint waits a little for them.
-        dom.fetches += 1;
-        match dom.doc.resolve_url(&href) {
-            Some(url) => crate::images::load(id, url, dom.fetch_tx.clone()),
-            None => {
-                dom.fetch_tx.send(ToJs::Image { id, size: None }).ok();
+    // imageLoad(id, url) / resourceLoad(id, url): fetch an image (or a
+    // <link>'s resource) in the background.
+    for (name, any) in [("imageLoad", false), ("resourceLoad", true)] {
+        add(name, 2, Box::new(move |d, a, cx| {
+            let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
+            let href = arg_string(a, 1, cx)?;
+            let mut dom = d.borrow_mut();
+            // Counted like a fetch: the first paint waits a little for them.
+            dom.fetches += 1;
+            match dom.doc.resolve_url(&href) {
+                Some(url) => crate::images::load(id, url, any, dom.fetch_tx.clone()),
+                None => {
+                    dom.fetch_tx.send(ToJs::Image { id, size: None }).ok();
+                }
             }
-        }
-        Ok(JsValue::undefined())
-    }));
+            Ok(JsValue::undefined())
+        }));
+    }
     add("sseClose", 1, Box::new(|d, a, _| {
         let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
         if let Some(flag) = d.borrow_mut().event_sources.remove(&id) {

@@ -768,6 +768,18 @@
     imageLoads.set(id, img);
     N.imageLoad(id, src);
   }
+  // A <link> put in the document: what it points at loads, then `load`
+  // (vite waits for that before importing a chunk with CSS).
+  function linkInserted(id) {
+    const el = wrap(id);
+    const rel = (el.getAttribute("rel") || "").toLowerCase();
+    const href = el.getAttribute("href");
+    if (!href || el._img || !/(^|\s)(stylesheet|preload|modulepreload|prefetch|icon)(\s|$)/.test(rel)) return;
+    const loadId = ++imageLoadSeq;
+    el._img = { src: href, state: "loading", w: 0, h: 0, id: loadId };
+    imageLoads.set(loadId, el);
+    N.resourceLoad(loadId, href);
+  }
   function imageEvent(id, ok, w, h) {
     const img = imageLoads.get(id);
     imageLoads.delete(id);
@@ -891,9 +903,46 @@
       return f;
     }
   }
+  // Canvas: a 2D context that draws nothing (yet), so pages and libraries
+  // that assume one (charts, editors) keep working.
+  function context2d(canvas) {
+    const noop = () => {};
+    const gradient = () => ({ addColorStop: noop });
+    const ctx = {
+      canvas, fillStyle: "#000", strokeStyle: "#000", lineWidth: 1, lineCap: "butt", lineJoin: "miter", miterLimit: 10,
+      font: "10px sans-serif", textAlign: "start", textBaseline: "alphabetic", direction: "ltr", globalAlpha: 1,
+      globalCompositeOperation: "source-over", shadowBlur: 0, shadowColor: "rgba(0, 0, 0, 0)", shadowOffsetX: 0, shadowOffsetY: 0,
+      imageSmoothingEnabled: true, lineDashOffset: 0, filter: "none",
+      save: noop, restore: noop, scale: noop, rotate: noop, translate: noop, transform: noop, setTransform: noop, resetTransform: noop,
+      getTransform: () => ({ a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }),
+      clearRect: noop, fillRect: noop, strokeRect: noop, beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop,
+      bezierCurveTo: noop, quadraticCurveTo: noop, arc: noop, arcTo: noop, ellipse: noop, rect: noop, roundRect: noop,
+      fill: noop, stroke: noop, clip: noop, isPointInPath: () => false, isPointInStroke: () => false,
+      fillText: noop, strokeText: noop, drawImage: noop, setLineDash: noop, getLineDash: () => [],
+      measureText(text) {
+        const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(this.font)?.[1] || "10");
+        const width = String(text).length * size * 0.55;
+        return { width, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2 };
+      },
+      createLinearGradient: gradient, createRadialGradient: gradient, createConicGradient: gradient,
+      createPattern: () => ({ setTransform: noop }),
+      createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
+      getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
+      putImageData: noop,
+    };
+    return ctx;
+  }
   class HTMLCanvasElement extends HTMLElement {
-    getContext() { return null; }
+    getContext(kind) {
+      if (kind !== "2d") return null;
+      return this._ctx || (this._ctx = context2d(this));
+    }
+    get width() { return Number(this.getAttribute("width")) || 300; }
+    set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); }
+    get height() { return Number(this.getAttribute("height")) || 150; }
+    set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); }
     toDataURL() { return "data:,"; }
+    toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
   class HTMLMediaElement extends HTMLElement {
     play() { return Promise.resolve(); }
@@ -1117,6 +1166,11 @@
   {
     const insert = N.insert, remove = N.remove, setAttr = N.setAttr, removeAttr = N.removeAttr;
     N.insert = (p, c, b) => {
+      if (N.nodeType(c) === 1 && N.tag(c) === "link") {
+        insert(p, c, b);
+        if (N.connected(p)) linkInserted(c);
+        return;
+      }
       if (!registry.size) return insert(p, c, b);
       const moving = N.nodeType(c) === 11 && N.shadowHost(c) === null ? N.children(c) : [c];
       const before = moving.map((m) => N.connected(m));
@@ -1186,6 +1240,7 @@
       t.textContent = v;
     }
     get readyState() { return readyState; }
+    getSelection() { return selection; }
     get styleSheets() { return Array.from(this.querySelectorAll("style")).map((el) => el.sheet); }
     get adoptedStyleSheets() { return documentSheets; }
     set adoptedStyleSheets(v) { documentSheets = Array.from(v); N.touch(); }
@@ -1258,7 +1313,6 @@
     open() { return this; }
     close() {}
     execCommand() { return false; }
-    getSelection() { return { rangeCount: 0, removeAllRanges() {}, addRange() {}, toString() { return ""; } }; }
     elementFromPoint() { return null; }
     querySelector(sel) { return wrap(N.query(this.__id, String(sel), false)); }
   }
@@ -1462,6 +1516,16 @@
     unobserve() {} disconnect() {} takeRecords() { return []; }
   };
 
+  // Text selection: there's none we know of (the tab owns it).
+  const selection = {
+    rangeCount: 0, isCollapsed: true, type: "None", anchorNode: null, focusNode: null, anchorOffset: 0, focusOffset: 0,
+    removeAllRanges() {}, addRange() {}, collapse() {}, collapseToEnd() {}, collapseToStart() {}, extend() {},
+    selectAllChildren() {}, deleteFromDocument() {}, containsNode() { return false; },
+    getRangeAt() { throw new DOMException("No range", "IndexSizeError"); },
+    toString() { return ""; },
+  };
+  const getSelection = () => selection;
+
   const consoleImpl = {};
   const fmt = (args) => args.map((a) => {
     if (typeof a === "string") return a;
@@ -1489,7 +1553,7 @@
 
   Object.assign(window, {
     window, self: window, globalThis: window, top: window, parent: window, frames: window,
-    document, location, history, navigator: navigatorImpl, console: consoleImpl,
+    document, location, history, navigator: navigatorImpl, console: consoleImpl, getSelection,
     Window, HTMLDocument: Document,
     Node, Element, HTMLElement, Text, Comment, Document, DocumentFragment, CharacterData, EventTarget,
     HTMLAnchorElement, HTMLImageElement, Image, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
