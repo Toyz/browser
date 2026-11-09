@@ -5724,6 +5724,7 @@ dependencies = [
  "imagesize 0.13.0",
  "net",
  "page",
+ "percent-encoding",
  "style",
  "url",
 ]

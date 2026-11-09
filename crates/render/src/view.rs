@@ -21,8 +21,9 @@ use crate::images::{ImageState, ImageStore};
 pub struct FontBook {
     /// lowercase name → the system's spelling
     installed: HashMap<String, SharedString>,
-    /// Resolved lists, keyed by the list's address (lists are shared `Arc`s).
-    cache: RefCell<HashMap<usize, Option<SharedString>>>,
+    /// Resolved lists, keyed by the names themselves. (Not by `Arc` address:
+    /// after a restyle frees the old lists, new ones can reuse the addresses.)
+    cache: RefCell<HashMap<style::FontNames, Option<SharedString>>>,
 }
 
 impl FontBook {
@@ -39,8 +40,7 @@ impl FontBook {
         if names.is_empty() {
             return None;
         }
-        let key = names.as_ptr() as *const () as usize;
-        if let Some(hit) = self.cache.borrow().get(&key) {
+        if let Some(hit) = self.cache.borrow().get(names) {
             return hit.clone();
         }
         let mut found = None;
@@ -60,7 +60,7 @@ impl FontBook {
                 break;
             }
         }
-        self.cache.borrow_mut().insert(key, found.clone());
+        self.cache.borrow_mut().insert(names.clone(), found.clone());
         found
     }
 }

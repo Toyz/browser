@@ -571,6 +571,15 @@ impl Browser {
                         } else {
                             this.hover_blocks.remove(&node)
                         };
+                        if changed && std::env::var_os("BROWSER_DEBUG").is_some() {
+                            let text = this
+                                .page
+                                .as_ref()
+                                .and_then(|p| Some(p.doc.as_ref()?.text_content(node)))
+                                .unwrap_or_default();
+                            let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
+                            eprintln!("block hover {hovered}: {node:?} {text:?}");
+                        }
                         if changed {
                             this.interaction_changed(window, cx);
                         }
@@ -578,9 +587,6 @@ impl Browser {
                     .ok();
             }),
             on_inline_hover: Rc::new(move |para, node, window, cx| {
-                if std::env::var_os("BROWSER_DEBUG").is_some() {
-                    eprintln!("inline hover: paragraph {para} → {node:?}");
-                }
                 inline_hover
                     .update(cx, |this, cx| {
                         let next = match node {
@@ -590,6 +596,12 @@ impl Browser {
                             None => return,
                         };
                         if this.hover_inline != next {
+                            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                                let text = node
+                                    .and_then(|n| Some(this.page.as_ref()?.doc.as_ref()?.text_content(n)))
+                                    .unwrap_or_default();
+                                eprintln!("inline hover: paragraph {para} → {node:?} {:?}", text.trim());
+                            }
                             this.hover_inline = next;
                             this.interaction_changed(window, cx);
                         }

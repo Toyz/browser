@@ -11,6 +11,7 @@ style.workspace = true
 url.workspace = true
 anyhow.workspace = true
 imagesize = "0.13"
+percent-encoding = "2"
 
 [dev-dependencies]
 net.workspace = true

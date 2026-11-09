@@ -14,7 +14,7 @@ track, area, map, dialog, noembed, noframes, rp, col, colgroup, [hidden] {
 }
 
 /* Replaced and interactive content we can't render yet. */
-svg, math, canvas, video, audio, iframe, object, embed, input, select, textarea,
+math, canvas, video, audio, iframe, object, embed, input, select, textarea,
 picture > source {
   display: none;
 }

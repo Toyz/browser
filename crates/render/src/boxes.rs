@@ -590,6 +590,33 @@ impl Builder<'_> {
         }
     }
 
+    /// An inline `<svg>`: serialized back to markup (with `currentColor`
+    /// resolved) and drawn as an image from a `data:` URL.
+    fn build_svg(&mut self, id: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+        let mut markup = String::new();
+        serialize_svg(self.doc, id, &color_hex(style.color), true, &mut markup);
+        let encoded = percent_encoding::utf8_percent_encode(&markup, percent_encoding::NON_ALPHANUMERIC);
+        let Ok(src) = Url::parse(&format!("data:image/svg+xml,{encoded}")) else { return };
+        let number = |name: &str| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+        let image = ImageBox {
+            id: self.next_id(),
+            style: style.clone(),
+            src: Arc::new(src),
+            density: 1.0,
+            attr_width: number("width"),
+            attr_height: number("height"),
+            alt: None,
+            link: link.cloned(),
+            anchors: Vec::new(),
+        };
+        if style.display.is_block_level() || style.float != Float::None {
+            self.flush(c);
+            c.push(LayoutBox::Image(image));
+        } else {
+            c.inline.push_object(InlineObject::Image(image), &style, link);
+        }
+    }
+
     fn next_id(&mut self) -> usize {
         self.next_id += 1;
         self.next_id
@@ -796,6 +823,10 @@ impl Builder<'_> {
 
             if tag == "img" {
                 self.build_image(element, style, c, link);
+                continue;
+            }
+            if tag == "svg" && !element.is_html() {
+                self.build_svg(child, element, style, c, link);
                 continue;
             }
 
@@ -1158,6 +1189,80 @@ fn pick_image_source(e: &page::ElementData, base: &Url) -> Option<(Url, f32)> {
         return None;
     }
     Some((base.join(&url).ok()?, density.max(0.1)))
+}
+
+/// A CSS color as SVG understands it (theme colors use the light palette).
+fn color_hex(c: Color) -> String {
+    let v = match c {
+        Color::Rgba(v) => v,
+        Color::Link => 0x1a0dabff,
+        Color::Muted => 0x6b6b6bff,
+        Color::Foreground | Color::CurrentColor => 0x1a1a1aff,
+    };
+    if v & 0xff == 0xff { format!("#{:06x}", v >> 8) } else { format!("#{v:08x}") }
+}
+
+fn escape_xml(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Write an SVG subtree back out as standalone markup.
+fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, out: &mut String) {
+    match &doc.node(id).data {
+        NodeData::Text(t) => escape_xml(t, out),
+        NodeData::Element(e) => {
+            let name = &*e.name.local;
+            out.push('<');
+            out.push_str(name);
+            if root && e.attr("xmlns").is_none() {
+                out.push_str(r#" xmlns="http://www.w3.org/2000/svg""#);
+            }
+            if root {
+                out.push_str(r#" xmlns:xlink="http://www.w3.org/1999/xlink""#);
+            }
+            for attr in &e.attrs {
+                let ns = &*attr.name.ns;
+                let prefix = if ns.ends_with("/xlink") {
+                    "xlink:"
+                } else if ns.ends_with("XML/1998/namespace") {
+                    "xml:"
+                } else {
+                    ""
+                };
+                let local = &*attr.name.local;
+                if local == "xmlns" || (root && prefix.is_empty() && local == "xmlns:xlink") {
+                    continue;
+                }
+                out.push(' ');
+                out.push_str(prefix);
+                out.push_str(local);
+                out.push_str("=\"");
+                let value = if attr.value.eq_ignore_ascii_case("currentcolor") {
+                    current_color.to_owned()
+                } else {
+                    attr.value.replace("currentColor", current_color)
+                };
+                escape_xml(&value, out);
+                out.push('"');
+            }
+            out.push('>');
+            for &child in doc.children(id) {
+                serialize_svg(doc, child, current_color, false, out);
+            }
+            out.push_str("</");
+            out.push_str(name);
+            out.push('>');
+        }
+        _ => {}
+    }
 }
 
 fn block_kind_for(display: Display) -> BlockKind {
@@ -1966,6 +2071,23 @@ mod tests {
         // An inline-block with block content stays in the line as a block object.
         assert_eq!(p.objects.len(), 2);
         assert!(matches!(&p.objects[1], InlineObject::BlockBox(_)));
+    }
+
+    #[test]
+    fn inline_svg_becomes_an_image() {
+        let tree = layout_css(
+            r#"<p class="t">Next <svg width="16" height="20" viewBox="0 0 16 20" fill="currentColor"><path d="M5 4L8 16"/></svg></p>"#,
+            ".t { color: #ff0000 }",
+        );
+        let p = paragraph(&tree.rows[0]);
+        let InlineObject::Image(svg) = &p.objects[0] else { panic!("{:?}", p.objects) };
+        assert_eq!((svg.attr_width, svg.attr_height), (Some(16.0), Some(20.0)));
+        let bytes = net::decode_data_url(svg.src.as_str()).unwrap();
+        let markup = String::from_utf8(bytes).unwrap();
+        assert!(markup.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg""#), "{markup}");
+        assert!(markup.contains(r##"fill="#ff0000""##), "{markup}");
+        assert!(markup.contains("<path"), "{markup}");
+        assert_eq!(tree.images.len(), 1);
     }
 
     #[test]

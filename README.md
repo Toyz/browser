@@ -22,6 +22,7 @@ It is cursed. It also kind of works.
 - **`position: absolute` is "absolute to your parent, probably".** CSS says the nearest positioned ancestor; Taffy only knows the parent. Usually the same box. Absolute boxes anchored to the page itself stay hidden, which mostly hides "skip to content" links and modals, which is honestly an improvement.
 - **No JavaScript.** Wikipedia gets its no-JS layout. We report `(scripting: none)` to media queries and render `<noscript>` content, like a browser from 2004 that happens to support `oklch()`.
 - **Mask icons are SVGs served through the app's asset system.** CSS `mask-image` icons are fetched, registered as fake app assets, and drawn with GPUI's `svg()` element tinted with the box's color, which is what a mask icon is anyway.
+- **Inline `<svg>` is serialized back into a string.** We parse the SVG into our tree, then write it back out as markup (with `currentColor` swapped for the actual color), percent-encode it into a `data:` URL, and "download" it through the image pipeline. Icons work.
 - **The screenshot tool doesn't take screenshots.** It asks GPUI to render the window's frame into a texture offscreen. That's how the pictures above were made, with no screen-recording permission.
 
 ## What actually works

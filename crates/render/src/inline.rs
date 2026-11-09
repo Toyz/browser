@@ -114,16 +114,6 @@ struct FlowState {
     block_sizes: BlockSizes,
 }
 
-fn font_for(style: &InlineStyle, cx: &RenderCx) -> Font {
-    Font {
-        family: cx.palette.font(&style.font_names, style.font_family),
-        features: FontFeatures::default(),
-        fallbacks: None,
-        weight: FontWeight(style.font_weight as f32),
-        style: if style.italic { FontStyle::Italic } else { FontStyle::Normal },
-    }
-}
-
 /// CSS line-height around a glyph box: half the leading above, half below.
 fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
     let content = ascent + descent;
@@ -206,13 +196,11 @@ impl FlowState {
 
         // The strut: every line is at least as tall as the block's own font.
         let block = InlineStyle::of(&para.style, false);
-        let block_font = ts.resolve_font(&font_for(&block, cx));
-        let size = px(block.font_size);
-        self.strut = extent_for(
-            &InlineStyle { baseline_shift: 0.0, ..block.clone() },
-            ts.ascent(block_font, size),
-            ts.descent(block_font, size),
-        );
+        // Same measuring path as the text itself, so the metrics agree (mixing
+        // sources inflates every line by their difference).
+        let strut_style = InlineStyle { baseline_shift: 0.0, ..block.clone() };
+        let strut = ts.layout_line(" ", px(block.font_size), &[text_run(1, &strut_style, &cx.palette)], None);
+        self.strut = extent_for(&strut_style, strut.ascent, strut.descent);
 
         let mut out = Vec::with_capacity(para.pieces.len());
         for piece in &para.pieces {

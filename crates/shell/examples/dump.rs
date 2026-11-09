@@ -50,6 +50,21 @@ fn tree(b: &LayoutBox, depth: usize, max_depth: usize) {
     }
 }
 
+/// Print every paragraph containing `needle`, with its text styles.
+fn find(b: &LayoutBox, needle: &str) {
+    match b {
+        LayoutBox::Paragraph(p) if p.text.contains(needle) => {
+            println!("FOUND {:?}", p.text.chars().take(60).collect::<String>());
+            println!("  block: size {} line-height {:?} family {:?}", p.style.font_size, p.style.line_height, p.style.font_names);
+            for span in &p.spans {
+                println!("  span len {}: size {} lh {:?} weight {}", span.len, span.style.font_size, span.style.line_height, span.style.font_weight);
+            }
+        }
+        LayoutBox::Block(block) => block.children.iter().for_each(|c| find(c, needle)),
+        _ => {}
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let url = net::parse_input(&args.next().expect("usage: dump <url> [max_rows]"))?;
@@ -82,6 +97,11 @@ fn main() -> anyhow::Result<()> {
         styled,
         built
     );
+    if let Ok(needle) = std::env::var("FIND") {
+        for row in &layout.rows {
+            find(&row.content, &needle);
+        }
+    }
     if std::env::var("TREE").is_ok() {
         for row in layout.rows.iter().filter(|r| count(&r.content) > 50) {
             tree(&row.content, 0, 8);

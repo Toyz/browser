@@ -398,8 +398,13 @@ impl Styler {
     pub fn compute(&self, doc: &Document, id: NodeId, parent: &ComputedStyle) -> ComputedStyle {
         let mut style = ComputedStyle::inherit(parent);
         let Some(e) = doc.element(id) else { return style };
-        if !e.is_html() {
-            // SVG/MathML content would render as stray text; skip until supported.
+        // An `<svg>` directly inside HTML is styled like a replaced element
+        // (the renderer draws it as an image); everything else non-HTML
+        // (SVG internals, MathML) would render as stray text.
+        let outer_svg = e.name.ns == page::markup5ever::ns!(svg)
+            && &*e.name.local == "svg"
+            && doc.parent(id).and_then(|p| doc.element(p)).is_some_and(|p| p.is_html());
+        if !e.is_html() && !outer_svg {
             style.display = Display::None;
             return style;
         }
