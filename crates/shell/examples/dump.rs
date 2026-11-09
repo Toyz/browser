@@ -50,6 +50,45 @@ fn tree(b: &LayoutBox, depth: usize, max_depth: usize) {
     }
 }
 
+fn style_line(s: &style::ComputedStyle) -> String {
+    format!(
+        "display={:?} pos={:?} w={:?} h={:?} minh={:?} maxh={:?} pad={:?} margin={:?} inset={:?} translate={:?} flex={:?}/{:?} lh={:?} fs={}",
+        s.display, s.position, s.width, s.height, s.min_height, s.max_height, s.padding, s.margin, s.inset, s.translate,
+        s.flex_direction, s.align_items, s.line_height, s.font_size
+    )
+}
+
+/// Print the boxes of elements with this class, and what's inside them.
+fn by_class(b: &LayoutBox, doc: &page::Document, class: &str, inside: bool, depth: usize) {
+    let has = |n: Option<page::NodeId>| {
+        n.and_then(|n| doc.element(n)).and_then(|e| e.attr("class")).is_some_and(|c| c.split_whitespace().any(|c| c == class))
+    };
+    match b {
+        LayoutBox::Block(block) => {
+            let here = inside || has(block.node);
+            if here {
+                let tag = block.node.and_then(|n| doc.element(n)).map(|e| e.name.local.to_string()).unwrap_or_default();
+                let cls = block.node.and_then(|n| doc.element(n)).and_then(|e| e.attr("class")).unwrap_or_default().to_owned();
+                println!("{:indent$}<{tag} .{cls}> {:?} {}", "", std::mem::discriminant(&block.kind), style_line(&block.style), indent = depth * 2);
+            }
+            for c in &block.children {
+                by_class(c, doc, class, here, if here { depth + 1 } else { depth });
+            }
+        }
+        LayoutBox::Paragraph(p) => {
+            if inside {
+                println!("{:indent$}P {:?} objects={}", "", p.text.chars().take(40).collect::<String>(), p.objects.len(), indent = depth * 2);
+            }
+            for o in &p.objects {
+                if let render::boxes::InlineObject::BlockBox(bb) = o {
+                    by_class(&LayoutBox::Block((**bb).clone()), doc, class, inside, depth + 1);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Print every paragraph containing `needle`, with its text styles.
 fn find(b: &LayoutBox, needle: &str) {
     match b {
@@ -88,7 +127,10 @@ fn dump(url: &url::Url, max_rows: usize) -> anyhow::Result<()> {
     let parsed = t.elapsed();
     let t = Instant::now();
     let fetch = |u: &url::Url| net::fetch_text_cached(u);
-    let styler = style::StyleData::for_document(&doc, &fetch).styler(style::MediaEnv::default());
+    let styler = style::StyleData::for_document(&doc, &fetch).styler(style::MediaEnv {
+        width: std::env::var("WIDTH").ok().and_then(|w| w.parse().ok()).unwrap_or(1100.0),
+        ..Default::default()
+    });
     let styled = t.elapsed();
     let t = Instant::now();
     let layout = render::build(&doc, &styler);
@@ -107,6 +149,19 @@ fn dump(url: &url::Url, max_rows: usize) -> anyhow::Result<()> {
         styled,
         built
     );
+    if let Ok(class) = std::env::var("CLASS") {
+        for row in &layout.rows {
+            for w in row.wrappers.iter() {
+                if let Some(n) = w.node
+                    && doc.element(n).and_then(|e| e.attr("class")).is_some_and(|c| c.split_whitespace().any(|c| c == class))
+                {
+                    println!("WRAPPER {class}: {}", style_line(&w.style));
+                }
+            }
+            by_class(&row.content, &doc, &class, false, 0);
+            row.absolutes.iter().for_each(|b| by_class(b, &doc, &class, false, 0));
+        }
+    }
     if let Ok(needle) = std::env::var("FIND") {
         for row in &layout.rows {
             find(&row.content, &needle);

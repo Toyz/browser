@@ -927,11 +927,17 @@ fn apply_wide(s: &mut ComputedStyle, parent: &ComputedStyle, name: &str, wide: W
             s.background = src.background;
             s.background_image = src.background_image;
         }
+        // Each border property resets just itself (`border-radius: inherit`
+        // used to wipe the whole border).
+        n if n.contains("radius") => s.border_radius = src.border_radius,
+        n if n.ends_with("-color") && n.starts_with("border") => s.border_color = src.border_color,
+        n if n.ends_with("-style") && n.starts_with("border") => s.border_style = src.border_style,
+        n if n.ends_with("-width") && n.starts_with("border") => s.border_width = src.border_width,
+        n if n.starts_with("border-collapse") || n.starts_with("border-spacing") || n.starts_with("border-image") => {}
         n if n.starts_with("border") => {
             s.border_width = src.border_width;
             s.border_style = src.border_style;
             s.border_color = src.border_color;
-            s.border_radius = src.border_radius;
         }
         n if n.starts_with("overflow") => s.overflow = src.overflow,
         _ => {}

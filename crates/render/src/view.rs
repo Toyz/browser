@@ -336,6 +336,17 @@ fn apply_position(d: Div, s: &ComputedStyle) -> Div {
         }
     };
     let d = match s.position {
+        // Percentage insets can't take a pixel shift; a margin moves an
+        // absolutely positioned box just the same.
+        style::Position::Absolute | style::Position::Fixed if tx != 0.0 || ty != 0.0 => {
+            let d = d.absolute();
+            let d = if !matches!(s.inset.top, style::Length::Px(_)) && ty != 0.0 {
+                d.mt(px(s.margin.top.px_or_zero() + ty))
+            } else {
+                d
+            };
+            if !matches!(s.inset.left, style::Length::Px(_)) && tx != 0.0 { d.ml(px(s.margin.left.px_or_zero() + tx)) } else { d }
+        }
         style::Position::Absolute | style::Position::Fixed => d.absolute(),
         style::Position::Relative => d.relative(),
         style::Position::Static | style::Position::Sticky if tx != 0.0 || ty != 0.0 => {
@@ -433,7 +444,10 @@ fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow:
     let scrolls = s.overflow == Overflow::Scroll && (!s.height.is_auto() || !s.max_height.is_auto());
     // Background image / mask icon, painted first (behind the content).
     let base = match image_layer(s, cx) {
-        Some(layer) => base.relative().child(layer),
+        // The layer is positioned inside the box: make it a containing
+        // block, unless it's positioned already (`.relative()` would undo that).
+        Some(layer) if s.position == style::Position::Static => base.relative().child(layer),
+        Some(layer) => base.child(layer),
         None => base,
     };
 
@@ -454,10 +468,13 @@ fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow:
             .map(|d| match block.cell {
                 // Column-shared sizing (see `layout_table`) so rows line up.
                 Some(cell) => d
-                    .flex_basis(px(cell.basis))
                     .flex_grow(cell.grow)
                     .flex_shrink(1.0)
-                    .min_w(px(cell.min)),
+                    .min_w(px(cell.min))
+                    .map(|d| match cell.percent {
+                        Some(p) => d.flex_basis(relative(p / 100.0)).flex_shrink_0(),
+                        None => d.flex_basis(px(cell.basis)),
+                    }),
                 None => d,
             })
             .children(render_flow_children(&block.children, cx)),

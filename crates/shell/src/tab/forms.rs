@@ -226,7 +226,10 @@ impl Tab {
                     .text_color(fg)
                     .text_size(font)
                     .child(div().flex_1().min_w_0().truncate().child(label))
-                    .child(Icon::new(Lucide::ChevronDown).size(px(12.)).text_color(fg))
+                    // Pages that style selects draw their own arrow (a background image).
+                    .when(style.background_url.is_none(), |d| {
+                        d.child(Icon::new(Lucide::ChevronDown).size(px(12.)).text_color(fg))
+                    })
                     .children(menu)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.forms.open_select = if this.forms.open_select == Some(node) { None } else { Some(node) };

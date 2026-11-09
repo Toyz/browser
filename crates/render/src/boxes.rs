@@ -134,6 +134,8 @@ pub struct CellLayout {
     pub basis: f32,
     pub grow: f32,
     pub min: f32,
+    /// A percentage column (`width="25%"`): this share of the row, px basis ignored.
+    pub percent: Option<f32>,
 }
 
 impl Block {
@@ -374,6 +376,8 @@ pub enum InlineObject {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AtomicBox {
     pub node: Option<NodeId>,
+    /// Buttons center their content vertically when they're taller than it.
+    pub center: bool,
     pub style: Arc<ComputedStyle>,
     pub content: Option<Arc<Paragraph>>,
 }
@@ -1075,7 +1079,7 @@ impl Builder<'_> {
                         [LayoutBox::Paragraph(p)] => Some(p.clone()),
                         _ => None,
                     };
-                    let object = InlineObject::Block(AtomicBox { node: Some(id), style: style.clone(), content });
+                    let object = InlineObject::Block(AtomicBox { node: Some(id), center: true, style: style.clone(), content });
                     c.inline.push_object(object, &style, link);
                 }
                 return;
@@ -1501,7 +1505,7 @@ impl Builder<'_> {
                         _ => None,
                     };
                     let object = match content {
-                        Some(content) => InlineObject::Block(AtomicBox { node: Some(child), style: style.clone(), content }),
+                        Some(content) => InlineObject::Block(AtomicBox { node: Some(child), center: tag == "button", style: style.clone(), content }),
                         None => InlineObject::BlockBox(Arc::new(block)),
                     };
                     c.inline.push_object(object, &style, link);
@@ -1570,6 +1574,15 @@ impl Builder<'_> {
                         Display::TableRow => BlockKind::TableRow,
                         Display::TableCell => BlockKind::TableCell,
                         _ => BlockKind::Normal,
+                    };
+                    // A block-level button still centers its content vertically.
+                    let (kind, style) = if tag == "button" && kind == BlockKind::Normal {
+                        let mut st = (*style).clone();
+                        st.flex_direction = style::FlexDirection::Column;
+                        st.justify_content = Some(Justify::Center);
+                        (BlockKind::Flex, Arc::new(st))
+                    } else {
+                        (kind, style)
                     };
                     let generated = self.generated(child, &style);
                     let block = self.build_block(child, style, kind, link, generated);
@@ -1752,6 +1765,7 @@ fn layout_table(children: &mut [LayoutBox]) {
         min: f32,
         max: f32,
         fixed: Option<f32>,
+        percent: Option<f32>,
     }
     let mut columns: Vec<Column> = Vec::new();
     fn cells(row: &mut Block) -> impl Iterator<Item = &mut Block> {
@@ -1773,8 +1787,13 @@ fn layout_table(children: &mut [LayoutBox]) {
                 let c = &mut columns[col];
                 c.min = c.min.max(cell.min_content);
                 c.max = c.max.max(cell.max_content);
-                if let Length::Px(w) = cell.style.outer_width(cell.style.width) {
-                    c.fixed = Some(c.fixed.map_or(w, |f: f32| f.max(w)));
+                match cell.style.width {
+                    Length::Percent(p) => c.percent = Some(c.percent.map_or(p, |q: f32| q.max(p))),
+                    _ => {
+                        if let Length::Px(w) = cell.style.outer_width(cell.style.width) {
+                            c.fixed = Some(c.fixed.map_or(w, |f: f32| f.max(w)));
+                        }
+                    }
                 }
             }
             col += span;
@@ -1793,6 +1812,7 @@ fn layout_table(children: &mut [LayoutBox]) {
             let mut basis = 0.0;
             let mut min = 0.0;
             let mut grow = 0.0;
+            let percent = spanned.iter().map(|c| c.percent).sum::<Option<f32>>();
             for c in spanned {
                 match c.fixed {
                     Some(w) => {
@@ -1811,7 +1831,11 @@ fn layout_table(children: &mut [LayoutBox]) {
                 basis = basis.max(cell.max_content);
                 min = min.max(cell.min_content);
             }
-            cell.cell = Some(CellLayout { basis, grow, min });
+            if percent.is_some() {
+                // Percentage columns take their share; the others share the rest.
+                grow = 0.0;
+            }
+            cell.cell = Some(CellLayout { basis, grow, min, percent });
             col += span;
         }
     }

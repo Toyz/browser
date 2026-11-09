@@ -352,7 +352,9 @@ impl FlowState {
                 PieceKind::Object(i) => match &para.objects[i as usize] {
                     InlineObject::Image(image) => {
                         let (w, h) = image_size(image, cx);
-                        let (w, h) = (px(w), px(h));
+                        // Padding and borders around the picture.
+                        let (t, r, b, l) = edges(&image.style);
+                        let (w, h) = (px(w) + l + r, px(h) + t + b);
                         let extent = object_extent(image.style.vertical_align, h, self.strut, block.font_size, shift);
                         Measured { width: w, extent, ascent: h, descent: px(0.) }
                     }
@@ -436,11 +438,18 @@ impl FlowState {
         if let Some(entry) = self.nested.get_mut(&ix) {
             entry.1 = inner_w;
         }
-        let height = match s.height {
-            style::Length::Px(h) if s.border_box => px(h),
-            style::Length::Px(h) => px(h) + top + bottom,
-            _ => inner_h + top + bottom,
+        let outer = |l: style::Length| match l {
+            style::Length::Px(h) if s.border_box => Some(px(h)),
+            style::Length::Px(h) => Some(px(h) + top + bottom),
+            _ => None,
         };
+        let mut height = outer(s.height).unwrap_or(inner_h + top + bottom);
+        if let Some(min) = outer(s.min_height) {
+            height = height.max(min);
+        }
+        if let Some(max) = outer(s.max_height) {
+            height = height.min(max);
+        }
         let (ml, mr) = atomic_margins(s);
         let above = match s.vertical_align {
             VerticalAlign::Baseline | VerticalAlign::Sub | VerticalAlign::Super | VerticalAlign::Shift(_)
@@ -569,6 +578,18 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     lines
 }
 
+/// How far down a button's content sits: centered when the box is taller.
+fn content_offset(atomic: &AtomicBox, nested: &RefCell<FlowState>, content: &Paragraph, inner_w: Pixels, box_h: Pixels, cx: &RenderCx, window: &mut Window) -> Pixels {
+    if !atomic.center {
+        return px(0.);
+    }
+    let (t, _, b, _) = edges(&atomic.style);
+    let wrap = content.style.white_space.wraps().then_some(inner_w);
+    let lines = nested.borrow_mut().lines(content, cx, wrap, window);
+    let content_h = lines.iter().map(|l| l.extent.height()).fold(px(0.), |a, b| a + b);
+    ((box_h - t - b - content_h) / 2.0).max(px(0.))
+}
+
 /// Horizontal margins of an inline-block (they sit outside its box, in the line).
 fn atomic_margins(s: &style::ComputedStyle) -> (Pixels, Pixels) {
     (px(s.margin.left.px_or_zero()), px(s.margin.right.px_or_zero()))
@@ -646,14 +667,19 @@ fn place(
                 match &para.objects[oi as usize] {
                     InlineObject::Image(image) => {
                         let (w, h) = (m.width, m.ascent);
-                        let mut el = match cx.images.borrow().get(&*image.src) {
+                        let (t, r, b, l) = edges(&image.style);
+                        let picture = match cx.images.borrow().get(&*image.src) {
                             Some(ImageState::Ready { image, .. }) => {
-                                img(image.clone()).w(w).h(h).object_fit(ObjectFit::Fill).into_any_element()
+                                img(image.clone()).w(w - l - r).h(h - t - b).object_fit(ObjectFit::Fill).into_any_element()
                             }
-                            _ => div().w(w).h(h).into_any_element(),
+                            _ => div().into_any_element(),
                         };
+                        let mut el = div().w(w).h(h).pt(t).pr(r).pb(b).pl(l).child(picture).into_any_element();
                         el.layout_as_root(size(AvailableSpace::Definite(w), AvailableSpace::Definite(h)), window, app);
-                        el.prepaint_at(point(dx + x, top), window, app);
+                        // Whole pixels: images drawn at fractional positions get
+                        // a blurred edge row.
+                        let at = point((dx + x).round(), top.round());
+                        el.prepaint_at(at, window, app);
                         out.objects.push(el);
                     }
                     InlineObject::Block(atomic) => {
@@ -662,7 +688,8 @@ fn place(
                         {
                             let (t, _, _, l) = edges(&atomic.style);
                             let (ml, _) = atomic_margins(&atomic.style);
-                            place(content, &nested, point(dx + x + ml + l, top + t), inner_w, cx, out, window, app);
+                            let dy = content_offset(atomic, &nested, content, inner_w, m.ascent, cx, window);
+                            place(content, &nested, point(dx + x + ml + l, top + t + dy), inner_w, cx, out, window, app);
                         }
                     }
                     InlineObject::BlockBox(block) => {
@@ -782,7 +809,8 @@ fn paint_flow(
             }
             if let (Some(content), Some((nested, inner_w))) = (&atomic.content, state.borrow().nested.get(&oi).cloned()) {
                 let (t, _, _, l) = edges(s);
-                paint_flow(content, &nested, point(dx + x + l, top + t), inner_w, cx, window, app);
+                let dy = content_offset(atomic, &nested, content, inner_w, m.ascent, cx, window);
+                paint_flow(content, &nested, point(dx + x + l, top + t + dy), inner_w, cx, window, app);
             }
         }
 
