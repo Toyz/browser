@@ -532,7 +532,8 @@ impl Tab {
         };
         let page_gen = self.page_gen;
         cx.spawn_in(window, async move |this, cx| {
-            let go = cx.background_spawn(async move { host.may_submit(form, Duration::from_millis(500)) }).await;
+            // Scripts answer between tasks; a long wait means they're stuck.
+            let go = cx.background_spawn(async move { host.may_submit(form, Duration::from_secs(3)) }).await;
             this.update_in(cx, |this, window, cx| {
                 if go && this.page_gen == page_gen {
                     this.submit_native(form, submitter, window, cx);

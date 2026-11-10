@@ -1083,8 +1083,13 @@ impl Tab {
             let (layout, changed) = loader::deep({
                 let state = state.clone();
                 move || {
+                    let t = std::time::Instant::now();
                     let mut layout = render::build_keeping(&doc, &styles.styler_with_state(env, state), &keep);
+                    let built = t.elapsed();
                     let changed = old.map(|old| layout.reuse_unchanged(&old)).unwrap_or_default();
+                    if std::env::var_os("BROWSER_DEBUG").is_some() {
+                        eprintln!("perf: restyle+build {} rows in {:?} (+{:?} diffing)", layout.rows.len(), built, t.elapsed() - built);
+                    }
                     (layout, changed)
                 }
             })

@@ -145,6 +145,9 @@ pub(crate) struct Runtime {
     cx: Context,
     dom: Shared,
     rx: mpsc::Receiver<ToJs>,
+    /// Messages taken off `rx` while picking out user input mid-task (see
+    /// `take_input`), still to be handled in order.
+    backlog: std::collections::VecDeque<ToJs>,
     updates: async_channel::Sender<FromJs>,
     listening: Arc<RwLock<HashSet<NodeId>>>,
     /// Elements scripts read the geometry of (the tab reports their boxes).
@@ -208,7 +211,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
+        let mut rt = Runtime { cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -412,6 +415,7 @@ impl Runtime {
         for id in &due {
             self.call_global("__fireTimer", &[JsValue::from(*id)]);
             self.cx.run_jobs().ok();
+            self.take_input();
         }
         !due.is_empty()
     }
@@ -514,7 +518,11 @@ impl Runtime {
             return;
         }
         self.flush_at = None;
+        let t = Instant::now();
         let doc = self.snapshot_doc();
+        if self.opts.debug {
+            eprintln!("perf: snapshot {} nodes in {:?}", doc.len(), t.elapsed());
+        }
         self.updates.send_blocking(FromJs::Document(Arc::new(doc))).ok();
     }
 
@@ -530,10 +538,40 @@ impl Runtime {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
             };
-            match self.rx.recv_timeout(until(deadline)) {
+            match self.next_message(until(deadline)) {
                 Ok(ToJs::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(msg) => self.handle(msg),
                 Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// The next message: what `take_input` set aside first, then the channel.
+    fn next_message(&mut self, timeout: Duration) -> Result<ToJs, RecvTimeoutError> {
+        match self.backlog.pop_front() {
+            Some(msg) => Ok(msg),
+            None => self.rx.recv_timeout(timeout),
+        }
+    }
+
+    /// Between tasks, handle the user's input now (a click waits on whether
+    /// scripts cancel it; a busy page's timers shouldn't make it wait), and
+    /// set everything else aside, in order, for the event loop.
+    fn take_input(&mut self) {
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                ToJs::Click { .. }
+                | ToJs::Submit { .. }
+                | ToJs::Key { .. }
+                | ToJs::Mouse { .. }
+                | ToJs::Focus { .. }
+                | ToJs::Input { .. }
+                | ToJs::Checked { .. }
+                    if self.backlog.is_empty() =>
+                {
+                    self.handle(msg)
+                }
+                other => self.backlog.push_back(other),
             }
         }
     }
@@ -678,7 +716,7 @@ impl Runtime {
             if Instant::now() >= deadline {
                 return;
             }
-            match self.rx.recv_timeout(until(Some(wait))) {
+            match self.next_message(until(Some(wait))) {
                 Ok(ToJs::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(msg) => self.handle(msg),
                 Err(RecvTimeoutError::Timeout) => {}

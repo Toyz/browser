@@ -11,7 +11,10 @@ use super::Tab;
 use crate::loader;
 
 /// How long a click waits for scripts to answer whether they cancelled it.
-const CLICK_TIMEOUT: Duration = Duration::from_millis(300);
+/// They answer between tasks, so this is only for scripts that are stuck:
+/// giving up early on a busy single-page app (YouTube) does the default
+/// action, a full page load, instead of its own navigation.
+const CLICK_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Tab {
     /// A page was installed: follow its script thread's updates.
