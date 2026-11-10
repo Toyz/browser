@@ -617,9 +617,11 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
     let mut line = Line { items: Vec::new(), width: px(0.), extent: strut, clamped: false };
     let mut x = px(0.);
     let finish = |line: &mut Line, lines: &mut Vec<Line>, x: Pixels| {
-        // Width excludes trailing spaces (they hang past the edge in CSS).
+        // Width excludes trailing spaces that collapse (they hang past the
+        // edge in CSS); preserved ones take room (GitHub's search box: a
+        // flex row of spans, the space one `white-space: pre`).
         let mut width = x;
-        for &(ix, _) in line.items.iter().rev() {
+        for &(ix, _) in line.items.iter().rev().take_while(|_| collapse) {
             if pieces[ix].kind == PieceKind::Space {
                 width -= measured[ix].width;
             } else {
