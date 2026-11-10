@@ -2421,6 +2421,7 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
+        self.atlas_drops.extend(render::images::take_evicted());
         for old in self.atlas_drops.drain(..) {
             window.drop_image(old).ok();
         }

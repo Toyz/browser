@@ -69,6 +69,48 @@ fn padded(bytes: &[u8], format: ImageFormat) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(out)])))
 }
 
+thread_local! {
+    /// Pictures made here (crops, filtered copies) that were let go of:
+    /// they leave the GPU atlas at the tab's next render (`take_evicted`).
+    static EVICTED: RefCell<Vec<Arc<RenderImage>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The pictures to drop from the GPU atlas (see `remember`).
+pub fn take_evicted() -> Vec<Arc<RenderImage>> {
+    EVICTED.with_borrow_mut(std::mem::take)
+}
+
+/// What a cache entry holds, as pictures (for the atlas).
+trait Pictures {
+    fn each(self, f: &mut dyn FnMut(Arc<RenderImage>));
+}
+
+impl Pictures for Arc<RenderImage> {
+    fn each(self, f: &mut dyn FnMut(Arc<RenderImage>)) {
+        f(self)
+    }
+}
+
+impl Pictures for (Arc<RenderImage>, Arc<RenderImage>) {
+    fn each(self, f: &mut dyn FnMut(Arc<RenderImage>)) {
+        f(self.0);
+        f(self.1);
+    }
+}
+
+/// Put `value` in a cache of at most `limit` derived pictures: a full
+/// cache starts over, what it held queued to leave the GPU atlas.
+fn remember<K: Eq + std::hash::Hash, V: Pictures>(cache: &mut HashMap<K, V>, limit: usize, key: K, value: V) {
+    if cache.len() > limit {
+        EVICTED.with_borrow_mut(|out| {
+            for (_, v) in cache.drain() {
+                v.each(&mut |p| out.push(p));
+            }
+        });
+    }
+    cache.insert(key, value);
+}
+
 /// Draw a loaded image filling its parent (padded when possible).
 pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32) -> AnyElement {
     picture_rounded(image, padded, width, height, [px(0.); 4])
@@ -115,10 +157,7 @@ fn cover_crop(padded: &Arc<RenderImage>, ratio: f32) -> Option<Arc<RenderImage>>
     }
     let cropped = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
     CROPS.with_borrow_mut(|c| {
-        if c.len() > 256 {
-            c.clear();
-        }
-        c.insert(key, cropped.clone());
+        remember(c, 256, key, cropped.clone());
     });
     Some(cropped)
 }
@@ -153,12 +192,7 @@ fn cover_crop_frames(frames: &Arc<RenderImage>, ratio: f32) -> Option<Arc<Render
         out.push(image::Frame::from_parts(cropped, 0, 0, frames.delay(i)));
     }
     let cropped = Arc::new(RenderImage::new(out));
-    CROPS.with_borrow_mut(|c| {
-        if c.len() > 128 {
-            c.clear();
-        }
-        c.insert(key, cropped.clone());
-    });
+    CROPS.with_borrow_mut(|c| remember(c, 128, key, cropped.clone()));
     Some(cropped)
 }
 
@@ -277,10 +311,7 @@ pub fn filtered(
             .collect();
         let out = Arc::new(RenderImage::new(out));
         ANIMATIONS.with_borrow_mut(|c| {
-            if c.len() > 128 {
-                c.clear();
-            }
-            c.insert(key, out.clone());
+            remember(c, 128, key, out.clone());
         });
         return (out.into(), None);
     }
@@ -307,10 +338,7 @@ pub fn filtered(
     let plain = Arc::new(RenderImage::new(vec![image::Frame::new(plain)]));
     let padded = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
     FILTERED.with_borrow_mut(|c| {
-        if c.len() > 256 {
-            c.clear();
-        }
-        c.insert(key, (plain.clone(), padded.clone()));
+        remember(c, 256, key, (plain.clone(), padded.clone()));
     });
     (plain.into(), Some(padded))
 }
