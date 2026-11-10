@@ -1807,24 +1807,8 @@
 
 
   // Timers: callbacks here, deadlines in Rust.
-  const timers = new Map();
-  let nextTimer = 1;
-  function addTimer(fn, ms, args, repeat) {
-    const id = nextTimer++;
-    const delay = Math.max(0, Number(ms) || 0);
-    timers.set(id, { fn, args, repeat, delay });
-    N.setTimer(id, delay);
-    return id;
-  }
-  function clearTimer(id) { timers.delete(id); N.clearTimer(id); }
-  function fireTimer(id) {
-    const t = timers.get(id);
-    if (!t) return;
-    if (t.repeat) N.setTimer(id, Math.max(t.delay, 4)); else timers.delete(id);
-    try {
-      if (typeof t.fn === "function") t.fn(...(t.args || [])); else (0, eval)(String(t.fn));
-    } catch (e) { reportError(e); }
-  }
+  // Timers are native (timers.rs).
+  const { setTimeout, setInterval, clearTimeout, requestAnimationFrame, requestIdleCallback } = N.timers;
 
   // Web storage: the data lives in Rust (localStorage on disk per origin,
   // sessionStorage per tab); `storage.key = value` works too.
@@ -2247,13 +2231,7 @@
         return d;
       }
     },
-    setTimeout: (fn, ms, ...args) => addTimer(fn, ms, args, false),
-    setInterval: (fn, ms, ...args) => addTimer(fn, ms, args, true),
-    clearTimeout: clearTimer, clearInterval: clearTimer,
-    requestAnimationFrame: (fn) => addTimer(() => fn(N.now()), 16, [], false),
-    cancelAnimationFrame: clearTimer,
-    requestIdleCallback: (fn) => addTimer(() => fn({ didTimeout: false, timeRemaining: () => 10 }), 1, [], false),
-    cancelIdleCallback: clearTimer,
+    ...N.timers,
     queueMicrotask: (fn) => { Promise.resolve().then(fn); },
     performance: (() => {
       const origin = Date.now() - N.now();
@@ -3204,7 +3182,7 @@
     __fireDocument(type) { document.dispatchEvent(new Event(type, { bubbles: true })); },
     __fireWindow(type) { window.dispatchEvent(new Event(type)); },
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
-    __fireTimer: fireTimer,
+    __fireTimer: N.fireTimer,
     __imageEvent: imageEvent,
     __layout: layout,
     __measuredIds() { return Array.from(measuredIds); },

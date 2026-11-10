@@ -1329,3 +1329,34 @@ fn history_is_native_with_state_and_popstate() {
     }
     assert_eq!(text, r#"3 {"page":2} /two pop:{"page":2}@/two"#);
 }
+
+#[test]
+fn native_timers_call_back_in_order() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const seen = [];
+        const show = () => document.getElementById("o").textContent = seen.join(",");
+        setTimeout((a, b) => { seen.push("t" + a + b); show(); }, 20, 1, 2);
+        let n = 0;
+        const iv = setInterval(() => { seen.push("i" + (++n)); if (n === 2) clearInterval(iv); show(); }, 5);
+        const gone = setTimeout(() => seen.push("never"), 10); clearTimeout(gone);
+        requestAnimationFrame((t) => { seen.push(typeof t === "number" && t > 0 ? "raf" : "bad"); show(); });
+        window.__s = (x) => { seen.push(x); show(); };
+        setTimeout("__s('str')", 30);
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_millis(200), debug: false, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    let mut text = text_of(&doc, "o");
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.ends_with("str") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(text, "i1,i2,raf,t12,str");
+}

@@ -112,7 +112,7 @@ pub(crate) struct Dom {
     /// For `getComputedStyle`.
     pub(crate) styles: crate::computed::StyleCache,
     /// (due, id)
-    timers: Vec<(Instant, u32)>,
+    pub(crate) timers: Vec<(Instant, u32)>,
     /// Scripts inserted by scripts, to run after the current task.
     pending_scripts: Vec<NodeId>,
     ran: HashSet<NodeId>,
@@ -980,6 +980,11 @@ pub(crate) fn set_url(d: &Shared, href: &str, mode: u8) -> JsResult<Url> {
     Ok(url)
 }
 
+/// Milliseconds since the page started (`performance.now()`).
+pub(crate) fn now_ms(d: &Shared) -> f64 {
+    d.borrow().started.elapsed().as_secs_f64() * 1000.0
+}
+
 /// Traverse session history by `delta` (the tab does it, then tells us).
 pub(crate) fn request_traverse(d: &Shared, delta: i32) {
     d.borrow_mut().traverse = Some(delta);
@@ -1832,6 +1837,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsObject::from_proto_and_data(Some(proto), boa_engine::builtins::is_html_dda::IsHTMLDDA).into())
     }));
     crate::window_api::install(&obj, dom, cx);
+    crate::timers::install(&obj, dom, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
