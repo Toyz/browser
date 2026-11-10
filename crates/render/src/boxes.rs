@@ -2032,6 +2032,12 @@ impl Builder<'_> {
                         let mut st = (*style).clone();
                         st.flex_direction = style::FlexDirection::Column;
                         st.justify_content = Some(Justify::Center);
+                        // And horizontally, as `text-align: center` (the UA
+                        // default for buttons) centers its inline content:
+                        // YouTube's search icon sat at the button's left edge.
+                        if st.align_items.is_none() && st.text_align == style::TextAlign::Center {
+                            st.align_items = Some(style::Align::Center);
+                        }
                         (BlockKind::Flex, Arc::new(st))
                     } else {
                         (kind, style)
