@@ -698,6 +698,28 @@ impl LayoutTree {
         changed
     }
 
+    /// When rows came or went: how many at the start and at the end are
+    /// the same as `old`'s (shared with it, so their cached layouts and
+    /// measured heights stay). Only the rows between need laying out again.
+    pub fn reuse_ends(&mut self, old: &LayoutTree) -> (usize, usize) {
+        let n = self.rows.len().min(old.rows.len());
+        let mut prefix = 0;
+        while prefix < n && self.rows[prefix] == old.rows[prefix] {
+            self.rows[prefix] = old.rows[prefix].clone();
+            prefix += 1;
+        }
+        let mut suffix = 0;
+        while suffix < n - prefix {
+            let (i, j) = (self.rows.len() - 1 - suffix, old.rows.len() - 1 - suffix);
+            if self.rows[i] != old.rows[j] {
+                break;
+            }
+            self.rows[i] = old.rows[j].clone();
+            suffix += 1;
+        }
+        (prefix, suffix)
+    }
+
     pub fn row_for_anchor(&self, fragment: &str) -> Option<usize> {
         self.anchors
             .iter()

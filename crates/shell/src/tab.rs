@@ -1564,17 +1564,23 @@ impl Tab {
                 this.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.read().map(|m| m.clone()).unwrap_or_default()).unwrap_or_default()
             }) else { return };
             let kept = keep.clone();
-            let (layout, changed) = loader::deep({
+            let (layout, changed, ends) = loader::deep({
                 let state = state.clone();
                 move || {
                     let t = std::time::Instant::now();
                     let mut layout = render::build_keeping(&doc, &styles.styler_with_state(env, state), &keep);
                     let built = t.elapsed();
-                    let changed = old.map(|old| layout.reuse_unchanged(&old)).unwrap_or_default();
+                    // Same rows: which changed. Rows added or removed: how
+                    // many at either end didn't.
+                    let (changed, ends) = match old {
+                        Some(old) if old.rows.len() == layout.rows.len() => (layout.reuse_unchanged(&old), None),
+                        Some(old) => (Vec::new(), Some(layout.reuse_ends(&old))),
+                        None => (Vec::new(), None),
+                    };
                     if std::env::var_os("BROWSER_DEBUG").is_some() {
-                        eprintln!("perf: restyle+build {} rows in {:?} (+{:?} diffing)", layout.rows.len(), built, t.elapsed() - built);
+                        eprintln!("perf: restyle+build {} rows in {:?} (+{:?} diffing, ends {ends:?})", layout.rows.len(), built, t.elapsed() - built);
                     }
-                    (layout, changed)
+                    (layout, changed, ends)
                 }
             })
             .await;
@@ -1600,6 +1606,7 @@ impl Tab {
                         })
                     })
                     .flatten();
+                let old_rows = page.layout.rows.len();
                 page.layout = Arc::new(layout);
                 page.signature = signature;
                 this.installed_gen = doc_gen;
@@ -1611,6 +1618,21 @@ impl Tab {
                     // just those (everything else kept its cached layout).
                     for ix in changed {
                         this.list_state.remeasure_items(ix..ix + 1);
+                    }
+                } else if let Some((prefix, suffix)) = ends
+                    && (prefix > 0 || suffix > 0)
+                {
+                    // Rows came or went between unchanged ones: just those
+                    // are laid out anew; the rest keep their heights (no
+                    // jump, no flash of re-estimated rows).
+                    let rows = page.layout.rows.len();
+                    this.list_state.splice(prefix..old_rows - suffix, rows - prefix - suffix);
+                    // The view's top was in what changed: find its place
+                    // again (else the list kept it).
+                    if (prefix..old_rows - suffix).contains(&top.item_ix)
+                        && let Some(to) = anchored
+                    {
+                        this.list_state.scroll_to(to);
                     }
                 } else {
                     // Keep the same place in the page: the row with the same
