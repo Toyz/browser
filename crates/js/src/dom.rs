@@ -1265,6 +1265,13 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("debugIO", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_DEBUG_IO").is_some()))));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));
+    // matchMedia: a media query list against the viewport (width, height).
+    add("mediaMatches", 3, Box::new(|d, a, cx| {
+        let query = arg_string(a, 0, cx)?;
+        let num = |i: usize| a.get(i).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
+        let env = style::MediaEnv { width: num(1), height: num(2), dark: d.borrow().dark, scripting: true };
+        Ok(JsValue::from(style::media::matches(&query, &env)))
+    }));
     add("now", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().started.elapsed().as_secs_f64() * 1000.0))));
     add("value", 1, Box::new(|d, a, _| {
         let dom = d.borrow();

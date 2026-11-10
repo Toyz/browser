@@ -1969,14 +1969,39 @@
     }
   }
 
+  // matchMedia: evaluated by the style engine's media queries (natively),
+  // against the viewport the tab reports; lists re-check on resize and
+  // fire `change` when their answer flips.
+  const mediaLists = new Set();
+  const mediaMatches = (q) => N.mediaMatches(q, viewport[0], viewport[1]);
+  class MediaQueryList extends EventTarget {
+    constructor(media) {
+      super();
+      this.media = media;
+      this.onchange = null;
+      this._last = mediaMatches(media);
+    }
+    get matches() { return mediaMatches(this.media); }
+    addListener(cb) { if (cb) this.addEventListener("change", cb); }
+    removeListener(cb) { if (cb) this.removeEventListener("change", cb); }
+    addEventListener(type, cb, opts) { if (type === "change") mediaLists.add(this); super.addEventListener(type, cb, opts); }
+    _recheck() {
+      const now = mediaMatches(this.media);
+      if (now === this._last) return;
+      this._last = now;
+      const ev = new Event("change");
+      ev.matches = now; ev.media = this.media;
+      if (typeof this.onchange === "function") { try { this.onchange(ev); } catch (e) { reportError(e); } }
+      this.dispatchEvent(ev);
+    }
+  }
   function matchMedia(query) {
-    const q = String(query);
-    let matches = false;
-    if (/prefers-color-scheme:\s*dark/.test(q)) matches = N.dark();
-    else if (/prefers-color-scheme:\s*light/.test(q)) matches = !N.dark();
-    else if (/min-width:\s*(\d+)/.test(q)) matches = innerWidth >= Number(RegExp.$1);
-    else if (/max-width:\s*(\d+)/.test(q)) matches = innerWidth <= Number(RegExp.$1);
-    return { matches, media: q, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} };
+    const list = new MediaQueryList(String(query));
+    if (N.debugIO && N.debugIO()) console.log("IODBG matchMedia " + list.media + " -> " + list._last);
+    return list;
+  }
+  function recheckMedia() {
+    for (const list of mediaLists) list._recheck();
   }
 
   // Layout the tab reports: where measured elements are ([x, y, w, h],
@@ -2047,7 +2072,7 @@
     if (gone) for (const id of gone) { painted.delete(id); unpainted.add(id); }
     deliverResizes();
     deliverIntersections();
-    if (resized) window.dispatchEvent(new Event("resize"));
+    if (resized) { recheckMedia(); window.dispatchEvent(new Event("resize")); }
   }
 
   // DOM traversal (document.createTreeWalker / createNodeIterator).
@@ -3234,7 +3259,6 @@
     ProgressEvent: eventWith("ProgressEvent", { lengthComputable: false, loaded: 0, total: 0 }),
   };
 
-  class MediaQueryList extends EventTarget {}
   // Web fonts load in the tab; to scripts they're always ready.
   class FontFace {
     constructor(family, source, descriptors) {

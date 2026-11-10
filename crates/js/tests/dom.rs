@@ -1110,3 +1110,47 @@ fn media_elements_have_their_api() {
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "true true 1 captions captions true 0 true true 0 0 NotSupportedError");
 }
+
+#[test]
+fn script_cookies_with_domain_and_equals_in_value() {
+    // YouTube saves its preferences like this (the theme among them).
+    let doc = run(r##"<body><p id="o"></p><script>
+        document.cookie = "PREF=f6=40000000&tz=America.Chicago; expires=" + new Date(Date.now() + 864e5).toUTCString() + "; path=/; domain=.example.com";
+        document.getElementById("o").textContent = document.cookie;
+    </script></body>"##);
+    assert!(text_of(&doc, "o").contains("PREF=f6=40000000&tz=America.Chicago"), "{}", text_of(&doc, "o"));
+}
+
+#[test]
+fn match_media_evaluates_real_queries() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const q = (s) => matchMedia(s).matches ? 1 : 0;
+        const wide = matchMedia("(min-width: 1000px)");
+        const seen = [];
+        wide.addEventListener("change", (e) => { seen.push(e.matches); show(); });
+        const show = () => document.getElementById("o").textContent = [
+          q("(min-width: 1000px)"), q("(display-mode: browser)"), q("(hover: hover)"), q("(orientation: landscape)"),
+          q("(max-width: 600px), (min-width: 1200px)"), q("screen and (min-width: 600px) and (max-width: 1300px)"),
+          q("(prefers-color-scheme: dark)"), q("print"), "|", seen.join()].join(" ");
+        show();
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: true, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    assert_eq!(text_of(&doc, "o"), "1 1 1 1 1 1 1 0 | ");
+    // Narrower: the list's answer flips and it says so.
+    let host = host.unwrap();
+    host.send(js::ToJs::Layout { rects: Vec::new(), gone: Vec::new(), viewport: (800.0, 700.0) });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.ends_with("false") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "0 1 1 1 0 1 1 0 | false");
+}
