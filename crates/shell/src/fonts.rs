@@ -59,7 +59,11 @@ const INSTANCE_WEIGHTS: [u16; 6] = [300, 400, 500, 600, 700, 800];
 pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16), fallback: Option<&str>) -> Vec<(Vec<u8>, String)> {
     let Some((data, family)) = decode(bytes) else { return Vec::new() };
     // Webfonts with their names blanked out: the platform won't load those,
-    // so they get the page's name for them.
+    // so they get the page's name for them. So do ones named nothing
+    // readable: BBC's twenty Reith files, sans and serif, upright and
+    // italic, are all called ".\u{7f}", and as one family the platform
+    // picked among them by weight alone (headlines in italic serif).
+    let family = family.filter(|f| f.chars().any(char::is_alphabetic));
     let (data, family) = match family {
         Some(family) => (data, family),
         None => {

@@ -1069,7 +1069,8 @@ impl Tab {
                         let fallback = families.first().map(String::as_str);
                         let decoded = bytes.as_ref().map(|b| crate::fonts::decode_all(b.clone(), weights, fallback)).unwrap_or_default();
                         if std::env::var_os("BROWSER_DEBUG").is_some() {
-                            eprintln!("web font {src}: {:?} bytes -> {} fonts", bytes.as_ref().map(|b| b.len()).map_err(|e| e.to_string()), decoded.len());
+                            let names: Vec<&str> = decoded.iter().map(|(_, f)| f.as_str()).collect();
+                            eprintln!("web font {src}: {:?} bytes -> {} fonts {names:?}", bytes.as_ref().map(|b| b.len()).map_err(|e| e.to_string()), decoded.len());
                         }
                         Some((src, families, decoded))
                     })
