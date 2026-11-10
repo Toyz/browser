@@ -1046,6 +1046,14 @@ impl Builder<'_> {
                 }
                 floats.push(iter.next().unwrap());
             }
+            // Floats with nothing in them and no height take no room:
+            // what follows doesn't sit beside them. (DuckDuckGo's empty
+            // `float: left; width: 100%` mainline, kept for its no-JS page,
+            // pushed the whole results layout past it.)
+            if floats.iter().all(empty_float) {
+                out.extend(floats);
+                continue;
+            }
             let mut beside = Vec::new();
             while let Some(next) = iter.peek() {
                 let stop = match next {
@@ -3840,6 +3848,20 @@ fn collect_images(b: &LayoutBox, out: &mut Vec<Arc<Url>>) {
     }
 }
 
+/// A float that takes no room: no content, and nothing giving it height.
+fn empty_float(b: &LayoutBox) -> bool {
+    let LayoutBox::Block(b) = b else { return false };
+    let st = &b.style;
+    let zero = |l: Length| l.is_auto() || l.px_or_zero() == 0.0 && !matches!(l, Length::Percent(p) if p != 0.0);
+    b.children.is_empty()
+        && zero(st.height)
+        && zero(st.min_height)
+        && st.padding.top.px_or_zero() == 0.0
+        && st.padding.bottom.px_or_zero() == 0.0
+        && st.border_width.top == 0.0
+        && st.border_width.bottom == 0.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4084,6 +4106,14 @@ mod tests {
         assert_eq!(float.style.width, Length::Px(200.0));
         assert_eq!(row.style.border_width.top, 0.0, "anonymous boxes have no borders");
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["next", "three"]);
+    }
+
+    #[test]
+    fn empty_floats_take_no_room() {
+        // DuckDuckGo: an empty full-width float before the results layout.
+        let tree = layout_css(r#"<div class="mainline"></div><div class="layout"><p>results</p></div>"#, ".mainline { float: left; width: 100%; max-width: 672px }");
+        assert!(tree.rows.iter().all(|r| !matches!(&r.content, LayoutBox::Block(b) if b.kind == BlockKind::Flex)), "no float row");
+        assert_eq!(texts(&tree), vec!["results"]);
     }
 
     #[test]
