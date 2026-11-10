@@ -260,9 +260,13 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
                     .border_r(px(s.border_width.right))
                     .when(s.has_border(), |d| d.border_color(cx.palette.color(s.border_color.left)))
                     .when_some(s.painted_background(), |d, bg| d.bg(cx.palette.color(bg)))
-                    .when(!s.width.is_auto(), |d| d.w(len(s.outer_width(s.width))))
-                    .when(!s.min_width.is_auto(), |d| d.min_w(len(s.outer_width(s.min_width))))
-                    .when(!s.max_width.is_auto(), |d| d.max_w(len(s.outer_width(s.max_width))))
+                    .when(!s.width.is_auto(), |d| d.w(len(box_width(s, s.width))))
+                    .when(!s.min_width.is_auto(), |d| d.min_w(len(box_width(s, s.min_width))))
+                    .when(!s.max_width.is_auto(), |d| d.max_w(len(box_width(s, s.max_width))))
+                    .when(content_box(s), |mut d| {
+                        d.style().content_box = Some(true);
+                        d
+                    })
                     .when(fills_with_auto_margins(s, true), |d| d.w_full())
                     .child(inner)
                     // Scripts measuring the container get each slice (the
@@ -311,6 +315,30 @@ pub(crate) fn box_shadows(shadows: &[style::Shadow], palette: &Palette) -> Vec<B
 /// margins (they only center it once max-width bites). In flexbox, which we
 /// lay blocks out with, auto margins shrink-wrap instead, so ask for full width.
 /// Tables are the exception: they shrink-to-fit in CSS too.
+/// Lay the box out with CSS content-box sizing (taffy adds padding and
+/// border to its sizes). Pixel sizes are converted to border-box ones
+/// instead (`ComputedStyle::outer_width`), which also covers the sizes the
+/// renderer sets itself; a percentage can't be, so a content-box box with
+/// one, and with padding or border, is laid out as content-box. Not when it
+/// fills its container (auto width, auto margins: sized as a border box).
+fn content_box(s: &ComputedStyle) -> bool {
+    use CssLength::Percent as P;
+    !s.border_box
+        && !fills_with_auto_margins(s, true)
+        && (s.horizontal_edges() > 0.0 || s.vertical_edges() > 0.0)
+        && [s.width, s.height, s.min_width, s.min_height, s.max_width, s.max_height].iter().any(|l| matches!(l, P(_)))
+}
+
+/// `width`-type lengths as GPUI's layout takes them for this box (see
+/// [`content_box`]).
+fn box_width(s: &ComputedStyle, l: CssLength) -> CssLength {
+    if content_box(s) { l } else { s.outer_width(l) }
+}
+
+fn box_height(s: &ComputedStyle, l: CssLength) -> CssLength {
+    if content_box(s) { l } else { s.outer_height(l) }
+}
+
 fn fills_with_auto_margins(s: &ComputedStyle, in_flow: bool) -> bool {
     in_flow && s.width.is_auto() && !s.fit_width && (s.margin.left.is_auto() || s.margin.right.is_auto())
 }
@@ -341,13 +369,18 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .rounded_br(radius(s.border_radius[2]))
         .rounded_bl(radius(s.border_radius[3]))
         .when_some(s.box_background(), |d, bg| d.bg(palette.color(bg)))
-        // GPUI sizes border boxes; CSS's default content-box sizes exclude padding/border.
-        .when(!s.width.is_auto(), |d| d.w(len(s.outer_width(s.width))))
-        .when(!s.height.is_auto(), |d| d.h(len(s.outer_height(s.height))))
-        .when(!s.min_width.is_auto(), |d| d.min_w(len(s.outer_width(s.min_width))))
-        .when(!s.min_height.is_auto(), |d| d.min_h(len(s.outer_height(s.min_height))))
-        .when(!s.max_width.is_auto(), |d| d.max_w(len(s.outer_width(s.max_width))))
-        .when(!s.max_height.is_auto(), |d| d.max_h(len(s.outer_height(s.max_height))))
+        // GPUI sizes border boxes; CSS's default content-box sizes exclude
+        // padding/border (see `content_box`).
+        .when(content_box(s), |mut d| {
+            d.style().content_box = Some(true);
+            d
+        })
+        .when(!s.width.is_auto(), |d| d.w(len(box_width(s, s.width))))
+        .when(!s.height.is_auto(), |d| d.h(len(box_height(s, s.height))))
+        .when(!s.min_width.is_auto(), |d| d.min_w(len(box_width(s, s.min_width))))
+        .when(!s.min_height.is_auto(), |d| d.min_h(len(box_height(s, s.min_height))))
+        .when(!s.max_width.is_auto(), |d| d.max_w(len(box_width(s, s.max_width))))
+        .when(!s.max_height.is_auto(), |d| d.max_h(len(box_height(s, s.max_height))))
         .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
         .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
         // `aspect-ratio`: the missing side follows the given one.
@@ -824,7 +857,11 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         .when(fill, |d| d.w_full())
         // Clipping boxes can shrink below their content (CSS's automatic
         // minimum size is 0 for them: how `text-overflow` gets to show).
-        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible, |d| d.min_w(px(block.min_content)));
+        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible, |d| {
+            // `min_content` is a border-box width.
+            let edges = if content_box(s) { s.horizontal_edges() } else { 0.0 };
+            d.min_w(px((block.min_content - edges).max(0.0)))
+        });
     let scrolls = s.overflow == Overflow::Scroll && (!s.height.is_auto() || !s.max_height.is_auto());
     // Gradients, then a background image / mask icon, painted first
     // (behind the content).

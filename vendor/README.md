@@ -31,3 +31,10 @@ about 3x what survived rather than 1.4x. Each collection marks the whole live
 heap, so on large pages collecting that often was a quarter of script time.
 
 Drop these when Boa releases include equivalent fixes.
+
+## taffy 0.15.1
+
+- `compute/flexbox.rs` (`resolve_cross_axis_auto_margins`): an item larger
+  than its flex line gets a zero start auto margin instead of a negative
+  centered one (css-flexbox §9.6 step 13; also what block layout does with
+  `margin: 0 auto` on an overflowing box).

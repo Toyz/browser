@@ -320,6 +320,10 @@ pub struct Style {
     /// aligns in its area; replaces `grid_location` when set.
     pub css_grid_item: Option<CssGridItem>,
 
+    /// Feather: sizes are CSS content-box sizes (padding and border are
+    /// added to them, percentages included).
+    pub content_box: bool,
+
     /// Whether to draw a red debugging outline around this element
     #[cfg(debug_assertions)]
     pub debug: bool,
@@ -822,6 +826,7 @@ impl Default for Style {
             grid_location: None,
             css_grid: None,
             css_grid_item: None,
+            content_box: false,
 
             #[cfg(debug_assertions)]
             debug: false,

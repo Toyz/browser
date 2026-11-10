@@ -528,6 +528,9 @@ impl ToTaffy<taffy::style::Style> for Style {
                 .unwrap_or_default(),
             ..Default::default()
         };
+        if self.content_box {
+            style.box_sizing = taffy::style::BoxSizing::ContentBox;
+        }
         // Feather: full CSS grids and placements.
         if let Some(grid) = &self.css_grid {
             let g = &grid.0;
