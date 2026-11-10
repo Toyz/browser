@@ -670,7 +670,10 @@ pub(crate) fn current_stacking() -> (usize, u32) {
 /// A box the tab pins over the page (`position: sticky`, scrolled past):
 /// drawn as it is in its place.
 pub fn render_pinned(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
-    render_box(b, cx, Edges::all(CssLength::ZERO), false)
+    // Drawn in the deferred layer, as fixed boxes are: the page's own
+    // positioned boxes (BD's card chips) scroll under it, not over it.
+    let zero = Edges::all(CssLength::ZERO);
+    deferred(b, true, || render_box(b, cx, zero, false)).unwrap_or_else(|| render_box(b, cx, zero, false))
 }
 
 /// A `position: fixed` box, for the viewport overlay layer: drawn after
