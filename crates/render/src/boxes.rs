@@ -621,15 +621,28 @@ pub struct WrapperEdge {
     pub below: f32,
 }
 
-/// A `position: sticky` box: drawn in its place, and pinned `top` px
-/// from the top of the view while the page is scrolled past that place,
-/// until the end of `container` (its parent) comes up.
+/// How a box is pinned over the page by the tab.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pin {
+    /// `position: fixed`: over the viewport, always.
+    Fixed,
+    /// `position: sticky`: drawn in its place (`node`), and pinned `top`
+    /// px from the top of the view while the page is scrolled past that
+    /// place, until the end of `container` (its parent) comes up.
+    Sticky { node: NodeId, container: NodeId, top: f32 },
+}
+
+/// A box the tab draws over the page (see [`Pin`]).
 #[derive(Debug, Clone)]
-pub struct StickyBox {
-    pub node: NodeId,
-    pub container: NodeId,
-    pub top: f32,
-    pub content: Arc<LayoutBox>,
+pub struct Pinned {
+    pub pin: Pin,
+    pub content: LayoutBox,
+}
+
+impl Pinned {
+    pub fn is_fixed(&self) -> bool {
+        self.pin == Pin::Fixed
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -644,13 +657,11 @@ pub struct LayoutTree {
     /// Every image on the page, in document order, with the rows that show it
     /// (to re-measure them once it loads).
     pub images: Vec<(Arc<Url>, Vec<usize>)>,
-    /// `position: fixed` boxes, drawn over the viewport.
-    pub fixed: Vec<LayoutBox>,
+    /// Boxes drawn over the page: `position: fixed` ones and sticky ones
+    /// (see [`Pin`]).
+    pub pinned: Vec<Pinned>,
     /// Images inside fixed boxes.
     pub fixed_images: Vec<Arc<Url>>,
-    /// `position: sticky` boxes (with a `top`), for the tab to pin while
-    /// their place is scrolled past.
-    pub sticky: Vec<StickyBox>,
 }
 
 impl LayoutTree {
@@ -714,8 +725,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
     for b in &fixed {
         collect_images(b, &mut tree.fixed_images);
     }
-    tree.fixed = fixed;
-    tree.sticky = std::mem::take(&mut builder.sticky);
+    tree.pinned = fixed.into_iter().map(|content| Pinned { pin: Pin::Fixed, content }).chain(std::mem::take(&mut builder.sticky)).collect();
     tree
 }
 
@@ -779,7 +789,7 @@ struct Builder<'a> {
     /// floated, positioned, or a flex row's item, with `width: auto`).
     in_shrink: bool,
     /// `position: sticky` boxes found so far.
-    sticky: Vec<StickyBox>,
+    sticky: Vec<Pinned>,
     /// What a percentage height of the box being built is of, px, when
     /// that's known here: the viewport, for the root, and down a chain of
     /// `height: 100%` boxes (`html, body, #root { height: 100% }`).
@@ -2364,7 +2374,7 @@ impl Builder<'_> {
                     if block.style.position == style::Position::Sticky
                         && let Length::Px(top) = block.style.inset.top
                     {
-                        self.sticky.push(StickyBox { node: child, container: id, top, content: Arc::new(LayoutBox::Block(block.clone())) });
+                        self.sticky.push(Pinned { pin: Pin::Sticky { node: child, container: id, top }, content: LayoutBox::Block(block.clone()) });
                     }
                     c.push(LayoutBox::Block(block));
                 }
@@ -3853,15 +3863,23 @@ mod tests {
             "<section><nav class=s><a>a</a><a>b</a><a>c</a><a>d</a></nav><p>1</p><p>2</p><p>3</p><p>4</p></section>",
             ".s { position: sticky; top: 12px }",
         );
-        assert_eq!(tree.sticky.len(), 1);
-        let s = &tree.sticky[0];
-        assert_eq!(s.top, 12.0);
-        assert_ne!(s.container, s.node);
+        let sticky: Vec<(NodeId, NodeId, f32)> = tree
+            .pinned
+            .iter()
+            .filter_map(|p| match p.pin {
+                Pin::Sticky { node, container, top } => Some((node, container, top)),
+                Pin::Fixed => None,
+            })
+            .collect();
+        assert_eq!(sticky.len(), 1);
+        let (node, container, top) = sticky[0];
+        assert_eq!(top, 12.0);
+        assert_ne!(container, node);
         // Kept whole: one box of its own somewhere in the rows.
         fn has(b: &LayoutBox, n: NodeId) -> bool {
             matches!(b, LayoutBox::Block(b) if b.node == Some(n) || b.children.iter().any(|c| has(c, n)))
         }
-        assert!(tree.rows.iter().any(|r| has(&r.content, s.node)));
+        assert!(tree.rows.iter().any(|r| has(&r.content, node)));
     }
 
     fn paragraph(row: &Row) -> &Paragraph {
@@ -4186,7 +4204,7 @@ mod tests {
         assert_eq!(badge.style.inset.top, Length::Px(4.0));
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["after"]);
         // The fixed bar is an overlay; the page-anchored skip link stays hidden.
-        assert_eq!(tree.fixed.len(), 1);
+        assert_eq!(tree.pinned.iter().filter(|p| p.is_fixed()).count(), 1);
     }
 
     #[test]

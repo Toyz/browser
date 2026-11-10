@@ -175,12 +175,12 @@ fn dump(url: &url::Url, max_rows: usize) -> anyhow::Result<()> {
         for row in &layout.rows {
             find(&row.content, &needle);
         }
-        for b in &layout.fixed {
-            find(b, &needle);
+        for p in &layout.pinned {
+            find(&p.content, &needle);
         }
     }
-    for b in &layout.fixed {
-        if let LayoutBox::Block(bl) = b {
+    for p in layout.pinned.iter().filter(|p| p.is_fixed()) {
+        if let LayoutBox::Block(bl) = &p.content {
             let tag = bl.node.and_then(|n| doc.element(n)).map(|e| format!("<{} id={:?} class={:?}>", e.local_name(), e.attr("id"), e.attr("class"))).unwrap_or_default();
             println!("fixed {tag} bg={:?} opacity={} visible={} inset={:?} w={:?} h={:?}", bl.style.painted_background(), bl.style.opacity, bl.style.visible, bl.style.inset, bl.style.width, bl.style.height);
         }

@@ -754,36 +754,37 @@ impl Tab {
     fn pinned_sticky(&self, rcx: &RenderCx) -> Vec<AnyElement> {
         let Some(page) = self.page.as_ref() else { return Vec::new() };
         let scroll = self.scroll_y();
-        if std::env::var_os("FEATHER_DEBUG_STICKY").is_some() {
-            for s in &page.layout.sticky {
-                eprintln!("sticky {:?} in {:?} top {} place {:?} container {:?} scroll {scroll}", s.node, s.container, s.top, self.row_place(s.node), self.row_place(s.container));
-            }
-        }
         let list_top = f32::from(self.list_state.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
+        let debug = std::env::var_os("FEATHER_DEBUG_STICKY").is_some();
         page.layout
-            .sticky
+            .pinned
             .iter()
-            .filter_map(|s| {
+            .filter_map(|p| {
+                let render::boxes::Pin::Sticky { node, container, top } = p.pin else { return None };
                 // Where its rows are (a sticky box isn't split, so it's
                 // a row, or in one), and its container's.
-                let [x, y, w, h] = self.row_place(s.node)?;
-                if scroll + s.top <= y {
+                let [x, y, w, h] = self.row_place(node)?;
+                let bottom = self.row_place(container).map_or(f32::INFINITY, |c| c[1] + c[3]);
+                if debug {
+                    eprintln!("sticky {node:?} in {container:?} top {top} at {y} to {bottom}, scroll {scroll}");
+                }
+                if scroll + top <= y {
                     return None;
                 }
-                let bottom = self.row_place(s.container).map_or(f32::INFINITY, |c| c[1] + c[3]);
-                let at = s.top.min(bottom - scroll - h);
+                let at = top.min(bottom - scroll - h);
                 (at + h > 0.0).then(|| {
                     div()
                         .absolute()
                         .left(px(x))
                         .top(px(list_top + at))
                         .w(px(w))
-                        .child(render::view::render_pinned(&s.content, rcx))
+                        .child(render::view::render_pinned(&p.content, rcx))
                         .into_any_element()
                 })
             })
             .collect()
     }
+
 
     /// Canvases' new pixels: each shown as its picture from the next
     /// frame, the last one dropped from the GPU atlas.
@@ -2063,14 +2064,14 @@ impl Tab {
             .vertical_scrollbar(&self.list_state)
             // `position: fixed` boxes, pinned over the viewport.
             .children(self.pinned_sticky(&rcx_sticky))
-            .when(!page.layout.fixed.is_empty(), |d| {
+            .when(page.layout.pinned.iter().any(|p| p.is_fixed()), |d| {
                 d.child(
                     div()
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full()
-                        .children(page.layout.fixed.iter().map(|b| render::render_fixed(b, &rcx_fixed))),
+                        .children(page.layout.pinned.iter().filter(|p| p.is_fixed()).map(|p| render::render_fixed(&p.content, &rcx_fixed))),
                 )
             })
             .into_any_element()

@@ -197,7 +197,7 @@ pub fn patch(
             box_nodes(&row.content, &mut boxes);
             row.absolutes.iter().for_each(|b| box_nodes(b, &mut boxes));
         }
-        layout.fixed.iter().for_each(|b| box_nodes(b, &mut boxes));
+        layout.pinned.iter().for_each(|p| box_nodes(&p.content, &mut boxes));
         if appearing.iter().any(|n| !boxes.contains(n)) {
             return Patch::NeedsRestyle("background on a split container");
         }
@@ -227,9 +227,10 @@ pub fn apply(layout: &LayoutTree, changes: &Changes) -> Option<LayoutTree> {
             touched = true;
         }
     }
-    for b in &mut tree.fixed {
-        if mentions(b, changes) {
-            patch_box(b, changes);
+    // Fixed and sticky boxes alike (a pinned header's hover).
+    for p in &mut tree.pinned {
+        if mentions(&p.content, changes) {
+            patch_box(&mut p.content, changes);
             touched = true;
         }
     }
@@ -335,7 +336,7 @@ pub fn animated_elements(layout: &LayoutTree) -> Vec<(AnimKey, Arc<ComputedStyle
         walk(&row.content, &mut out);
         row.absolutes.iter().for_each(|b| walk(b, &mut out));
     }
-    layout.fixed.iter().for_each(|b| walk(b, &mut out));
+    layout.pinned.iter().for_each(|p| walk(&p.content, &mut out));
     out
 }
 
