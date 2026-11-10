@@ -1,0 +1,10 @@
+[package]
+name = "media"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mkv", "vorbis", "flac", "mp3", "pcm", "wav", "ogg", "opt-simd"] }
+openh264 = "0.9"
+anyhow.workspace = true
