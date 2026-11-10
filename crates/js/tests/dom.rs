@@ -859,6 +859,22 @@ fn aria_properties_reflect_their_attributes() {
 }
 
 #[test]
+fn headers_are_native_and_follow_fetch() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const h = new Headers({ "X-B": " two ", "x-a": "1" });
+        h.append("X-A", "2"); h.append("Set-Cookie", "a=1"); h.append("set-cookie", "b=2");
+        const copy = new Headers(h), fromPairs = new Headers([["k", "v"]]);
+        let threw = false; try { h.append("bad name", "x"); } catch (e) { threw = e instanceof TypeError; }
+        const seen = []; h.forEach((v, k) => seen.push(k + "=" + v));
+        document.getElementById("o").textContent = [
+          h.get("x-a"), h.get("X-B"), h.has("x-b"), h.get("missing"), [...h.keys()].join("+"), h.getSetCookie().join("|"),
+          copy.get("x-a"), fromPairs.get("K"), threw, seen.join(";"), h instanceof Headers, new Response("x", { headers: h }).headers.get("x-b"),
+        ].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "1, 2 two true  set-cookie+set-cookie+x-a+x-b a=1|b=2 1, 2 v true set-cookie=a=1;set-cookie=b=2;x-a=1, 2;x-b=two true two");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

@@ -1823,6 +1823,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::crypto::install(cx);
     crate::blob::install(&obj, cx);
     crate::aria::install(&obj, cx);
+    crate::headers::install(cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 

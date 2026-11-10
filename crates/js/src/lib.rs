@@ -24,6 +24,7 @@ mod web_storage;
 mod crypto;
 mod blob;
 mod aria;
+mod headers;
 mod window_api;
 mod images;
 mod modules;

@@ -1932,25 +1932,7 @@
 
   // ---- network -----------------------------------------------------------
 
-  class Headers {
-    constructor(init) {
-      this._map = new Map();
-      if (init instanceof Headers) init.forEach((v, k) => this.append(k, v));
-      else if (Array.isArray(init)) for (const [k, v] of init) this.append(k, v);
-      else if (init && typeof init === "object") for (const k of Object.keys(init)) this.append(k, init[k]);
-    }
-    append(k, v) { k = String(k).toLowerCase(); const old = this._map.get(k); this._map.set(k, old === undefined ? String(v) : old + ", " + v); }
-    set(k, v) { this._map.set(String(k).toLowerCase(), String(v)); }
-    get(k) { const v = this._map.get(String(k).toLowerCase()); return v === undefined ? null : v; }
-    has(k) { return this._map.has(String(k).toLowerCase()); }
-    delete(k) { this._map.delete(String(k).toLowerCase()); }
-    forEach(fn, self) { for (const [k, v] of this._map) fn.call(self, v, k, this); }
-    keys() { return this._map.keys(); }
-    values() { return this._map.values(); }
-    entries() { return this._map.entries(); }
-    [Symbol.iterator]() { return this._map.entries(); }
-    _list() { return Array.from(this._map.entries()); }
-  }
+  // Headers is native (headers.rs).
 
   // UTF-8 both ways (Boa has no TextEncoder).
   // TextEncoder and TextDecoder are native classes (encoding.rs).
@@ -2414,7 +2396,7 @@
 
   Object.assign(window, {
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
-    fetch, Headers, Request, Response, XMLHttpRequest, FormData, TextEncoder, TextDecoder,
+    fetch, Request, Response, XMLHttpRequest, FormData, TextEncoder, TextDecoder,
     AbortController, AbortSignal, DOMException,
     __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
     __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },
