@@ -1143,17 +1143,18 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
             d = d.w(px(w));
         }
     }
-    if s.height.is_auto() {
+    if s.height.is_auto() || matches!(s.height, CssLength::Percent(_)) {
         match ratio {
+            // (With a percentage height that resolves, the ratio is moot.)
             Some(r) => d.style().aspect_ratio = Some(r),
-            None => {
+            None if s.height.is_auto() => {
                 if let Some(h) = natural_height {
                     d = d.h(px(h));
                 }
             }
+            None => {}
         }
     }
-
     let content = match state {
         _ if !s.visible => div().into_any_element(),
         Some(ImageState::Ready { image, padded, width, height }) => {

@@ -1823,15 +1823,18 @@ impl Builder<'_> {
                 || style.float != Float::None
                 || style.fit_width);
         if shrink_to_fit {
+            auto_percent_images(&style, &mut children);
+        }
+        // So is a flex or grid item with no width of its own (content-sized:
+        // Badge Directory's thumbnails, a <loom-image> in a flex box).
+        if matches!(kind, BlockKind::Flex | BlockKind::Grid) {
             for child in &mut children {
-                if let LayoutBox::Image(i) = child
-                    && matches!(i.style.width, Length::Percent(_))
+                if let LayoutBox::Block(b) = child
+                    && b.style.width.is_auto()
+                    && b.style.flex_grow == 0.0
                 {
-                    let st = Arc::make_mut(&mut i.style);
-                    st.width = Length::Auto;
-                    if style.height.is_auto() && matches!(st.height, Length::Percent(_)) {
-                        st.height = Length::Auto;
-                    }
+                    let st = b.style.clone();
+                    auto_percent_images(&st, &mut b.children);
                 }
             }
         }
@@ -2360,6 +2363,22 @@ fn char_em(ch: char, st: &InlineStyle) -> f32 {
 /// Percentage heights below a box whose height turned out automatic resolve
 /// to `auto` (with nothing to be a percentage of); clips on them go too, as
 /// taffy would size those to nothing.
+/// In a box sized by its content: images sized in percentages of it are
+/// sized as `auto` (see where it's called).
+fn auto_percent_images(style: &ComputedStyle, children: &mut [LayoutBox]) {
+    for child in children {
+        if let LayoutBox::Image(i) = child
+            && matches!(i.style.width, Length::Percent(_))
+        {
+            let st = Arc::make_mut(&mut i.style);
+            st.width = Length::Auto;
+            if style.height.is_auto() && matches!(st.height, Length::Percent(_)) {
+                st.height = Length::Auto;
+            }
+        }
+    }
+}
+
 fn auto_percent_heights(children: &mut [LayoutBox]) {
     for child in children {
         let LayoutBox::Block(b) = child else { continue };
