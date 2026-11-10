@@ -894,8 +894,6 @@
     matches(sel) { return N.matches(this.__id, String(sel)); }
     webkitMatchesSelector(sel) { return this.matches(sel); }
     closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
-    getBoundingClientRect() { const r = measure(this); return r ? domRect(r[0], r[1], r[2], r[3]) : domRect(0, 0, estimatedWidth(this), 0); }
-    getClientRects() { const r = measure(this); return r ? [domRect(r[0], r[1], r[2], r[3])] : []; }
     scrollIntoView() {}
     scrollTo() {}
     scroll() {}
@@ -931,14 +929,6 @@
     set popover(v) { if (v === null) this.removeAttribute("popover"); else this.setAttribute("popover", v); }
     attachInternals() { return { setFormValue() {}, setValidity() {}, checkValidity() { return true; }, states: new Set(), form: null, labels: [], validity: { valid: true } }; }
     animate() { return { finished: Promise.resolve(), cancel() {}, play() {}, pause() {}, addEventListener() {} }; }
-    // Geometry from the tab's layout (once it has reported this element;
-    // the root element is the viewport).
-    get clientWidth() { return this === document.documentElement ? viewport[0] : Math.round(measure(this)?.[2] || rootSize(this, 0)); }
-    get clientHeight() { return this === document.documentElement ? viewport[1] : Math.round(measure(this)?.[3] || 0); }
-    get offsetWidth() { return Math.round(measure(this)?.[2] || rootSize(this, 0)); }
-    get offsetHeight() { return Math.round(measure(this)?.[3] || 0); }
-    get offsetTop() { const r = measure(this); return r ? Math.round(r[1] + pageScroll()) : 0; }
-    get offsetLeft() { return Math.round(measure(this)?.[0] || 0); }
     // The body (no positions known here), but never the body's or root's
     // own: `while (el = el.offsetParent)` loops have to end.
     get offsetParent() {
@@ -952,6 +942,8 @@
     get scrollWidth() { return 0; }
     get scrollHeight() { return 0; }
   }
+  // getBoundingClientRect, clientWidth, offsetTop...: geometry.rs.
+  N.geometry(Element.prototype);
   mixin(Element, ParentMixin, ChildMixin);
   function insertAdjacent(el, where, id) {
     switch (String(where).toLowerCase()) {
@@ -1835,13 +1827,7 @@
       if (!el || el.__id === undefined || el.nodeType !== 1) return "";
       name = String(name);
       const prop = name.startsWith("--") ? name : kebab(name);
-      let w = -1, h = -1;
-      if (prop === "width" || prop === "height") {
-        const r = measure(el);
-        if (r) { w = r[2]; h = r[3]; }
-        else if (prop === "width") { const e = estimatedWidth(el); if (e > 0) w = e; }
-      }
-      return N.computedStyle(el.__id, prop, w, h, viewport[0], viewport[1]);
+      return N.computedStyle(el.__id, prop);
     };
     const api = {
       getPropertyValue: (n) => read(n), getPropertyPriority: () => "", item: () => "", length: 0, cssText: "",
@@ -1855,7 +1841,7 @@
   // against the viewport the tab reports; lists re-check on resize and
   // fire `change` when their answer flips.
   const mediaLists = new Set();
-  const mediaMatches = (q) => N.mediaMatches(q, viewport[0], viewport[1]);
+  const mediaMatches = (q) => N.mediaMatches(q);
   class MediaQueryList extends EventTarget {
     constructor(media) {
       super();
@@ -1886,56 +1872,6 @@
     for (const list of mediaLists) list._recheck();
   }
 
-  // Layout the tab reports: where measured elements are ([x, y, w, h],
-  // viewport-relative) and the viewport's size.
-  const layoutRects = new Map();
-  const measuredIds = new Set();
-  let viewport = [1280, 800];
-  const pageScroll = () => 0;
-  const domRect = (x, y, width, height) => ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height, toJSON() { return this; } });
-  // <html> and <body> have no box of their own here: they span the viewport.
-  function rootSize(el, axis) {
-    if (el === document.documentElement || el === document.body) return viewport[axis];
-    return axis === 0 ? estimatedWidth(el) : 0;
-  }
-  // The width of an element the tab hasn't laid out yet (scripts measure
-  // what they just made, where a browser lays out on the spot): a block
-  // fills its container, so the nearest laid-out ancestor's width, else
-  // the viewport's. Inline boxes are as wide as their text: 0 here.
-  // (Carousels size their slides from this: NASA's were 0px wide.)
-  const INLINE_TAGS = new Set(["span", "a", "b", "i", "em", "strong", "small", "label", "img", "svg", "code", "abbr", "sup", "sub", "br", "input", "button", "select", "textarea", "video", "canvas", "iframe"]);
-  const cssOf = (el, prop) => N.computedStyle(el.__id, prop, -1, -1, viewport[0], viewport[1]);
-  function estimatedWidth(el) {
-    if (!el || INLINE_TAGS.has(el.localName) || !N.connected(el.__id)) return 0;
-    // Only a block in block flow fills its container: flex items in a row,
-    // inline-level and table boxes are as wide as their content (GitHub
-    // collapsed its breadcrumbs, each crumb "as wide as the page").
-    if (!/^(block|flex|grid|list-item|flow-root)$/.test(cssOf(el, "display"))) return 0;
-    const parent = el.parentNode;
-    if (parent && parent.nodeType === 1) {
-      const pd = cssOf(parent, "display");
-      if (/flex|grid/.test(pd) && !(/flex/.test(pd) && /column/.test(cssOf(parent, "flex-direction")))) return 0;
-      if (/inline|table/.test(pd)) return 0;
-    }
-    for (let n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
-      const r = painted.has(n.__id) && layoutRects.get(n.__id);
-      if (r) return r[2];
-    }
-    return viewport[0];
-  }
-  function measure(el) {
-    if (!el || el.__id === undefined) return null;
-    if (!measuredIds.has(el.__id)) {
-      measuredIds.add(el.__id);
-      N.touch();
-      // Never reported: ask the tab where it is now.
-      if (!layoutRects.has(el.__id)) {
-        const r = N.locate(el.__id);
-        if (r) layoutRects.set(el.__id, r);
-      }
-    }
-    return layoutRects.get(el.__id) || null;
-  }
   const resizeObservers = new Set();
   class ResizeObserver {
     constructor(cb) { this._cb = cb; this._targets = new Map(); this._late = new Set(); }
@@ -1943,7 +1879,7 @@
       if (!el) return;
       this._targets.set(el, null);
       resizeObservers.add(this);
-      if (measure(el)) setTimeout(deliverResizes, 0);
+      if (N.measure(el.__id)) setTimeout(deliverResizes, 0);
       // Not laid out yet: scripts saw it as 0x0 so far.
       else this._late.add(el);
     }
@@ -1956,11 +1892,11 @@
     for (const ro of resizeObservers) {
       const entries = [];
       for (const [el, last] of ro._targets) {
-        const r = layoutRects.get(el.__id);
+        const r = N.rect(el.__id);
         if (!r || (last && last[0] === r[2] && last[1] === r[3])) continue;
         ro._targets.set(el, [r[2], r[3]]);
         const size = [{ inlineSize: r[2], blockSize: r[3] }];
-        entries.push({ target: el, contentRect: domRect(0, 0, r[2], r[3]), borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size });
+        entries.push({ target: el, contentRect: new DOMRect(0, 0, r[2], r[3]), borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size });
       }
       if (entries.length) { try { ro._cb(entries, ro); } catch (e) { reportError(e); } }
       // A size that arrived after observe() also counts as a change from the
@@ -1972,20 +1908,8 @@
       if (again) setTimeout(deliverResizes, 16);
     }
   }
-  // Elements painted in the tab's latest frame (layoutRects keeps the last
-  // rect of ones that no longer are).
-  const painted = new Set();
-  // Measured elements the tab says it didn't paint (off screen, or no box).
-  const unpainted = new Set();
-  function layout(flat, vw, vh, gone) {
-    const resized = viewport[0] !== vw || viewport[1] !== vh;
-    viewport = [vw, vh];
-    for (let i = 0; i + 4 < flat.length; i += 5) {
-      layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
-      painted.add(flat[i]);
-      unpainted.delete(flat[i]);
-    }
-    if (gone) for (const id of gone) { painted.delete(id); unpainted.add(id); }
+  // The tab sent a layout (geometry.rs has it): observers hear what changed.
+  function layout(resized) {
     deliverResizes();
     deliverIntersections();
     if (resized) { recheckMedia(); window.dispatchEvent(new Event("resize")); }
@@ -2064,19 +1988,6 @@
   // (and measured elements always get a box). Without this, everything was
   // "visible", and infinite feeds loaded page after page in the background.
   const intersectionObservers = new Set();
-  const NEAR_ANCESTORS = 4;
-  // Where `el` is painted now: its own box if it has ever had one (not
-  // painted now: nowhere); a box that never got one (a 0x0 lazy <img>)
-  // goes by its nearest painted ancestor.
-  function paintedRect(el) {
-    if (unpainted.has(el.__id)) return undefined;
-    if (layoutRects.has(el.__id)) return painted.has(el.__id) ? layoutRects.get(el.__id) : undefined;
-    for (let n = el.parentNode, i = 1; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) {
-      const r = painted.has(n.__id) && layoutRects.get(n.__id);
-      if (r) return r;
-    }
-    return undefined;
-  }
   class IntersectionObserver {
     constructor(cb, opts = {}) {
       this._cb = cb;
@@ -2095,7 +2006,7 @@
       intersectionObservers.add(this);
       // Its nearest ancestors too: a box with nothing in it yet (an <img>
       // waiting for its `src`) may not be painted, but where they are, it is.
-      for (let n = target, i = 0; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) measure(n);
+      for (let n = target, i = 0; n && n.nodeType === 1 && i <= 4; n = n.parentNode, i++) N.measure(n.__id);
       setTimeout(() => this._check(false), 0);
       // The tab says where it's painted, or that it isn't (off screen,
       // nothing rendered). Should it never say (no layout comes), report
@@ -2108,17 +2019,17 @@
     // `settle`: the target whose wait for a first paint is over (it's
     // reported even if it never got one).
     _check(settle) {
-      const [vw, vh] = viewport;
-      const rootRect = this.root && this.root.__id !== undefined ? layoutRects.get(this.root.__id) : null;
+      const [vw, vh] = [window.innerWidth, window.innerHeight];
+      const rootRect = this.root && this.root.__id !== undefined ? N.rect(this.root.__id) : null;
       const [rx, ry, rw, rh] = rootRect || [0, 0, vw, vh];
       const px = (m, size) => (m.pct ? (m.n * size) / 100 : m.n);
       const m = this._margin;
       const box = { left: rx - px(m.left, rw), top: ry - px(m.top, rh), right: rx + rw + px(m.right, rw), bottom: ry + rh + px(m.bottom, rh) };
       const entries = [];
       for (const [target, last] of this._targets) {
-        const r = paintedRect(target);
+        const r = N.paintedRect(target.__id);
         if (settle && settle !== target) continue;
-        if (!r && !settle && !unpainted.has(target.__id)) continue;
+        if (!r && !settle && !N.unpainted(target.__id)) continue;
         const [x, y, w, h] = r || [0, 0, 0, 0];
         const ix = Math.max(x, box.left), iy = Math.max(y, box.top);
         const ax = Math.min(x + w, box.right), ay = Math.min(y + h, box.bottom);
@@ -2128,7 +2039,7 @@
         const visible = inside && this.thresholds.some((t) => (t === 0 ? true : ratio >= t));
         if (last === visible) continue;
         if (N.debugIO && N.debugIO() && target.localName === "img") console.log("IODBG img " + (visible ? "in" : "out") + " t=" + Math.round(N.now()) + " r=" + JSON.stringify(r) + " root=" + (this.root ? this.root.localName : "vp") + " th=" + JSON.stringify(this.thresholds) + " margin=" + this.rootMargin + " src=" + (target.getAttribute("src") ? "y" : "n"));
-        if (visible && N.debugIO && N.debugIO()) console.log("IODBG visible " + target.localName + "." + String(target.className).slice(0, 60) + " r=" + JSON.stringify(r) + " own=" + JSON.stringify(layoutRects.get(target.__id) || null) + " vp=" + viewport + " box=" + JSON.stringify(box));
+        if (visible && N.debugIO && N.debugIO()) console.log("IODBG visible " + target.localName + "." + String(target.className).slice(0, 60) + " r=" + JSON.stringify(r) + " own=" + JSON.stringify(N.rect(target.__id)) + " vp=" + vw + "x" + vh + " box=" + JSON.stringify(box));
         this._targets.set(target, visible);
         entries.push(new IntersectionObserverEntry({
           target, isIntersecting: visible, intersectionRatio: ratio, time: N.now(),
@@ -2356,10 +2267,6 @@
   };
 
   Object.assign(window, { crypto: cryptoImpl, CryptoKey });
-  // The viewport's size, as the tab last reported it.
-  for (const [name, i] of [["innerWidth", 0], ["innerHeight", 1]]) {
-    Object.defineProperty(window, name, { configurable: true, get: () => viewport[i], set() {} });
-  }
 
   // ---- network -----------------------------------------------------------
 
@@ -3107,7 +3014,7 @@
     },
     Notification: Object.assign(function Notification() { throw new TypeError("Notifications aren't available"); }, { permission: "default", requestPermission: () => Promise.resolve("denied") }),
     visualViewport: Object.assign(new EventTarget(), {
-      get width() { return viewport[0]; }, get height() { return viewport[1]; }, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0,
+      get width() { return window.innerWidth; }, get height() { return window.innerHeight; }, scale: 1, offsetLeft: 0, offsetTop: 0, pageLeft: 0, pageTop: 0,
     }),
     ...events,
   });
@@ -3165,7 +3072,6 @@
     __fireTimer: N.fireTimer,
     __imageEvent: imageEvent,
     __layout: layout,
-    __measuredIds() { return Array.from(measuredIds); },
     // Elements listening for mouse events (window/document count as the
     // root, which every target is under).
     __mouseIds() {
@@ -3197,7 +3103,7 @@
     __dispatchMouse(kind, id, x, y, button, buttons, dx, dy, bubbles = true, related = null) {
       const n = wrap(id);
       if (!n) return;
-      const r = layoutRects.get(id);
+      const r = N.rect(id);
       const init = {
         bubbles: true, cancelable: true, composed: true, view: window, detail: kind === "dblclick" ? 2 : 1,
         clientX: x, clientY: y, screenX: x, screenY: y, pageX: x, pageY: y,

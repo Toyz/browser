@@ -717,6 +717,26 @@ fn layout_reaches_scripts() {
 }
 
 #[test]
+fn geometry_before_layout_is_estimated_natively() {
+    let doc = html::parse_scripted(
+        r##"<body><div id="d"><span id="s">x</span></div><div style="display:flex"><div id="f"></div></div><p id="o"></p><script>
+        const d = document.getElementById("d"), s = document.getElementById("s"), f = document.getElementById("f");
+        const r = d.getBoundingClientRect();
+        document.getElementById("o").textContent = [
+          r instanceof DOMRect, r.width, r.right, d.offsetWidth, d.clientHeight, s.offsetWidth, f.offsetWidth,
+          document.documentElement.clientWidth, document.documentElement.clientHeight, document.body.offsetWidth,
+          getComputedStyle(d).width, innerWidth, innerHeight, d.getClientRects().length, typeof Element.prototype.getBoundingClientRect,
+        ].join(" ");
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, _host) = js::start(doc, opts);
+    assert_eq!(text_of(&doc, "o"), "true 1280 1280 1280 0 0 0 1280 800 1280 1280px 1280 800 0 function");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

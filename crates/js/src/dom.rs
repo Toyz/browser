@@ -100,6 +100,9 @@ impl Dom {
     }
 }
 
+#[path = "geometry.rs"]
+pub(crate) mod geometry;
+
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
 }
@@ -146,6 +149,8 @@ pub(crate) struct Dom {
     /// The tab has sent a layout: it's showing the page and answers
     /// `locate` (before that, nobody's reading the questions).
     laid_out: bool,
+    /// Where the tab laid measured elements out, and the viewport.
+    geometry: geometry::Geometry,
     /// Shadow roots by host (and back).
     shadows: HashMap<NodeId, NodeId>,
     hosts: HashMap<NodeId, NodeId>,
@@ -235,6 +240,7 @@ impl Runtime {
             tab: updates.clone(),
             scroll: (0.0, 0.0),
             laid_out: false,
+            geometry: Default::default(),
             canvases_dirty: false,
             drawn: HashSet::new(),
             canvas_used: HashMap::new(),
@@ -577,8 +583,7 @@ impl Runtime {
     fn refresh_listening(&mut self) {
         let listening = self.call_global("__listeningIds", &[]);
         let listening = self.node_set(listening);
-        let measured = self.call_global("__measuredIds", &[]);
-        let mut measured = self.node_set(measured);
+        let mut measured = self.dom.borrow().geometry.measured.clone();
         // What's clicked is what scripts measure next (a dropdown placed
         // under its trigger, a tooltip by its target): its box and position
         // are kept ready, not first asked for (and found missing, at 0,0)
@@ -805,14 +810,12 @@ impl Runtime {
             }
             ToJs::Layout { rects, gone, viewport, scroll } => {
                 let scrolled = std::mem::replace(&mut self.dom.borrow_mut().scroll, scroll) != scroll;
-                self.dom.borrow_mut().laid_out = true;
-                let flat: Vec<JsValue> = rects
-                    .iter()
-                    .flat_map(|(n, r)| [JsValue::from(node_to_number(*n)), r[0].into(), r[1].into(), r[2].into(), r[3].into()])
-                    .collect();
-                let flat = JsArray::from_iter(flat, &mut self.cx);
-                let gone = JsArray::from_iter(gone.iter().map(|n| JsValue::from(node_to_number(*n))), &mut self.cx);
-                self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1), gone.into()]);
+                let resized = {
+                    let mut dom = self.dom.borrow_mut();
+                    dom.laid_out = true;
+                    dom.geometry.apply(&rects, &gone, viewport)
+                };
+                self.call_global("__layout", &[JsValue::from(resized)]);
                 if scrolled {
                     self.call_global("__fireWindow", &[js_str("scroll")]);
                 }
@@ -978,6 +981,33 @@ pub(crate) fn set_url(d: &Shared, href: &str, mode: u8) -> JsResult<Url> {
         dom.url_changes.push((url.clone(), mode == 2));
     }
     Ok(url)
+}
+
+/// In the document (through shadow hosts)?
+fn is_connected(dom: &Dom, mut n: NodeId) -> bool {
+    loop {
+        if n == dom.doc.root() {
+            return true;
+        }
+        match dom.doc.parent(n).or_else(|| dom.hosts.get(&n).copied()) {
+            Some(p) => n = p,
+            None => return false,
+        }
+    }
+}
+
+/// The media scripts see: the viewport the tab last reported.
+fn media_env(dom: &Dom) -> style::MediaEnv {
+    style::MediaEnv { width: dom.geometry.viewport.0, height: dom.geometry.viewport.1, dark: dom.dark, scripting: true }
+}
+
+/// An element's computed `prop` (`size`: as laid out, for `width`/`height`).
+fn computed_value(dom: &mut Dom, id: NodeId, prop: &str, size: Option<(f32, f32)>) -> String {
+    let env = media_env(dom);
+    let Dom { doc, styles, generation, dark, .. } = dom;
+    let fetch = |u: &Url| net::fetch_text_cached(u);
+    let Some(style) = styles.style_of(doc, id, *generation, env, &fetch) else { return String::new() };
+    crate::computed::value(&style, prop, size, *dark)
 }
 
 /// The page's address.
@@ -1401,16 +1431,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     // In the document (through shadow hosts)?
     add("connected", 1, Box::new(|d, a, _| {
         let dom = d.borrow();
-        let Some(mut n) = arg_node(&dom, a, 0) else { return Ok(JsValue::from(false)) };
-        loop {
-            if n == dom.doc.root() {
-                return Ok(JsValue::from(true));
-            }
-            match dom.doc.parent(n).or_else(|| dom.hosts.get(&n).copied()) {
-                Some(p) => n = p,
-                None => return Ok(JsValue::from(false)),
-            }
-        }
+        Ok(JsValue::from(arg_node(&dom, a, 0).is_some_and(|n| is_connected(&dom, n))))
     }));
     // window.scrollX / scrollY (getters) and scrollTo / scroll / scrollBy:
     // `(x, y)` or `({ left, top, behavior })`.
@@ -1447,31 +1468,6 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             Ok(JsValue::undefined())
         }));
     }
-    // Where the tab has an element, asked and waited for (briefly: the tab
-    // answers between frames).
-    add("locate", 1, Box::new(|d, a, cx| {
-        let (tab, node) = {
-            let dom = d.borrow();
-            if !dom.laid_out {
-                return Ok(JsValue::null());
-            }
-            (dom.tab.clone(), arg_node(&dom, a, 0))
-        };
-        let Some(node) = node else { return Ok(JsValue::null()) };
-        let (tx, rx) = std::sync::mpsc::channel();
-        let t = Instant::now();
-        if tab.send_blocking(FromJs::Locate(node, tx)).is_err() {
-            return Ok(JsValue::null());
-        }
-        let answer = rx.recv_timeout(Duration::from_millis(30));
-        if d.borrow().debug {
-            eprintln!("js: locate {node:?} -> {:?} in {:?}", answer, t.elapsed());
-        }
-        Ok(match answer {
-            Ok(Some(r)) => JsArray::from_iter(r.map(JsValue::from), cx).into(),
-            _ => JsValue::null(),
-        })
-    }));
     add("shadowHost", 1, Box::new(|d, a, _| {
         let dom = d.borrow();
         Ok(id_value(arg_node(&dom, a, 0).and_then(|n| dom.hosts.get(&n).copied())))
@@ -1513,19 +1509,16 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("debugIO", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_DEBUG_IO").is_some()))));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));
-    // getComputedStyle: (id, property, laid-out width, height (-1: none),
-    // viewport width, height).
-    add("computedStyle", 6, Box::new(|d, a, cx| {
+    // getComputedStyle: (id, property); `width` and `height` as the tab
+    // laid the element out (before that, a block's estimate).
+    add("computedStyle", 2, Box::new(|d, a, cx| {
         let prop = arg_string(a, 1, cx)?;
-        let num = |i: usize| a.get(i).and_then(|v| v.as_number()).unwrap_or(-1.0) as f32;
-        let mut dom = d.borrow_mut();
-        let Some(id) = arg_node(&dom, a, 0) else { return Ok(js_str("")) };
-        let Dom { doc, styles, generation, dark, .. } = &mut *dom;
-        let env = style::MediaEnv { width: num(4), height: num(5), dark: *dark, scripting: true };
-        let fetch = |u: &Url| net::fetch_text_cached(u);
-        let Some(style) = styles.style_of(doc, id, *generation, env, &fetch) else { return Ok(js_str("")) };
-        let size = (num(2) >= 0.0).then(|| (num(2), num(3).max(0.0)));
-        Ok(js_str(&crate::computed::value(&style, &prop, size, *dark)))
+        let Some(id) = arg_node(&d.borrow(), a, 0) else { return Ok(js_str("")) };
+        let size = match prop.as_str() {
+            "width" | "height" => geometry::laid_out_size(d, id),
+            _ => None,
+        };
+        Ok(js_str(&computed_value(&mut d.borrow_mut(), id, &prop, size)))
     }));
     // CSS.supports(property, value) / CSS.supports(condition).
     add("cssSupports", 2, Box::new(|_, a, cx| {
@@ -1536,11 +1529,10 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         };
         Ok(JsValue::from(ok))
     }));
-    // matchMedia: a media query list against the viewport (width, height).
-    add("mediaMatches", 3, Box::new(|d, a, cx| {
+    // matchMedia: a media query list against the viewport.
+    add("mediaMatches", 1, Box::new(|d, a, cx| {
         let query = arg_string(a, 0, cx)?;
-        let num = |i: usize| a.get(i).and_then(|v| v.as_number()).unwrap_or(0.0) as f32;
-        let env = style::MediaEnv { width: num(1), height: num(2), dark: d.borrow().dark, scripting: true };
+        let env = media_env(&d.borrow());
         Ok(JsValue::from(style::media::matches(&query, &env)))
     }));
     add("now", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().started.elapsed().as_secs_f64() * 1000.0))));
@@ -1849,6 +1841,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);
+    geometry::install(&obj, dom, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
