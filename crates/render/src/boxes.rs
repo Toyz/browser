@@ -957,13 +957,18 @@ impl Builder<'_> {
         // `display: block` text (`content: attr(data-content)` reserving a
         // tab's bold width at `height: 0`) is a box of its own, stacked
         // above or below the element's content, not text beside it.
+        // So is positioned text (a `content: attr(data-tip)` tooltip above
+        // its button): out of flow, and block-level, as positioned boxes are.
         let mut as_box = |pseudo: &mut Option<(String, ComputedStyle)>, n: u8| -> Option<Block> {
             let (_, ps) = pseudo.as_ref()?;
             let positioned = matches!(ps.position, style::Position::Absolute | style::Position::Fixed);
-            if !ps.display.is_block_level() || positioned {
+            if !ps.display.is_block_level() && !positioned {
                 return None;
             }
-            let (text, ps) = pseudo.take()?;
+            let (text, mut ps) = pseudo.take()?;
+            if positioned && !ps.display.is_block_level() {
+                ps.display = Display::Block;
+            }
             let ps = Arc::new(ps);
             let mut inline = InlineBuilder::default();
             inline.push_text(&text, &ps, None);
