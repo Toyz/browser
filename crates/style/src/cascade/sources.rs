@@ -20,11 +20,13 @@ pub(super) const MAX_IMPORT_DEPTH: usize = 3;
 /// A stylesheet referenced by the document, in document order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StyleSource {
-    Inline { css: String, media: String },
-    External { url: Url, media: String },
+    /// `scope`: the shadow tree (by host) it styles; `None`, the document.
+    Inline { css: String, media: String, scope: Option<NodeId> },
+    External { url: Url, media: String, scope: Option<NodeId> },
 }
 
-/// Find `<style>` and `<link rel=stylesheet>` in document order.
+/// Find `<style>` and `<link rel=stylesheet>` in document order (each
+/// for the tree it's in), then constructed (`adoptedStyleSheets`) ones.
 pub fn collect_style_sources(doc: &Document) -> Vec<StyleSource> {
     let mut out = Vec::new();
     for id in doc.descendants(doc.root()) {
@@ -33,8 +35,9 @@ pub fn collect_style_sources(doc: &Document) -> Vec<StyleSource> {
             continue;
         }
         let media = e.attr("media").unwrap_or("").to_owned();
+        let scope = doc.tree_of(id);
         match &*e.name.local {
-            "style" => out.push(StyleSource::Inline { css: doc.text_content(id), media }),
+            "style" => out.push(StyleSource::Inline { css: doc.text_content(id), media, scope }),
             "link" => {
                 let rel = e.attr("rel").unwrap_or("").to_ascii_lowercase();
                 let is_sheet = rel.split_ascii_whitespace().any(|r| r == "stylesheet");
@@ -42,13 +45,24 @@ pub fn collect_style_sources(doc: &Document) -> Vec<StyleSource> {
                 if is_sheet && !alternate && e.attr("disabled").is_none()
                     && let Some(url) = e.attr("href").and_then(|h| doc.resolve_url(h))
                 {
-                    out.push(StyleSource::External { url, media });
+                    out.push(StyleSource::External { url, media, scope });
                 }
             }
             _ => {}
         }
     }
+    if let Some(shadow) = &doc.shadow {
+        for (scope, css) in &shadow.adopted {
+            out.push(StyleSource::Inline { css: css.clone(), media: String::new(), scope: *scope });
+        }
+    }
     out
+}
+
+pub(super) fn source_scope(s: &StyleSource) -> Option<NodeId> {
+    match s {
+        StyleSource::Inline { scope, .. } | StyleSource::External { scope, .. } => *scope,
+    }
 }
 
 pub(super) fn source_media(s: &StyleSource) -> &str {

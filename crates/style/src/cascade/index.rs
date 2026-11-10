@@ -9,6 +9,28 @@ pub(super) struct Entry {
     pub(super) specificity: u32,
     /// What the selector needs from ancestors, for bloom-filter fast rejection.
     pub(super) hashes: AncestorHashes,
+    /// It's a `::slotted()` selector (the only kind that reaches nodes
+    /// slotted into its tree).
+    pub(super) slotted: bool,
+}
+
+/// Which tree's rules are being matched, and how.
+#[derive(Clone, Copy)]
+pub(super) struct Scope {
+    /// The shadow tree's host (`None`: the document's tree).
+    pub(super) host: Option<NodeId>,
+    /// Matching a host against its own shadow tree's rules: only `:host`
+    /// reaches it there.
+    pub(super) featureless: bool,
+    /// Only `::slotted()` selectors.
+    pub(super) slotted_only: bool,
+    /// The rules come from a tree inside the element's own (context order).
+    pub(super) inner: bool,
+}
+
+impl Scope {
+    /// The UA sheet: every tree's elements, matched as they are.
+    pub(super) const UA: Scope = Scope { host: None, featureless: false, slotted_only: false, inner: false };
 }
 
 #[derive(Default)]
@@ -40,6 +62,7 @@ impl RuleIndex {
                     selector: sel_ix as u32,
                     specificity: selector.specificity(),
                     hashes: AncestorHashes::new(selector, QuirksMode::NoQuirks),
+                    slotted: selector.iter_raw_match_order().any(|c| matches!(c, Component::Slotted(_))),
                 };
                 let (mut id, mut class, mut tag) = (None, None, None);
                 let mut iter = selector.iter();
@@ -77,6 +100,7 @@ impl RuleIndex {
         el: ElementRef<'_>,
         mode: MatchingMode,
         origin: u8,
+        scope: Scope,
         bloom: &BloomFilter,
         caches: &mut SelectorCaches,
         out: &mut Vec<Matched>,
@@ -100,7 +124,11 @@ impl RuleIndex {
         candidates.push(&self.universal);
 
         let start = out.len();
+        let host = scope.host.map(|h| selectors::Element::opaque(&ElementRef::new(el.doc, h, el.state)));
         for entry in candidates.into_iter().flatten() {
+            if scope.slotted_only && !entry.slotted {
+                continue;
+            }
             let rule = &self.rules[entry.rule as usize];
             let selector = &rule.selectors.slice()[entry.selector as usize];
             let mut cx = MatchingContext::new(
@@ -111,6 +139,8 @@ impl RuleIndex {
                 NeedsSelectorFlags::No,
                 MatchingForInvalidation::No,
             );
+            cx.current_host = host;
+            cx.featureless = scope.featureless;
             if matches_selector(selector, 0, Some(&entry.hashes), el, &mut cx) {
                 out.push(Matched {
                     origin,
@@ -120,6 +150,7 @@ impl RuleIndex {
                     important: rule.important.clone(),
                     layer: rule.layer_rank,
                     containers: rule.media.iter().any(|m| media::is_container(m)).then(|| rule.media.clone()),
+                    inner: scope.inner,
                 });
             }
         }
@@ -148,6 +179,8 @@ pub(super) struct Matched {
     /// `@container` conditions around the rule (checked against the
     /// element's query container when it's cascaded).
     pub(super) containers: Option<Arc<[Arc<str>]>>,
+    /// From an inner shadow tree's `:host` or `::slotted` rules.
+    pub(super) inner: bool,
 }
 
 pub(super) const ORIGIN_UA: u8 = 0;

@@ -15,6 +15,30 @@ fn run(html: &str) -> page::Document {
     js::start(doc, opts).0
 }
 
+fn find(doc: &page::Document, id: &str) -> page::NodeId {
+    doc.descendants(doc.root())
+        .find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(id))
+        .unwrap_or_else(|| panic!("no #{id}"))
+}
+
+/// The computed style of `#id`, as the page renders.
+fn computed(doc: &page::Document, id: &str) -> style::ComputedStyle {
+    let styler = style::StyleData::for_document(doc, &|_| None).styler(style::MediaEnv::default());
+    let mut chain = Vec::new();
+    let mut node = Some(find(doc, id));
+    while let Some(n) = node {
+        if doc.element(n).is_some() {
+            chain.push(n);
+        }
+        node = doc.parent(n);
+    }
+    let mut style = style::ComputedStyle::initial();
+    for &n in chain.iter().rev() {
+        style = styler.compute(doc, n, &style);
+    }
+    style
+}
+
 fn text_of(doc: &page::Document, id: &str) -> String {
     let n = doc
         .descendants(doc.root())
@@ -197,6 +221,7 @@ fn modules_static_dynamic_and_top_level_await() {
 #[test]
 fn custom_elements_and_shadow_dom() {
     let doc = run(r##"<body><x-card id="c"><span slot="title">Hello</span><p id="body">light body</p></x-card>
+        <p class="t" id="outside">outside</p><b id="red" style="color: red">r</b>
         <script>
           const log = [];
           class Card extends HTMLElement {
@@ -224,15 +249,14 @@ fn custom_elements_and_shadow_dom() {
     assert_eq!(text_of(&doc, "h"), "Hello");
     assert_eq!(text_of(&doc, "inner"), "light body");
     assert!(doc.text_content(card).contains("fallback"));
-    let css: String = doc
-        .descendants(card)
-        .filter(|&n| doc.element(n).is_some_and(|e| &*e.name.local == "style"))
-        .map(|n| doc.text_content(n))
-        .collect();
-    let host = doc.element(card).unwrap().attr("data-feather-host").unwrap().to_owned();
-    assert!(css.contains(&format!("[data-feather-host=\"{host}\"] .t")), "{css}");
-    assert!(css.contains(&format!("[data-feather-host=\"{host}\"]{{")) || css.contains(&format!("[data-feather-host=\"{host}\"] {{")), "{css}");
-    assert!(css.contains(&format!("[data-feather-host=\"{host}\"]  p")) || css.contains(&format!("[data-feather-host=\"{host}\"] p")), "{css}");
+    // Its adopted sheet styles its own tree, its host (`:host`) and what's
+    // slotted into it (`::slotted`); nothing outside.
+    let red = computed(&doc, "red").color;
+    assert_eq!(computed(&doc, "h").color, red);
+    assert_ne!(computed(&doc, "outside").color, red);
+    assert_eq!(computed(&doc, "c").display, style::Display::Block);
+    assert_eq!(computed(&doc, "body").margin.top, style::Length::Px(0.0));
+    assert_ne!(computed(&doc, "outside").margin.top, style::Length::Px(0.0));
 }
 
 /// Real network: `cargo test -p js websocket -- --ignored`.
@@ -386,7 +410,7 @@ fn prelude_loads_completely() {
     // The last things the prelude defines exist (a prelude that throws
     // halfway leaves pages half a DOM).
     let doc = run(r##"<body><p id="o"></p><script>
-        document.getElementById("o").textContent = [typeof __listeningIds, typeof __shadowStyles, typeof crypto.subtle.digest, typeof WebSocket, typeof fetch].join(" ");
+        document.getElementById("o").textContent = [typeof __listeningIds, typeof __adoptedSheets, typeof crypto.subtle.digest, typeof WebSocket, typeof fetch].join(" ");
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "function function function function function");
 }
@@ -540,17 +564,18 @@ fn slotted_clicks_reach_shadow_listeners_and_push_state() {
 #[test]
 fn declarative_shadow_roots_render_and_reach_scripts() {
     let doc = run(r##"<body><div id="h"><template shadowrootmode="open"><style>p { color: red }</style><p id="in">shadow <slot></slot></p></template><span>light</span></div>
-        <p id="o"></p><script>
+        <p id="o"></p><b id="red" style="color: red">r</b><script>
         const h = document.getElementById("h");
         document.getElementById("o").textContent = (h.shadowRoot ? "root " + h.shadowRoot.querySelector("#in").textContent.trim() : "none") + " / " + h.querySelectorAll("template").length;
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "root shadow / 0");
     // Rendered: the shadow tree with the light span slotted in.
     let rendered = text_of(&doc, "h").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        rendered.starts_with("[data-feather-host=") && rendered.contains("p[data-feather-in=") && rendered.ends_with("{ color: red } shadow light"),
-        "{rendered}"
-    );
+    assert_eq!(rendered, "p { color: red }shadow light");
+    // Its <style> styles the shadow tree's <p>, not the document's.
+    let red = computed(&doc, "red").color;
+    assert_eq!(computed(&doc, "in").color, red);
+    assert_ne!(computed(&doc, "o").color, red);
 }
 
 #[test]
@@ -564,20 +589,42 @@ fn shadow_styles_stay_in_their_own_tree() {
         const inner = outer.getElementById("inner-host").attachShadow({ mode: "open" });
         inner.innerHTML = '<style>.t { font-weight: bold }</style><span class="t" id="theirs">b</span>';
         </script></body>"##);
-    let doc_html = js::to_html(&doc);
-    // Each tree's rule names its own tree.
-    let rules: Vec<&str> = doc_html.split('}').filter(|r| r.contains(".t[data-feather-in=")).collect();
-    assert_eq!(rules.len(), 2, "{doc_html}");
-    // The element's start tag, and the tree named in it.
-    let tree_of = |id: &str| {
-        let at = doc_html.find(&format!("id=\"{id}\"")).unwrap();
-        let tag = &doc_html[doc_html[..at].rfind('<').unwrap()..at + doc_html[at..].find('>').unwrap()];
-        tag.split("data-feather-in=\"").nth(1).map(|t| t.split('"').next().unwrap().to_owned())
-    };
-    let (mine, theirs) = (tree_of("mine").unwrap(), tree_of("theirs").unwrap());
-    assert_ne!(mine, theirs);
-    assert!(rules.iter().any(|r| r.contains(&format!("[data-feather-in=\"{mine}\"]")) && r.contains("color: red")));
-    assert!(rules.iter().any(|r| r.contains(&format!("[data-feather-in=\"{theirs}\"]")) && r.contains("font-weight: bold")));
+    let (mine, theirs) = (computed(&doc, "mine"), computed(&doc, "theirs"));
+    assert_ne!(mine.color, theirs.color);
+    assert!(mine.font_weight < 700, "{}", mine.font_weight);
+    assert!(theirs.font_weight >= 700);
+}
+
+#[test]
+fn shadow_selectors_follow_tree_boundaries() {
+    let doc = run(r##"<body><div class="wrap"><div id="host" class="on"><p id="light" class="x">l</p></div></div>
+        <span class="in" id="doc-span">d</span><b id="red" style="color: red">r</b><script>
+        const root = document.getElementById("host").attachShadow({ mode: "open" });
+        root.innerHTML = `<style>
+            :host(.on) { font-weight: 700 }
+            :host(.off) { color: red }
+            .wrap .in { color: red }
+            :host .in { margin-top: 7px }
+            div > .in { margin-left: 3px }
+            ::slotted(.x) { color: red }
+            .x { margin-top: 9px }
+          </style><div><span class="in" id="in">s</span></div><slot></slot>`;
+        </script></body>"##);
+    let red = computed(&doc, "red").color;
+    let host = computed(&doc, "host");
+    assert_eq!(host.font_weight, 700);
+    assert_ne!(host.color, red);
+    let inside = computed(&doc, "in");
+    // `.wrap` is outside the tree: descendant selectors stop at the root.
+    assert_ne!(inside.color, red);
+    assert_eq!(inside.margin.top, style::Length::Px(7.0));
+    assert_eq!(inside.margin.left, style::Length::Px(3.0));
+    // The document's `.in` isn't the tree's.
+    assert_eq!(computed(&doc, "doc-span").margin.top, style::Length::Px(0.0));
+    // Slotted: `::slotted(.x)` reaches it, the tree's plain `.x` doesn't.
+    let light = computed(&doc, "light");
+    assert_eq!(light.color, red);
+    assert_ne!(light.margin.top, style::Length::Px(9.0));
 }
 
 #[test]
@@ -997,4 +1044,41 @@ fn focus_is_shared_with_the_tab() {
     assert_eq!(focus_moves.last(), Some(&None));
     assert!(!focus_moves.contains(&Some(a)));
     let _ = b;
+}
+
+/// Computed styles on a live page: `PAGE=file.html BASE=url PROBE_MATCH=tag-or-.class
+/// cargo test --release -p js --test dom probe_styles -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn probe_styles() {
+    let html = std::fs::read_to_string(std::env::var("PAGE").unwrap()).unwrap();
+    let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
+    let want = std::env::var("PROBE_MATCH").unwrap_or_default();
+    let doc = html::parse_scripted(&html, base, true);
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (mut doc, host) = js::start(doc, opts);
+    if let Some(host) = &host {
+        let until = std::time::Instant::now() + Duration::from_secs(8);
+        while std::time::Instant::now() < until {
+            if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+                doc = (*d).clone();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    let styler = style::StyleData::for_document(&doc, &|_| None).styler(style::MediaEnv { width: 1280.0, height: 900.0, ..Default::default() });
+    fn walk(doc: &page::Document, styler: &style::Styler, n: page::NodeId, parent: &style::ComputedStyle, want: &str, path: &str) {
+        let Some(e) = doc.element(n) else { return };
+        let s = styler.compute(doc, n, parent);
+        let class = e.attr("class").unwrap_or("");
+        let path = format!("{path} > {}{}", e.name.local, class.split_whitespace().next().map(|c| format!(".{c}")).unwrap_or_default());
+        if &*e.name.local == want || class.split_whitespace().any(|c| want.strip_prefix('.') == Some(c)) {
+            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background);
+        }
+        for &c in doc.children(n) {
+            walk(doc, styler, c, &s, want, &path);
+        }
+    }
+    let html_el = doc.children(doc.root()).iter().copied().find(|&n| doc.element(n).is_some()).unwrap();
+    walk(&doc, &styler, html_el, &style::ComputedStyle::initial(), &want, "");
 }

@@ -219,12 +219,16 @@ pub fn style_key(doc: &page::Document) -> u64 {
     for n in doc.descendants(doc.root()) {
         let Some(e) = doc.element(n) else { continue };
         match &**e.local_name() {
-            "style" => doc.text_content(n).hash(&mut h),
+            // Which tree it styles too (see `page::ShadowTrees`).
+            "style" => (doc.text_content(n), doc.tree_of(n)).hash(&mut h),
             "link" if e.attr("rel").is_some_and(|r| r.to_ascii_lowercase().contains("stylesheet")) => {
                 (e.attr("href"), e.attr("media")).hash(&mut h)
             }
             _ => {}
         }
+    }
+    if let Some(shadow) = &doc.shadow {
+        shadow.adopted.hash(&mut h);
     }
     h.finish()
 }

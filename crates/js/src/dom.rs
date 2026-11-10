@@ -424,16 +424,16 @@ impl Runtime {
     /// into their hosts (for the first paint and the tab).
     pub fn snapshot_doc(&mut self) -> Document {
         self.refresh_listening();
-        let styles = if self.dom.borrow().shadows.is_empty() { None } else { Some(self.call_global("__shadowStyles", &[])) };
-        let styles = styles.map(|v| shadow_styles(v, &mut self.cx)).unwrap_or_default();
+        let adopted = self.call_global("__adoptedSheets", &[]);
+        let adopted = node_texts(adopted, &mut self.cx);
         let drawn = self.call_global("__flushCanvases", &[]);
         self.draw_canvases(drawn);
         let cssom = self.call_global("__cssomStyles", &[]);
-        let cssom: Vec<(NodeId, String)> = shadow_styles(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
+        let cssom: Vec<(NodeId, String)> = node_texts(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
         let mut dom = self.dom.borrow_mut();
         dom.dirty = false;
         self.last_sent = Instant::now();
-        let mut doc = flatten(&dom, styles);
+        let mut doc = flatten(&dom, adopted);
         // Canvases show what was drawn on them.
         for (&node, canvas) in dom.canvases.iter_mut() {
             if let Some(e) = doc.element_mut(node) {
@@ -1725,9 +1725,9 @@ fn escape(s: &str, attr: bool, out: &mut String) {
     }
 }
 
-/// `__shadowStyles()`'s answer: [[host id | null, css], ...] (null: the
-/// document's own adopted sheets).
-fn shadow_styles(v: JsValue, cx: &mut Context) -> Vec<(Option<NodeId>, String)> {
+/// `[[node id | null, text], ...]` from the prelude (`__adoptedSheets`,
+/// `__cssomStyles`).
+fn node_texts(v: JsValue, cx: &mut Context) -> Vec<(Option<NodeId>, String)> {
     let mut out = Vec::new();
     let Some(arr) = v.as_object().and_then(|o| JsArray::from_object(o).ok()) else { return out };
     let len = arr.length(cx).unwrap_or(0);
@@ -1778,35 +1778,33 @@ pub fn has_declarative_shadow(doc: &Document) -> bool {
 }
 
 /// A copy of the DOM as it renders: each shadow host's children are its
-/// shadow root's, `<slot>`s hold the light children assigned to them, and
-/// the shadow trees' (scoped) styles are `<style>` elements in their hosts.
+/// shadow root's, and `<slot>`s hold the light children assigned to them.
+/// Which tree each node is in (and each host's own children) goes along in
+/// `Document::shadow`, so selectors and stylesheets stay in their tree.
 /// Node ids are the real ones, so clicks and hovers land on real nodes.
-fn flatten(dom: &Dom, styles: Vec<(Option<NodeId>, String)>) -> Document {
+fn flatten(dom: &Dom, adopted: Vec<(Option<NodeId>, String)>) -> Document {
     let mut copy = dom.doc.clone();
-    if dom.shadows.is_empty() {
+    if dom.shadows.is_empty() && adopted.is_empty() {
         return copy;
     }
+    let mut trees = page::ShadowTrees { adopted, ..Default::default() };
     let src = &dom.doc;
     let is_tag = |n: NodeId, t: &str| src.element(n).is_some_and(|e| &*e.name.local == t);
     for (&host, &root) in &dom.shadows {
         if src.get(host).is_none() {
             continue;
         }
+        trees.light.insert(host, src.children(host).to_vec());
         // Light children by the slot they ask for ("" = the default slot).
         let mut assigned: HashMap<String, Vec<NodeId>> = HashMap::new();
         for &c in src.children(host) {
             let name = src.element(c).and_then(|e| e.attr("slot")).unwrap_or("").to_owned();
             assigned.entry(name).or_default().push(c);
         }
-        // Slots in this shadow tree (not in shadow trees nested in it).
+        // This shadow tree's nodes (not those of shadow trees nested in it).
         let mut stack: Vec<NodeId> = src.children(root).to_vec();
-        let tree = format!("{}", node_to_number(host));
         while let Some(n) = stack.pop() {
-            // Which shadow tree it's in: its styles apply here and not in
-            // trees nested inside it (see `scopeSelector` in the prelude).
-            if let Some(e) = copy.element_mut(n) {
-                set_attr(e, "data-feather-in", tree.clone());
-            }
+            trees.tree.insert(n, host);
             if is_tag(n, "slot") {
                 let name = src.element(n).and_then(|e| e.attr("name")).unwrap_or("").to_owned();
                 match assigned.remove(&name) {
@@ -1819,29 +1817,9 @@ fn flatten(dom: &Dom, styles: Vec<(Option<NodeId>, String)>) -> Document {
             }
             stack.extend(src.children(n).iter().copied());
         }
-        // The shadow tree's own <style>s are replaced by scoped copies.
-        let kids: Vec<NodeId> = src.children(root).iter().copied().filter(|&c| !is_tag(c, "style")).collect();
-        copy.set_children(host, kids);
-        if let Some(e) = copy.element_mut(host) {
-            set_attr(e, "data-feather-host", format!("{}", node_to_number(host)));
-        }
+        copy.set_children(host, src.children(root).to_vec());
     }
-    // Scoped shadow styles at the top of their hosts; the document's
-    // adopted sheets in <head>.
-    let head = copy.descendants(copy.root()).find(|&n| copy.element(n).is_some_and(|e| &*e.name.local == "head"));
-    for (host, css) in styles {
-        if css.trim().is_empty() {
-            continue;
-        }
-        let style = copy.create_element(page::html_name("style"), Vec::new());
-        let text = copy.create_text(css);
-        copy.append(style, text);
-        if let Some(parent) = host.or(head) {
-            let mut kids = copy.children(parent).to_vec();
-            kids.insert(0, style);
-            copy.set_children(parent, kids);
-        }
-    }
+    copy.shadow = Some(std::sync::Arc::new(trees));
     copy
 }
 

@@ -28,6 +28,9 @@ pub struct StyleRule {
     /// Where its layer sits in the cascade (set when a document's sheets
     /// are put together; higher wins for normal declarations).
     pub layer_rank: u16,
+    /// The shadow tree whose stylesheet it's from (by host), if not the
+    /// document's.
+    pub scope: Option<page::NodeId>,
 }
 
 /// An `@font-face` rule.
@@ -288,7 +291,7 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
                 important: decls.important.into(),
                 media: self.media.clone().into(),
                 layer: self.layer.clone(),
-                layer_rank: 0,
+                layer_rank: 0, scope: None,
             });
         }
         // Nested rules (CSS nesting) follow, as plain rules.
@@ -357,7 +360,7 @@ impl NestedBody {
                     important: decls.important.into(),
                     media: media.into(),
                     layer: self.layer.clone(),
-                    layer_rank: 0,
+                    layer_rank: 0, scope: None,
                 });
             }
         }

@@ -91,6 +91,18 @@ native functions. Move the node classes and their hot paths into Rust
 attributes, events, observers, CSSOM, network), leaving JavaScript only
 where it's the natural place (small shims, polyfill-shaped APIs).
 
+Some of it isn't DOM and doesn't move to Rust at all: it was the engine's
+job done in JavaScript, and goes to the engine.
+- Shadow DOM styles (done): shadow trees' styles were rewritten as text
+  (`[data-feather-host=N] .x[data-feather-in=N]`). Now the flattened
+  document says which tree each node is in (`page::ShadowTrees`), each
+  stylesheet has a scope, and selectors match across tree boundaries the
+  way the `selectors` crate implements the spec: `:host`, `:host(...)`,
+  `::slotted(...)`, descendant combinators stopping at the shadow root,
+  context order between trees. The document's rules no longer reach into
+  shadow trees (a page's `* { box-sizing: border-box }` doesn't, in any
+  browser). `:host-context()` isn't supported (Firefox doesn't either).
+
 ## Parser parity
 
 `cargo run --release -p style --example decls -- *.css` prints every rule's

@@ -1468,116 +1468,12 @@
     addRule(selector, style, index) { this.insertRule(selector + "{" + (style || "") + "}", index === undefined ? this._rules.length : index); return -1; }
     removeRule(index) { this.deleteRule(index || 0); }
     _changed() {
-      this._scoped = null;
       if (this.ownerNode) { this._cssom = true; this._source = this.ownerNode.textContent; cssomStyles.add(this.ownerNode); }
       N.touch();
     }
   }
   const cssomStyles = new Set();
 
-  // Shadow styles, scoped to their host: `:host` is the host, everything
-  // else is inside it, `::slotted(x)` is `x` (slots hold their nodes once
-  // the tree is flattened for rendering).
-  function splitTop(text, sep) {
-    const out = [];
-    let depth = 0, start = 0, quote = null;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
-      if (c === '"' || c === "'") quote = c;
-      else if (c === "(" || c === "[") depth++;
-      else if (c === ")" || c === "]") depth--;
-      else if (c === sep && depth === 0) { out.push(text.slice(start, sep === "}" ? i : i)); start = i + 1; }
-    }
-    out.push(text.slice(start));
-    return out;
-  }
-  function parenArg(sel, at) {
-    let depth = 0;
-    for (let i = at; i < sel.length; i++) {
-      if (sel[i] === "(") depth++;
-      else if (sel[i] === ")" && --depth === 0) return [sel.slice(at + 1, i), sel.slice(i + 1)];
-    }
-    return [sel.slice(at + 1), ""];
-  }
-  // A shadow tree's selector for the flattened page: under its host, and
-  // (unless it styles the host itself or slotted light children) matching
-  // only elements of this tree: an outer component's `.trigger` rules must
-  // not reach the `.trigger` inside a component nested in it.
-  function scopeSelector(sel, scope) {
-    sel = sel.trim();
-    const slotted = /::slotted\(/.test(sel);
-    sel = sel.replace(/::slotted\(([^)]*)\)/g, " $1");
-    const inTree = scope.replace("data-feather-host", "data-feather-in");
-    const own = (s) => (slotted ? s : constrainSubject(s, inTree));
-    if (sel.startsWith(":host-context(")) { const [arg, rest] = parenArg(sel, ":host-context".length); return hasCombinator(rest) ? own(arg + " " + scope + rest) : arg + " " + scope + rest; }
-    if (sel.startsWith(":host(")) { const [arg, rest] = parenArg(sel, ":host".length); return hasCombinator(rest) ? own(scope + arg + rest) : scope + arg + rest; }
-    if (sel.startsWith(":host")) { const rest = sel.slice(5); return hasCombinator(rest) ? own(scope + rest) : scope + rest; }
-    return own(scope + " " + sel);
-  }
-  // Is there a combinator at the top level of `s` (outside parentheses)?
-  function hasCombinator(s) {
-    let depth = 0;
-    for (const c of s.trim()) {
-      if (c === "(") depth++;
-      else if (c === ")") depth--;
-      else if (depth === 0 && (c === " " || c === ">" || c === "+" || c === "~")) return true;
-    }
-    return false;
-  }
-  // `attr` added to the last compound selector, before a pseudo-element.
-  function constrainSubject(sel, attr) {
-    let depth = 0, start = 0, pseudo = -1;
-    for (let i = 0; i < sel.length; i++) {
-      const c = sel[i];
-      if (c === "(") depth++;
-      else if (c === ")") depth--;
-      else if (depth === 0 && (c === " " || c === ">" || c === "+" || c === "~")) { start = i + 1; pseudo = -1; }
-      else if (depth === 0 && c === ":" && pseudo < 0) {
-        const rest = sel.slice(i).toLowerCase();
-        if (rest.startsWith("::") || /^:(before|after|first-line|first-letter)\b/.test(rest)) pseudo = i;
-      }
-    }
-    if (start >= sel.length) return sel;
-    const at = pseudo >= 0 ? pseudo : sel.length;
-    return sel.slice(0, at) + attr + sel.slice(at);
-  }
-  function scopeCss(css, scope) {
-    css = css.replace(/\/\*[\s\S]*?\*\//g, "");
-    let out = "", i = 0;
-    while (i < css.length) {
-      let j = i, depth = 0, quote = null;
-      // The prelude: up to `{` (a block) or `;` (an at-statement).
-      for (; j < css.length; j++) {
-        const c = css[j];
-        if (quote) { if (c === quote) quote = null; continue; }
-        if (c === '"' || c === "'") quote = c;
-        else if (c === "(") depth++;
-        else if (c === ")") depth--;
-        else if ((c === "{" || c === ";") && depth === 0) break;
-      }
-      const prelude = css.slice(i, j).trim();
-      if (j >= css.length) break;
-      if (css[j] === ";") { out += prelude + ";"; i = j + 1; continue; }
-      let k = j + 1;
-      for (let d = 1; k < css.length && d > 0; k++) {
-        if (css[k] === "{") d++;
-        else if (css[k] === "}") d--;
-      }
-      const body = css.slice(j + 1, k - 1);
-      if (/^@(media|supports|container|layer|scope|document)/i.test(prelude)) out += prelude + "{" + scopeCss(body, scope) + "}";
-      else if (prelude.startsWith("@")) out += prelude + "{" + body + "}";
-      else if (prelude) out += splitTop(prelude, ",").map((s) => scopeSelector(s, scope)).join(", ") + "{" + body + "}";
-      i = k;
-    }
-    return out;
-  }
-  function scopedSheet(sheet, scope) {
-    const cache = sheet._scoped || (sheet._scoped = new Map());
-    let css = cache.get(scope);
-    if (css === undefined) { css = scopeCss(sheet._text, scope); cache.set(scope, css); }
-    return css;
-  }
   let documentSheets = [];
 
   const registry = new Map();
@@ -3317,19 +3213,17 @@
 
   Object.assign(window, {
     __setCurrentScript(id) { currentScript = wrap(id); },
-    // [[host id, scoped css], ...] for the tab's flattened DOM.
-    __shadowStyles() {
+    // [[host id | null, css], ...]: constructed stylesheets adopted by
+    // shadow roots (by host) and the document (null). The style engine
+    // scopes them to their tree, as it does a shadow tree's <style>s.
+    __adoptedSheets() {
       const out = [];
       for (const root of shadowRoots) {
         const host = N.shadowHost(root.__id);
         if (host === null || !N.connected(host)) continue;
-        const scope = '[data-feather-host="' + host + '"]';
-        let css = "";
-        for (const sheet of root.adoptedStyleSheets) if (sheet && !sheet.disabled) css += scopedSheet(sheet, scope) + "\n";
-        for (const c of N.children(root.__id)) if (N.tag(c) === "style") css += scopeCss(N.text(c), scope) + "\n";
-        out.push([host, css]);
+        for (const sheet of root.adoptedStyleSheets) if (sheet && !sheet.disabled) out.push([host, sheet._text]);
       }
-      if (documentSheets.length) out.push([null, documentSheets.map((s) => s._text).join("\n")]);
+      for (const sheet of documentSheets) if (sheet && !sheet.disabled) out.push([null, sheet._text]);
       return out;
     },
     // [[<style> id, css], ...]: <style> elements whose rules scripts

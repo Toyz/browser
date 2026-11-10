@@ -147,6 +147,14 @@ impl<'i> selectors::Parser<'i> for SelectorParser {
         true
     }
 
+    fn parse_host(&self) -> bool {
+        true
+    }
+
+    fn parse_slotted(&self) -> bool {
+        true
+    }
+
     fn is_is_alias(&self, name: &str) -> bool {
         name.eq_ignore_ascii_case("-webkit-any") || name.eq_ignore_ascii_case("-moz-any")
     }
@@ -242,10 +250,32 @@ impl<'a> ElementRef<'a> {
         self.doc.element(id).map(|_| Self { doc: self.doc, id, state: self.state })
     }
 
+    /// The host of the shadow tree this element is in (`None`: the document's).
+    pub fn tree(&self) -> Option<NodeId> {
+        self.doc.tree_of(self.id)
+    }
+
+    /// The slot this element is assigned to: in a flattened document, a
+    /// slot holds its assigned nodes, which belong to another tree.
+    pub fn slot(&self) -> Option<NodeId> {
+        self.doc.shadow.as_ref()?;
+        let p = self.doc.parent(self.id)?;
+        let slot = self.doc.element(p).is_some_and(|e| e.is_html() && &*e.name.local == "slot");
+        (slot && self.doc.tree_of(p) != self.tree()).then_some(p)
+    }
+
     fn sibling_elements(&self) -> (&'a [NodeId], usize) {
-        let parent = self.doc.parent(self.id).expect("sibling query on a detached node");
-        let siblings = self.doc.children(parent);
-        let ix = siblings.iter().position(|&c| c == self.id).unwrap();
+        // A slotted element's siblings are its host's children, not just
+        // the ones assigned to the same slot.
+        let light = self.slot().and_then(|slot| {
+            let host = self.doc.tree_of(slot)?;
+            self.doc.shadow.as_ref()?.light.get(&host).map(Vec::as_slice)
+        });
+        let siblings = light.unwrap_or_else(|| {
+            let parent = self.doc.parent(self.id).expect("sibling query on a detached node");
+            self.doc.children(parent)
+        });
+        let ix = siblings.iter().position(|&c| c == self.id).unwrap_or(0);
         (siblings, ix)
     }
 }
@@ -257,16 +287,33 @@ impl selectors::Element for ElementRef<'_> {
         OpaqueElement::new(self.doc.node(self.id))
     }
 
+    /// The parent in this element's own tree: none at the top of a shadow
+    /// tree (its parent is the shadow root), the host for a slotted one.
     fn parent_element(&self) -> Option<Self> {
-        self.element_at(self.doc.parent(self.id)?)
+        let parent = self.doc.parent(self.id)?;
+        if self.doc.shadow.is_some() {
+            let tree = self.tree();
+            if tree.is_some() && tree == Some(parent) {
+                return None;
+            }
+            if self.slot().is_some() {
+                return self.element_at(self.doc.tree_of(parent)?);
+            }
+        }
+        self.element_at(parent)
     }
 
     fn parent_node_is_shadow_root(&self) -> bool {
-        false
+        let tree = self.tree();
+        tree.is_some() && self.doc.parent(self.id) == tree
     }
 
     fn containing_shadow_host(&self) -> Option<Self> {
-        None
+        self.element_at(self.tree()?)
+    }
+
+    fn assigned_slot(&self) -> Option<Self> {
+        self.element_at(self.slot()?)
     }
 
     fn is_pseudo_element(&self) -> bool {
@@ -373,7 +420,8 @@ impl selectors::Element for ElementRef<'_> {
     }
 
     fn is_html_slot_element(&self) -> bool {
-        false
+        let e = self.data();
+        e.is_html() && &*e.name.local == "slot"
     }
 
     fn has_id(&self, id: &Ident, case: CaseSensitivity) -> bool {

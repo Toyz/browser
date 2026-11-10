@@ -92,6 +92,33 @@ pub struct Document {
     /// Parsed for a browser running scripts: `<noscript>` holds raw text
     /// and isn't shown.
     pub scripting: bool,
+    /// For a document flattened for rendering (shadow trees in their
+    /// hosts, slots holding their nodes): which tree each node is in.
+    pub shadow: Option<std::sync::Arc<ShadowTrees>>,
+}
+
+/// The shadow trees of a flattened document. Selectors and stylesheets
+/// stay inside their tree: a shadow tree's styles reach its own elements,
+/// its host through `:host` and nodes slotted into it through `::slotted`;
+/// the document's don't reach into shadow trees.
+#[derive(Debug, Default, Clone)]
+pub struct ShadowTrees {
+    /// The host of the shadow tree each of its nodes is in (nodes absent
+    /// are in the document's tree).
+    pub tree: std::collections::HashMap<NodeId, NodeId>,
+    /// Each host's own children (in the flattened document, a host holds
+    /// its shadow tree and slots hold these).
+    pub light: std::collections::HashMap<NodeId, Vec<NodeId>>,
+    /// Constructed stylesheets (`adoptedStyleSheets`), each for a shadow
+    /// tree (by host) or the document (`None`), after its own sheets.
+    pub adopted: Vec<(Option<NodeId>, String)>,
+}
+
+impl ShadowTrees {
+    /// The host of the shadow tree `n` is in (`None`: the document's).
+    pub fn tree_of(&self, n: NodeId) -> Option<NodeId> {
+        self.tree.get(&n).copied()
+    }
 }
 
 impl Document {
@@ -102,11 +129,16 @@ impl Document {
             children: Vec::new(),
             data: NodeData::Document,
         });
-        Self { nodes, root, url, quirks: false, scripting: false }
+        Self { nodes, root, url, quirks: false, scripting: false, shadow: None }
     }
 
     pub fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// The host of the shadow tree `n` is in (`None`: the document's).
+    pub fn tree_of(&self, n: NodeId) -> Option<NodeId> {
+        self.shadow.as_ref().and_then(|s| s.tree_of(n))
     }
 
     pub fn node(&self, id: NodeId) -> &Node {

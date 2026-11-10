@@ -185,13 +185,19 @@ impl StyleData {
                     let base = &base;
                     scope.spawn(move || {
                         let media = source_media(source);
-                        match source {
+                        let mut sheets = match source {
                             StyleSource::Inline { css, .. } => load_sheet(css, base, media, fetch, 0),
                             StyleSource::External { url, .. } => match fetch(url) {
                                 Some(css) => load_sheet(&css, url, media, fetch, 0),
                                 None => Vec::new(),
                             },
+                        };
+                        if let Some(tree) = source_scope(source) {
+                            for rule in sheets.iter_mut().flat_map(|s| s.rules.iter_mut()) {
+                                rule.scope = Some(tree);
+                            }
                         }
+                        sheets
                     })
                 })
                 .collect();
@@ -215,14 +221,18 @@ impl StyleData {
 
     /// A styler for this viewport and interaction state.
     pub fn styler_with_state(&self, env: MediaEnv, state: Arc<ElementState>) -> Styler {
-        let rules: Vec<StyleRule> = self
-            .rules
-            .iter()
-            .filter(|r| r.media.iter().all(|m| media::matches(m, &env)))
-            .cloned()
-            .collect();
+        // The document's rules, and each shadow tree's.
+        let mut rules: Vec<StyleRule> = Vec::new();
+        let mut scoped: HashMap<NodeId, Vec<StyleRule>> = HashMap::new();
+        for r in self.rules.iter().filter(|r| r.media.iter().all(|m| media::matches(m, &env))) {
+            match r.scope {
+                None => rules.push(r.clone()),
+                Some(tree) => scoped.entry(tree).or_default().push(r.clone()),
+            }
+        }
         Styler {
             author: Indexes::new(rules),
+            scoped: scoped.into_iter().map(|(tree, rules)| (tree, Indexes::new(rules))).collect(),
             env,
             state,
             root_font_size: Cell::new(16.0),
@@ -239,6 +249,8 @@ impl StyleData {
 /// Computes styles for one document at one viewport size.
 pub struct Styler {
     author: Indexes,
+    /// Shadow trees' rules, by host.
+    scoped: HashMap<NodeId, Indexes>,
     env: MediaEnv,
     state: Arc<ElementState>,
     root_font_size: Cell<f32>,
@@ -385,8 +397,8 @@ impl Styler {
         let mut caches = SelectorCaches::default();
         let mut matched = Vec::new();
         let normal = MatchingMode::Normal;
-        ua_indexes(doc.quirks).element.collect(el, normal, ORIGIN_UA, &bloom, &mut caches, &mut matched);
-        self.author.element.collect(el, normal, ORIGIN_AUTHOR, &bloom, &mut caches, &mut matched);
+        ua_indexes(doc.quirks).element.collect(el, normal, ORIGIN_UA, Scope::UA, &bloom, &mut caches, &mut matched);
+        self.collect_author(el, normal, |ix| &ix.element, &bloom, &mut caches, &mut matched);
 
         let hints = presentational_hints(e);
         if !hints.is_empty() {
@@ -399,6 +411,7 @@ impl Styler {
                 important: Arc::from([]),
                 layer: UNLAYERED,
                 containers: None,
+                inner: false,
             });
         }
         if let Some(inline) = e.attr("style") {
@@ -411,6 +424,7 @@ impl Styler {
                 important: parsed.1.clone().into(),
                 layer: UNLAYERED,
                 containers: None,
+                inner: false,
             });
         }
         self.cascade(&mut style, parent, matched);
@@ -433,8 +447,8 @@ impl Styler {
         element_style: &ComputedStyle,
         which: Pseudo,
     ) -> Option<ComputedStyle> {
-        let (ua, author) = (ua_indexes(doc.quirks).pseudo(which), self.author.pseudo(which));
-        if ua.is_empty() && author.is_empty() {
+        let ua = ua_indexes(doc.quirks).pseudo(which);
+        if ua.is_empty() && self.author.pseudo(which).is_empty() && self.scoped.values().all(|ix| ix.pseudo(which).is_empty()) {
             return None;
         }
         let el = ElementRef::new(doc, id, &self.state);
@@ -442,8 +456,8 @@ impl Styler {
         let mut caches = SelectorCaches::default();
         let mut matched = Vec::new();
         let mode = MatchingMode::ForStatelessPseudoElement;
-        ua.collect(el, mode, ORIGIN_UA, &bloom, &mut caches, &mut matched);
-        author.collect(el, mode, ORIGIN_AUTHOR, &bloom, &mut caches, &mut matched);
+        ua.collect(el, mode, ORIGIN_UA, Scope::UA, &bloom, &mut caches, &mut matched);
+        self.collect_author(el, mode, |ix| ix.pseudo(which), &bloom, &mut caches, &mut matched);
         if matched.is_empty() {
             return None;
         }
@@ -463,13 +477,15 @@ impl Styler {
         // Cascade order: normal declarations by origin, layer, specificity
         // and order; then author !important ones, where layers count the
         // other way round (an earlier layer's !important wins).
-        matched.sort_by_key(|m| (m.origin, m.layer, m.specificity, m.order));
+        // Between shadow trees ("context"), the outer tree's normal
+        // declarations win and the inner one's !important ones do.
+        matched.sort_by_key(|m| (m.origin, !m.inner, m.layer, m.specificity, m.order));
         let mut ordered: Vec<&Decl> = Vec::new();
         for m in &matched {
             ordered.extend(m.normal.iter());
         }
         let mut important: Vec<&Matched> = matched.iter().filter(|m| m.origin >= ORIGIN_AUTHOR && !m.important.is_empty()).collect();
-        important.sort_by_key(|m| (m.origin, std::cmp::Reverse(m.layer), m.specificity, m.order));
+        important.sort_by_key(|m| (m.origin, m.inner, std::cmp::Reverse(m.layer), m.specificity, m.order));
         for m in important {
             ordered.extend(m.important.iter());
         }
@@ -518,6 +534,44 @@ impl Styler {
         // (GitHub's tabs reserve their bold width with one).
         if matches!(parent.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid) {
             style.display = style.display.blockified();
+        }
+    }
+
+    /// Author rules matching `el`: those of the tree it's in (a shadow
+    /// tree's, or the document's), its own shadow tree's `:host` rules if
+    /// it's a host, and the `::slotted` rules of each tree it's slotted into.
+    fn collect_author<'s>(
+        &'s self,
+        el: ElementRef<'_>,
+        mode: MatchingMode,
+        index: impl Fn(&'s Indexes) -> &'s RuleIndex,
+        bloom: &BloomFilter,
+        caches: &mut SelectorCaches,
+        out: &mut Vec<Matched>,
+    ) {
+        let own = Scope { host: el.tree(), ..Scope::UA };
+        let tree = match own.host {
+            None => Some(&self.author),
+            Some(host) => self.scoped.get(&host),
+        };
+        if let Some(ix) = tree {
+            index(ix).collect(el, mode, ORIGIN_AUTHOR, own, bloom, caches, out);
+        }
+        if self.scoped.is_empty() {
+            return;
+        }
+        if let Some(ix) = self.scoped.get(&el.id) {
+            let host = Scope { host: Some(el.id), featureless: true, inner: true, slotted_only: false };
+            index(ix).collect(el, mode, ORIGIN_AUTHOR, host, bloom, caches, out);
+        }
+        let mut slot = el.slot();
+        while let Some(s) = slot {
+            let Some(host) = el.doc.tree_of(s) else { break };
+            if let Some(ix) = self.scoped.get(&host) {
+                let slotted = Scope { host: Some(host), featureless: false, inner: true, slotted_only: true };
+                index(ix).collect(el, mode, ORIGIN_AUTHOR, slotted, bloom, caches, out);
+            }
+            slot = ElementRef::new(el.doc, s, el.state).slot();
         }
     }
 
