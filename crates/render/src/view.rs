@@ -608,16 +608,69 @@ pub(crate) fn render_block_box(block: &Block, cx: &RenderCx) -> AnyElement {
 /// the page's own positioned boxes (a fixed header stays over thumbnails
 /// scrolling under it), with what's inside it drawn in place.
 pub fn render_fixed(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
-    let outer = DEFERRED_DEPTH.with(|d| d.replace(d.get() + 1));
-    let el = render_box(b, cx, b.margin(), false);
-    DEFERRED_DEPTH.with(|d| d.set(outer));
-    ClippedDeferred { child: Some(el), priority: FIXED_PRIORITY }.into_any_element()
+    // A fixed box always starts a stacking context.
+    deferred(b, true, || render_box(b, cx, b.margin(), false)).unwrap_or_else(|| render_box(b, cx, b.margin(), false))
 }
 
-/// Deferred-draw priorities: positioned boxes in the page, then the fixed
-/// layer over them.
-const POSITIONED_PRIORITY: usize = 1;
-const FIXED_PRIORITY: usize = 2;
+/// Does this box start a stacking context (its descendants' `z-index`
+/// order among themselves, not with the page)?
+fn stacking_context(b: &LayoutBox) -> bool {
+    matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some() || block.style.opacity < 1.0)
+}
+
+/// Draw `b` (built by `build`) in the deferred layer at its `z_priority`,
+/// unless it's inside a deferred stacking context (drawn in place there),
+/// or deferrals already nest too deep (GPUI allows 10).
+fn deferred(b: &LayoutBox, context: bool, build: impl FnOnce() -> AnyElement) -> Option<AnyElement> {
+    if DEFERRED_DEPTH.with(|d| d.get()) > 0 || DEFER_LEVELS.with(|d| d.get()) >= 8 {
+        return None;
+    }
+    DEFER_LEVELS.with(|d| d.set(d.get() + 1));
+    if context {
+        DEFERRED_DEPTH.with(|d| d.set(d.get() + 1));
+    }
+    let el = build();
+    if context {
+        DEFERRED_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+    DEFER_LEVELS.with(|d| d.set(d.get() - 1));
+    Some(ClippedDeferred { child: Some(el), priority: z_priority(b) }.into_any_element())
+}
+
+/// The deferred-draw priority of a positioned box: positioned boxes paint
+/// over in-flow content in `z-index` order (ties in tree order: the draw
+/// list is sorted stably, and the fixed layer is drawn after the page).
+/// One order for the page: stacking contexts nested in others are
+/// flattened into it.
+fn z_priority(b: &LayoutBox) -> usize {
+    let z = match b {
+        LayoutBox::Block(block) => block.style.z_index.unwrap_or(0),
+        _ => 0,
+    };
+    1 + z.clamp(0, 1_000_000) as usize
+}
+
+/// A relatively positioned (or sticky) box with a positive `z-index`: it
+/// stays where it is in the flow, but paints with the positioned boxes, in
+/// their order (NASA's hero text, z-index 400, under its z-index 200 shade).
+/// Flex and grid items' `z-index` counts without a `position` too.
+fn raised(b: &LayoutBox, item: bool) -> bool {
+    matches!(b, LayoutBox::Block(block)
+        if (item || matches!(block.style.position, style::Position::Relative | style::Position::Sticky))
+            && block.style.z_index.is_some_and(|z| z > 0))
+}
+
+/// Render an in-flow box, deferring it if it's `raised` (and not already
+/// inside a deferred box, where it's drawn in place).
+fn in_flow(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, flow: bool) -> AnyElement {
+    // `flow`: in block flow; else a flex or grid item.
+    if raised(b, !flow)
+        && let Some(el) = deferred(b, true, || render_box(b, cx, margin, flow))
+    {
+        return el;
+    }
+    render_box(b, cx, margin, flow)
+}
 
 pub(crate) fn is_out_of_flow(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed))
@@ -670,7 +723,7 @@ fn render_flow_children_in_order(children: &[LayoutBox], cx: &RenderCx) -> Vec<A
             let space = if ix == 0 { top } else { prev_bottom.max(top) };
             prev_bottom = m.bottom.px_or_zero();
             let bottom = if ix == last { prev_bottom } else { 0.0 };
-            render_box(child, cx, Edges { top: CssLength::Px(space), bottom: CssLength::Px(bottom), ..m }, true)
+            in_flow(child, cx, Edges { top: CssLength::Px(space), bottom: CssLength::Px(bottom), ..m }, true)
         })
         .collect()
 }
@@ -690,7 +743,7 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
             if is_out_of_flow(child) {
                 return positioned(child, cx, child.margin());
             }
-            render_box(child, cx, child.margin(), false)
+            in_flow(child, cx, child.margin(), false)
         })
         .collect::<Vec<_>>()
         .pipe(|els| behind_first(els, children))
@@ -1443,8 +1496,11 @@ fn behind(b: &LayoutBox) -> bool {
 }
 
 thread_local! {
-    /// How many deferred (positioned) boxes the one being built is inside.
+    /// How many deferred stacking contexts the box being built is inside
+    /// (in one, positioned descendants are drawn in place).
     static DEFERRED_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// How many deferred boxes, of any kind, it's inside.
+    static DEFER_LEVELS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A positioned box: drawn after the in-flow content, through GPUI's
@@ -1455,14 +1511,10 @@ fn positioned(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElem
     if behind(b) {
         return render_box(b, cx, margin, false);
     }
-    let outer = DEFERRED_DEPTH.with(|d| d.replace(d.get() + 1));
-    let el = render_box(b, cx, margin, false);
-    DEFERRED_DEPTH.with(|d| d.set(outer));
-    if outer > 0 { el } else { clipped_deferred(el) }
-}
-
-fn clipped_deferred(child: AnyElement) -> AnyElement {
-    ClippedDeferred { child: Some(child), priority: POSITIONED_PRIORITY }.into_any_element()
+    // With `z-index: auto` it's no stacking context: what's inside with a
+    // z-index of its own is ordered with the page (NASA's hero text, z-index
+    // 400 in a z-auto box, over its z-index 200 shade).
+    deferred(b, stacking_context(b), || render_box(b, cx, margin, false)).unwrap_or_else(|| render_box(b, cx, margin, false))
 }
 
 struct ClippedDeferred {

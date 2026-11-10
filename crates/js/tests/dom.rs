@@ -1078,7 +1078,7 @@ fn probe_styles() {
             println!("{}{}.{} display={:?} vis={} opacity={} h={:?}", "  ".repeat(level), e.name.local, class.split_whitespace().next().unwrap_or(""), s.display, s.visible, s.opacity, s.height);
         }
         if &*e.name.local == want || class.split_whitespace().any(|c| want.strip_prefix('.') == Some(c)) {
-            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible);
+            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={} pos={:?} z={:?} op={} grad={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible, s.position, s.z_index, s.opacity, s.gradients.is_some());
         }
         for &c in doc.children(n) {
             walk(doc, styler, c, &s, want, &path, depth, level + 1);
@@ -1167,4 +1167,30 @@ fn css_supports_answers_for_this_engine() {
           CSS.supports("selector(:has(a))")].join(" ");
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "true false false true true true");
+}
+
+#[test]
+fn unlaid_out_blocks_are_as_wide_as_their_container() {
+    // Before any layout: a block fills the viewport, inline boxes are 0.
+    let doc = run(r##"<body><div id="d"><p id="p">x</p><span id="s">y</span></div><p id="o"></p><script>
+        const w = (id) => document.getElementById(id).offsetWidth;
+        document.getElementById("o").textContent = [w("d") > 0, w("p") === w("d"), w("s"), document.getElementById("p").getBoundingClientRect().width > 0].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true 0 true");
+}
+
+#[test]
+fn get_computed_style_reads_the_cascade() {
+    let doc = run(r##"<head><style>
+        .box { display: flex; color: rgb(255, 0, 0); padding: 0 10px; --gap: 4px }
+        .box.on { display: none }
+        span { font-weight: 700 }
+    </style></head><body><div class="box" id="b"><span id="s">x</span></div><p id="o"></p><script>
+        const b = document.getElementById("b"), cs = getComputedStyle(b);
+        const out = [cs.display, cs.color, cs.paddingLeft, cs.getPropertyValue("--gap").trim(), getComputedStyle(document.getElementById("s")).fontWeight, parseFloat(cs.width) > 0];
+        b.classList.add("on");
+        out.push(getComputedStyle(b).display);
+        document.getElementById("o").textContent = out.join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "flex rgb(255, 0, 0) 10px 4px 700 true none");
 }

@@ -92,6 +92,14 @@ pub(crate) fn runnable(e: &ElementData) -> bool {
         }
 }
 
+impl Dom {
+    /// The document changed: send it, and recompute styles asked of it.
+    pub(crate) fn changed(&mut self) {
+        self.dirty = true;
+        self.generation += 1;
+    }
+}
+
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
 }
@@ -99,6 +107,10 @@ pub(crate) fn is_module(e: &ElementData) -> bool {
 pub(crate) struct Dom {
     pub doc: Document,
     pub dirty: bool,
+    /// Bumped on every change (computed styles are good until it moves).
+    pub generation: u64,
+    /// For `getComputedStyle`.
+    pub(crate) styles: crate::computed::StyleCache,
     /// (due, id)
     timers: Vec<(Instant, u32)>,
     /// Scripts inserted by scripts, to run after the current task.
@@ -186,6 +198,8 @@ impl Runtime {
             hosts: HashMap::new(),
             doc,
             dirty: false,
+            generation: 0,
+            styles: Default::default(),
             timers: Vec::new(),
             pending_scripts: Vec::new(),
             ran: HashSet::new(),
@@ -511,7 +525,7 @@ impl Runtime {
         let submit = self.dom.borrow_mut().submit.take();
         if let Some(form) = submit {
             // The tab reads the fields from the DOM it has: send that first.
-            self.dom.borrow_mut().dirty = true;
+            self.dom.borrow_mut().changed();
             self.last_sent = Instant::now() - SNAPSHOT_EVERY;
             self.flush_doc();
             self.updates.send_blocking(FromJs::Submit(form)).ok();
@@ -541,7 +555,7 @@ impl Runtime {
 
     pub fn event_loop(&mut self) {
         // Whatever the first paint missed.
-        self.dom.borrow_mut().dirty = true;
+        self.dom.borrow_mut().changed();
         self.last_sent = Instant::now() - SNAPSHOT_EVERY;
         self.flush();
         loop {
@@ -899,7 +913,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let text = arg_string(a, 1, cx)?;
         let mut dom = d.borrow_mut();
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::undefined()) };
-        dom.dirty = true;
+        dom.changed();
         match dom.doc.data_mut(n) {
             Some(NodeData::Text(t)) | Some(NodeData::Comment(t)) => *t = text,
             _ => {
@@ -943,7 +957,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         if let Some(e) = dom.doc.element_mut(n) {
             let name = attr_name(e, raw);
             set_attr(e, &name, value);
-            dom.dirty = true;
+            dom.changed();
         }
         Ok(JsValue::undefined())
     }));
@@ -956,7 +970,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             let before = e.attrs.len();
             e.attrs.retain(|at| &*at.name.local != name.as_str());
             if e.attrs.len() != before {
-                dom.dirty = true;
+                dom.changed();
             }
         }
         Ok(JsValue::undefined())
@@ -1021,7 +1035,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             }
             queue_scripts(&mut dom, m);
         }
-        dom.dirty = true;
+        dom.changed();
         Ok(JsValue::undefined())
     }));
     add("remove", 1, Box::new(|d, a, _| {
@@ -1030,7 +1044,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             && dom.doc.parent(n).is_some()
         {
             dom.doc.detach(n);
-            dom.dirty = true;
+            dom.changed();
         }
         Ok(JsValue::undefined())
     }));
@@ -1220,7 +1234,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let root = dom.doc.create(NodeData::Fragment);
         dom.shadows.insert(host, root);
         dom.hosts.insert(root, host);
-        dom.dirty = true;
+        dom.changed();
         Ok(JsValue::from(node_to_number(root)))
     }));
     // [host, root, host, root...]: the shadow roots that exist (declarative
@@ -1264,7 +1278,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsValue::undefined())
     }));
     add("touch", 0, Box::new(|d, _, _| {
-        d.borrow_mut().dirty = true;
+        d.borrow_mut().changed();
         Ok(JsValue::undefined())
     }));
     // FEATHER_EVAL=probe.js (FEATHER_EVAL_DELAY ms): [source, delay] or null.
@@ -1278,6 +1292,20 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("debugIO", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_DEBUG_IO").is_some()))));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));
+    // getComputedStyle: (id, property, laid-out width, height (-1: none),
+    // viewport width, height).
+    add("computedStyle", 6, Box::new(|d, a, cx| {
+        let prop = arg_string(a, 1, cx)?;
+        let num = |i: usize| a.get(i).and_then(|v| v.as_number()).unwrap_or(-1.0) as f32;
+        let mut dom = d.borrow_mut();
+        let Some(id) = arg_node(&dom, a, 0) else { return Ok(js_str("")) };
+        let Dom { doc, styles, generation, dark, .. } = &mut *dom;
+        let env = style::MediaEnv { width: num(4), height: num(5), dark: *dark, scripting: true };
+        let fetch = |u: &Url| net::fetch_text_cached(u);
+        let Some(style) = styles.style_of(doc, id, *generation, env, &fetch) else { return Ok(js_str("")) };
+        let size = (num(2) >= 0.0).then(|| (num(2), num(3).max(0.0)));
+        Ok(js_str(&crate::computed::value(&style, &prop, size, *dark)))
+    }));
     // CSS.supports(property, value) / CSS.supports(condition).
     add("cssSupports", 2, Box::new(|_, a, cx| {
         let first = arg_string(a, 0, cx)?;
@@ -1309,7 +1337,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             if let Some(e) = dom.doc.element_mut(n) {
                 set_attr(e, "value", v);
             }
-            dom.dirty = true;
+            dom.changed();
         }
         Ok(JsValue::undefined())
     }));
@@ -1814,7 +1842,7 @@ fn declarative_shadow_roots(dom: &mut Dom) {
             dom.doc.detach(t);
             dom.shadows.insert(host, root);
             dom.hosts.insert(root, host);
-            dom.dirty = true;
+            dom.changed();
             scopes.push(root);
         }
     }

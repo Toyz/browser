@@ -893,7 +893,7 @@
     matches(sel) { return N.matches(this.__id, String(sel)); }
     webkitMatchesSelector(sel) { return this.matches(sel); }
     closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
-    getBoundingClientRect() { const r = measure(this); return r ? domRect(r[0], r[1], r[2], r[3]) : domRect(0, 0, 0, 0); }
+    getBoundingClientRect() { const r = measure(this); return r ? domRect(r[0], r[1], r[2], r[3]) : domRect(0, 0, estimatedWidth(this), 0); }
     getClientRects() { const r = measure(this); return r ? [domRect(r[0], r[1], r[2], r[3])] : []; }
     scrollIntoView() {}
     scrollTo() {}
@@ -1969,6 +1969,29 @@
     }
   }
 
+  // getComputedStyle: the style engine's values (natively), with the size
+  // the tab laid the element out at (or, before that, a block's estimate).
+  function computedStyleOf(el) {
+    const read = (name) => {
+      if (!el || el.__id === undefined || el.nodeType !== 1) return "";
+      name = String(name);
+      const prop = name.startsWith("--") ? name : kebab(name);
+      let w = -1, h = -1;
+      if (prop === "width" || prop === "height") {
+        const r = measure(el);
+        if (r) { w = r[2]; h = r[3]; }
+        else if (prop === "width") { const e = estimatedWidth(el); if (e > 0) w = e; }
+      }
+      return N.computedStyle(el.__id, prop, w, h, viewport[0], viewport[1]);
+    };
+    const api = {
+      getPropertyValue: (n) => read(n), getPropertyPriority: () => "", item: () => "", length: 0, cssText: "",
+      setProperty() { throw new DOMException("Computed styles are read-only", "NoModificationAllowedError"); },
+      removeProperty() { throw new DOMException("Computed styles are read-only", "NoModificationAllowedError"); },
+    };
+    return new Proxy(api, { get(t, p) { if (p in t) return t[p]; if (typeof p !== "string") return undefined; return read(p); } });
+  }
+
   // matchMedia: evaluated by the style engine's media queries (natively),
   // against the viewport the tab reports; lists re-check on resize and
   // fire `change` when their answer flips.
@@ -2013,7 +2036,33 @@
   const domRect = (x, y, width, height) => ({ x, y, width, height, top: y, left: x, right: x + width, bottom: y + height, toJSON() { return this; } });
   // <html> and <body> have no box of their own here: they span the viewport.
   function rootSize(el, axis) {
-    return el === document.documentElement || el === document.body ? viewport[axis] : 0;
+    if (el === document.documentElement || el === document.body) return viewport[axis];
+    return axis === 0 ? estimatedWidth(el) : 0;
+  }
+  // The width of an element the tab hasn't laid out yet (scripts measure
+  // what they just made, where a browser lays out on the spot): a block
+  // fills its container, so the nearest laid-out ancestor's width, else
+  // the viewport's. Inline boxes are as wide as their text: 0 here.
+  // (Carousels size their slides from this: NASA's were 0px wide.)
+  const INLINE_TAGS = new Set(["span", "a", "b", "i", "em", "strong", "small", "label", "img", "svg", "code", "abbr", "sup", "sub", "br", "input", "button", "select", "textarea", "video", "canvas", "iframe"]);
+  const cssOf = (el, prop) => N.computedStyle(el.__id, prop, -1, -1, viewport[0], viewport[1]);
+  function estimatedWidth(el) {
+    if (!el || INLINE_TAGS.has(el.localName) || !N.connected(el.__id)) return 0;
+    // Only a block in block flow fills its container: flex items in a row,
+    // inline-level and table boxes are as wide as their content (GitHub
+    // collapsed its breadcrumbs, each crumb "as wide as the page").
+    if (!/^(block|flex|grid|list-item|flow-root)$/.test(cssOf(el, "display"))) return 0;
+    const parent = el.parentNode;
+    if (parent && parent.nodeType === 1) {
+      const pd = cssOf(parent, "display");
+      if (/flex|grid/.test(pd) && !(/flex/.test(pd) && /column/.test(cssOf(parent, "flex-direction")))) return 0;
+      if (/inline|table/.test(pd)) return 0;
+    }
+    for (let n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+      const r = painted.has(n.__id) && layoutRects.get(n.__id);
+      if (r) return r[2];
+    }
+    return viewport[0];
   }
   function measure(el) {
     if (!el || el.__id === undefined) return null;
@@ -2347,7 +2396,7 @@
     })(),
     localStorage: storage("local"), sessionStorage: storage("session"),
     matchMedia,
-    getComputedStyle: (el) => el.style,
+    getComputedStyle: computedStyleOf,
     MutationObserver, MutationRecord: class MutationRecord {},
     IntersectionObserver, IntersectionObserverEntry,
     ResizeObserver, NodeFilter, TreeWalker,
