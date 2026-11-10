@@ -198,6 +198,22 @@ pub(super) fn painted_rect(dom: &Dom, node: NodeId) -> Option<[f32; 4]> {
     None
 }
 
+/// Where an element the tab hasn't laid out yet probably is: its nearest
+/// laid-out ancestor's top left (a script just made it), not the page's
+/// origin. (GitHub's sticky issue sidebar read a new 0x0 marker's
+/// offsetTop once, got 0, and pushed the sidebar 1436px down.)
+fn origin_estimate(dom: &Dom, node: NodeId) -> (f32, f32) {
+    let g = &dom.geometry;
+    let mut n = dom.doc.parent(node);
+    while let Some(p) = n {
+        if let Some(r) = g.rects.get(&p).filter(|_| !g.unpainted.contains(&p)) {
+            return (r[0], r[1]);
+        }
+        n = dom.doc.parent(p).or_else(|| dom.hosts.get(&p).copied());
+    }
+    (0.0, 0.0)
+}
+
 /// Elements whose box is as wide as their content (0 before layout).
 const INLINE_TAGS: &[&str] = &[
     "span", "a", "b", "i", "em", "strong", "small", "label", "img", "svg", "code", "abbr", "sup", "sub", "br", "input", "button", "select", "textarea",
@@ -416,7 +432,10 @@ fn arg_method(d: &Shared, name: &str, f: ArgMethod, cx: &mut Context) -> JsObjec
 fn install_on(d: &Shared, proto: &JsObject, cx: &mut Context) -> JsResult<()> {
     let methods: [(&str, Method); 2] = [
         ("getBoundingClientRect", |d, n, cx| {
-            let r = measure(d, n).unwrap_or_else(|| [0.0, 0.0, estimated_width(&mut d.borrow_mut(), n), 0.0]);
+            let r = measure(d, n).unwrap_or_else(|| {
+                let (x, y) = origin_estimate(&d.borrow(), n);
+                [x, y, estimated_width(&mut d.borrow_mut(), n), 0.0]
+            });
             dom_rect(r, cx)
         }),
         ("getClientRects", |d, n, cx| {
@@ -438,12 +457,12 @@ fn install_on(d: &Shared, proto: &JsObject, cx: &mut Context) -> JsResult<()> {
         ("offsetHeight", |d, n, _| rounded(box_size(d, n, 1))),
         // Relative to the page (the body: no other offset parents here).
         ("offsetTop", |d, n, _| {
-            let r = measure(d, n);
-            rounded(r.map_or(0.0, |r| r[1] + d.borrow().scroll.1))
+            let y = measure(d, n).map_or_else(|| origin_estimate(&d.borrow(), n).1, |r| r[1]);
+            rounded(y + d.borrow().scroll.1)
         }),
         ("offsetLeft", |d, n, _| {
-            let r = measure(d, n);
-            rounded(r.map_or(0.0, |r| r[0] + d.borrow().scroll.0))
+            let x = measure(d, n).map_or_else(|| origin_estimate(&d.borrow(), n).0, |r| r[0]);
+            rounded(x + d.borrow().scroll.0)
         }),
     ];
     for (name, f) in getters {
