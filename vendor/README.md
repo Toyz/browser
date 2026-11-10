@@ -23,6 +23,13 @@ too, so the method's binding was never kept and the inner arrow saw the wrong
 `this` (and `this.#private` threw "Private element does not exist on object",
 which broke GitHub's React app). The fix marks every enclosing function scope.
 
+## boa_engine 0.22.0
+
+- `src/vm/inline_cache/mod.rs`: an inline cache's entries are allocated
+  when the first one is cached (`Option<Box<ArrayVec<..>>>`), not inline.
+  Every property access in every compiled function has a cache, and most of
+  a large bundle never runs: inline, they were 84 MB of YouTube's heap.
+
 ## boa_gc 0.22.0
 
 One change, in `src/lib.rs` (`GcConfig::default`): collections start at
