@@ -113,6 +113,8 @@ pub(crate) struct Dom {
     traverse: Option<i32>,
     /// `form.submit()` for the tab to carry out.
     submit: Option<NodeId>,
+    /// Where scripts moved focus since the last flush (`Some(None)`: blurred).
+    focus: Option<Option<NodeId>>,
     /// Form field values from the page (by node).
     values: HashMap<NodeId, String>,
     debug: bool,
@@ -182,6 +184,7 @@ impl Runtime {
             pending_scripts: Vec::new(),
             ran: HashSet::new(),
             navigate: None,
+            focus: None,
             url_changes: Vec::new(),
             traverse: None,
             canvases: HashMap::new(),
@@ -480,6 +483,10 @@ impl Runtime {
         if let Some(delta) = traverse {
             self.updates.send_blocking(FromJs::Traverse(delta)).ok();
         }
+        let focus = self.dom.borrow_mut().focus.take();
+        if let Some(node) = focus {
+            self.updates.send_blocking(FromJs::Focus(node)).ok();
+        }
         let navigate = self.dom.borrow_mut().navigate.take();
         if let Some(url) = navigate {
             self.updates.send_blocking(FromJs::Navigate(url)).ok();
@@ -591,6 +598,10 @@ impl Runtime {
                     .collect();
                 let flat = JsArray::from_iter(flat, &mut self.cx);
                 self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1)]);
+            }
+            ToJs::Focus { node } => {
+                let id = node.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
+                self.call_global("__setFocus", &[id]);
             }
             ToJs::Traverse { delta } => {
                 self.call_global("__traverse", &[JsValue::from(delta)]);
@@ -1179,6 +1190,13 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     }));
     // Something only scripts can see changed how the page looks (a
     // constructed stylesheet): send a new DOM.
+    // Scripts focused an element (or blurred, with null): the tab follows.
+    add("setFocus", 1, Box::new(|d, a, _| {
+        let mut dom = d.borrow_mut();
+        let node = arg_node(&dom, a, 0);
+        dom.focus = Some(node);
+        Ok(JsValue::undefined())
+    }));
     add("touch", 0, Box::new(|d, _, _| {
         d.borrow_mut().dirty = true;
         Ok(JsValue::undefined())

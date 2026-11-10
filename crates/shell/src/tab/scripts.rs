@@ -30,6 +30,7 @@ impl Tab {
                         js::FromJs::Navigate(url) => this.navigate(url, window, cx),
                         js::FromJs::Submit(form) => this.submit_native(form, None, window, cx),
                         js::FromJs::UrlChanged { url, replace } => this.script_url_changed(url, replace, cx),
+                        js::FromJs::Focus(node) => this.script_focus(node, window, cx),
                         js::FromJs::Traverse(delta) => {
                             if delta < 0 {
                                 this.go_back(window, cx)

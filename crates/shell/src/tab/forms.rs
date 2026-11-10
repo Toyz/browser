@@ -289,15 +289,44 @@ impl Tab {
                 }
             }
             InputEvent::Focus => {
-                self.forms.focused = Some(node);
-                self.interaction_changed(window, cx);
+                if self.forms.focused != Some(node) {
+                    self.forms.focused = Some(node);
+                    self.tell_scripts_focus();
+                    self.interaction_changed(window, cx);
+                }
             }
             InputEvent::Blur if self.forms.focused == Some(node) => {
                 self.forms.focused = None;
+                self.tell_scripts_focus();
                 self.interaction_changed(window, cx);
             }
             _ => {}
         }
+    }
+
+    /// The tab's focus changed: the page's scripts hear about it.
+    fn tell_scripts_focus(&self) {
+        if let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref()) {
+            host.send(js::ToJs::Focus { node: self.forms.focused });
+        }
+    }
+
+    /// Scripts focused `node` (or blurred, with `None`): move the tab's
+    /// focus there, so `:focus` and the text cursor follow. (No message
+    /// back: they already know.)
+    pub(super) fn script_focus(&mut self, node: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.forms.focused == node {
+            return;
+        }
+        self.forms.focused = node;
+        match node.and_then(|n| self.forms.fields.get(&n)) {
+            Some(Field::Line(state)) => state.update(cx, |s, cx| s.focus(window, cx)),
+            Some(Field::Area(state)) => state.update(cx, |s, cx| s.focus(window, cx)),
+            // Something else, or nothing: the page itself keeps keyboard
+            // focus (a field that had it lets go).
+            None => self.focus_handle.focus(window, cx),
+        }
+        self.interaction_changed(window, cx);
     }
 
     /// A button, label, checkbox... was clicked.

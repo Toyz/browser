@@ -81,6 +81,9 @@ pub enum ToJs {
     /// Back/forward between history entries of this document (made by
     /// `pushState`): `popstate` with the entry `delta` steps away.
     Traverse { delta: i32 },
+    /// The tab focused a field (or nothing): scripts hear `blur`/`focusout`
+    /// on the old one and `focus`/`focusin` on the new one.
+    Focus { node: Option<NodeId> },
     /// An image a script loaded finished: its size, or `None` if it failed.
     Image { id: u32, size: Option<(u32, u32)> },
     Shutdown,
@@ -99,6 +102,8 @@ pub enum FromJs {
     UrlChanged { url: Url, replace: bool },
     /// `history.back()` / `forward()` / `go(n)`.
     Traverse(i32),
+    /// Scripts moved focus (`el.focus()`, `el.blur()`): `None` is nothing.
+    Focus(Option<NodeId>),
 }
 
 /// The tab's handle on a page's script thread.

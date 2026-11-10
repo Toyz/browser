@@ -571,8 +571,25 @@
   const clickListeners = new Set();
   // Legacy keyCode for the keys pages still check that way.
   const KEY_CODES = { Enter: 13, Escape: 27, Backspace: 8, Tab: 9, " ": 32, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34, Shift: 16, Control: 17, Alt: 18, Meta: 91 };
-  // The form field focused in the tab (scripts' document.activeElement).
+  // The focused element (document.activeElement), shared with the tab: its
+  // focus changes arrive through __setFocus, scripts' go to it through
+  // N.setFocus.
   let focusedElement = null;
+  // Focus moves to `el` (or nowhere): blur/focusout on the old element,
+  // focus/focusin on the new one.
+  function moveFocus(el) {
+    const old = focusedElement;
+    if (old === el) return;
+    focusedElement = el;
+    if (old) {
+      old.dispatchEvent(new FocusEvent("blur", { relatedTarget: el }));
+      old.dispatchEvent(new FocusEvent("focusout", { bubbles: true, composed: true, relatedTarget: el }));
+    }
+    if (el) {
+      el.dispatchEvent(new FocusEvent("focus", { relatedTarget: old }));
+      el.dispatchEvent(new FocusEvent("focusin", { bubbles: true, composed: true, relatedTarget: old }));
+    }
+  }
   const mouseListeners = new Set();
   const MOUSE_TYPES = ["mousedown", "mouseup", "mousemove", "dblclick", "wheel", "pointerdown", "pointerup", "pointermove", "contextmenu"];
 
@@ -887,8 +904,8 @@
     scrollIntoView() {}
     scrollTo() {}
     scroll() {}
-    focus() { if (focusedElement !== this) { focusedElement = this; this.dispatchEvent(new FocusEvent("focus")); this.dispatchEvent(new FocusEvent("focusin", { bubbles: true })); } }
-    blur() { if (focusedElement === this) { focusedElement = null; this.dispatchEvent(new FocusEvent("blur")); this.dispatchEvent(new FocusEvent("focusout", { bubbles: true })); } }
+    focus() { if (focusedElement !== this) { moveFocus(this); N.setFocus(this.__id); } }
+    blur() { if (focusedElement === this) { moveFocus(null); N.setFocus(null); } }
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
     attachShadow(init) {
       // A declarative shadow root is handed over, emptied, the first time.
@@ -3301,8 +3318,9 @@
       if (listens(window) || listens(document)) out.push(N.root());
       return out;
     },
+    __setFocus(id) { moveFocus(id === null ? null : wrap(id)); },
     __dispatchKey(kind, key, code, id, ctrl, shift, alt, meta) {
-      if (id !== null) focusedElement = wrap(id);
+      if (id !== null && focusedElement !== wrap(id)) moveFocus(wrap(id));
       const target = (id !== null && wrap(id)) || focusedElement || document.body || document.documentElement;
       if (!target) return;
       const init = { bubbles: true, cancelable: true, composed: true, key, code, ctrlKey: ctrl, shiftKey: shift, altKey: alt, metaKey: meta, repeat: false, location: 0, isComposing: false };

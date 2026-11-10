@@ -925,3 +925,46 @@ fn svg_elements_have_style() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "true false object fill: red");
 }
+
+#[test]
+fn focus_is_shared_with_the_tab() {
+    let doc = html::parse_scripted(
+        r##"<body><input id="a"><input id="b"><p id="o"></p><script>
+        const log = [];
+        const say = () => { document.getElementById("o").textContent = log.join(" ") + " |"; };
+        for (const id of ["a", "b"]) {
+          const el = document.getElementById(id);
+          el.addEventListener("focus", () => { log.push("focus:" + id); say(); });
+          el.addEventListener("blur", () => { log.push("blur:" + id); say(); });
+        }
+        // The tab focusing `a` reaches scripts as events; scripts moving
+        // focus to `b` and then away reaches the tab.
+        document.getElementById("a").addEventListener("focus", () => {
+          setTimeout(() => { document.getElementById("b").focus(); document.getElementById("b").blur(); }, 0);
+        });
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
+    let id = |doc: &page::Document, name: &str| doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(name)).unwrap();
+    let (a, b) = (id(&doc, "a"), id(&doc, "b"));
+    let (_, host) = js::start(doc, opts);
+    let host = host.unwrap();
+    host.send(js::ToJs::Focus { node: Some(a) });
+    let mut text = String::new();
+    let mut focus_moves = Vec::new();
+    let until = std::time::Instant::now() + Duration::from_secs(3);
+    while !text.contains("blur:b") && std::time::Instant::now() < until {
+        match host.updates.try_recv() {
+            Ok(js::FromJs::Document(d)) => text = text_of(&d, "o"),
+            Ok(js::FromJs::Focus(n)) => focus_moves.push(n),
+            _ => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert_eq!(text, "focus:a blur:a focus:b blur:b |");
+    // The tab hears where scripts left focus (nowhere), not the tab's own move.
+    assert_eq!(focus_moves.last(), Some(&None));
+    assert!(!focus_moves.contains(&Some(a)));
+    let _ = b;
+}
