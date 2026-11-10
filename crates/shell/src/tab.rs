@@ -114,6 +114,8 @@ pub struct Tab {
     _script_styles: Option<Task<()>>,
     /// A link click already went to the scripts (mouse up shouldn't again).
     script_clicked: bool,
+    /// The last mouse move was over something scripts listen to.
+    script_hovering: bool,
     _refresh: Option<Task<()>>,
     _restyle: Option<Task<()>>,
     /// Painted boxes of the elements scripts measure ([x, y, w, h] in the
@@ -244,6 +246,7 @@ impl Tab {
             _scripts_task: None,
             _script_styles: None,
             script_clicked: false,
+            script_hovering: false,
             _refresh: None,
             _restyle: None,
             restyle_busy: false,
@@ -1624,6 +1627,7 @@ impl Tab {
             shown_images: self.shown_images.clone(),
             images_generation: self.images_generation,
             round_clip: None,
+            stacking: (0, 0),
             fonts_generation: self.fonts_generation,
             track_hover,
             wants_bounds: {

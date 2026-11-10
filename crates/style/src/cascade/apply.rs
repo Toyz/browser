@@ -352,6 +352,26 @@ impl Styler {
                     .collect();
                 s.shadows = (!shadows.is_empty()).then(|| shadows.into());
             }
+            Decl::Filter(None) => s.filter = None,
+            Decl::Filter(Some(specs)) => {
+                let px = |l: Option<&LenSpec>| l.map(|l| len(l).px_or_zero()).unwrap_or(0.0);
+                let list: Vec<Filter> = specs
+                    .iter()
+                    .map(|f| match f {
+                        FilterSpec::Color(c) => *c,
+                        FilterSpec::Blur(l) => Filter::Blur(px(Some(l)).max(0.0)),
+                        FilterSpec::DropShadow(sp) => Filter::DropShadow(Shadow {
+                            x: px(sp.lengths.first()),
+                            y: px(sp.lengths.get(1)),
+                            blur: px(sp.lengths.get(2)).max(0.0),
+                            spread: 0.0,
+                            color: sp.color,
+                            inset: false,
+                        }),
+                    })
+                    .collect();
+                s.filter = (!list.is_empty()).then(|| list.into());
+            }
             Decl::Masked(v) => s.masked = *v,
             Decl::Content(v) => s.content = v.clone(),
             Decl::Float(v) => s.float = *v,

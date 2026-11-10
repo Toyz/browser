@@ -10,7 +10,7 @@ use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{
-    AnyElement, AssetSource, Image, ImageFormat, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
+    AnyElement, AssetSource, Image, ImageFormat, ImageSource, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
     Img, Pixels, Styled, StyledImage, div, img, px, relative,
 };
 use url::Url;
@@ -19,7 +19,8 @@ use url::Url;
 pub enum ImageState {
     Loading,
     /// Intrinsic size in image pixels; `padded`: see [`Prepared::padded`].
-    Ready { image: Arc<Image>, padded: Option<Arc<RenderImage>>, width: f32, height: f32 },
+    /// `frames`: an animation's frames, decoded (see [`Prepared::frames`]).
+    Ready { image: Arc<Image>, padded: Option<Arc<RenderImage>>, frames: Option<Arc<RenderImage>>, width: f32, height: f32 },
     Failed,
 }
 
@@ -33,13 +34,17 @@ pub struct Prepared {
     /// frame. Drawn a source pixel larger and clipped, the blur falls in
     /// the repeated border instead.
     pub padded: Option<Arc<RenderImage>>,
+    /// GIFs and animated WebPs, decoded here: every frame (BGRA) with its
+    /// delay. GPUI's own decoding of an encoded WebP keeps only the first
+    /// frame, and decoded frames can be filtered (CSS `filter`).
+    pub frames: Option<Arc<RenderImage>>,
     pub width: f32,
     pub height: f32,
 }
 
 impl Prepared {
     pub fn into_state(self) -> ImageState {
-        ImageState::Ready { image: self.image, padded: self.padded, width: self.width, height: self.height }
+        ImageState::Ready { image: self.image, padded: self.padded, frames: self.frames, width: self.width, height: self.height }
     }
 }
 
@@ -72,7 +77,7 @@ pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32
 /// The same with rounded corners (top-left, top-right, bottom-right,
 /// bottom-left).
 pub fn picture_rounded(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32, corners: [Pixels; 4]) -> AnyElement {
-    picture_fitted(image, padded, width, height, corners, style::ObjectFit::Fill, None)
+    picture_fitted(image.clone(), padded, width, height, corners, style::ObjectFit::Fill, None)
 }
 
 /// The same, fitted per CSS `object-fit` (cropped by `cover`).
@@ -119,7 +124,7 @@ fn cover_crop(padded: &Arc<RenderImage>, ratio: f32) -> Option<Arc<RenderImage>>
 }
 
 pub fn picture_fitted(
-    image: &Arc<Image>,
+    image: impl Into<ImageSource>,
     padded: &Option<Arc<RenderImage>>,
     width: f32,
     height: f32,
@@ -146,8 +151,9 @@ pub fn picture_fitted(
         style::ObjectFit::None => Some(ObjectFit::None),
         style::ObjectFit::ScaleDown => Some(ObjectFit::ScaleDown),
     };
+    let image: ImageSource = image.into();
     if let Some(fit) = fit {
-        return round(img(image.clone())).size_full().object_fit(fit).into_any_element();
+        return round(img(image)).size_full().object_fit(fit).into_any_element();
     }
     match padded {
         Some(p) if width > 0.0 && height > 0.0 => div()
@@ -164,8 +170,89 @@ pub fn picture_fitted(
                     .object_fit(ObjectFit::Fill),
             )
             .into_any_element(),
-        _ => round(img(image.clone())).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+        _ => round(img(image)).size_full().object_fit(ObjectFit::Fill).into_any_element(),
     }
+}
+
+/// One BGRA pixel (straight alpha) through `filters`' colors.
+fn filter_bgra(px: &mut [u8; 4], filters: &[style::Filter]) {
+    let c = [px[2] as f32 / 255.0, px[1] as f32 / 255.0, px[0] as f32 / 255.0, px[3] as f32 / 255.0];
+    let [r, g, b, a] = filters.iter().fold(c, |c, f| f.color(c));
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    *px = [q(b), q(g), q(r), q(a)];
+}
+
+/// A loaded picture as CSS `filter` color functions leave it: the picture
+/// to draw and its padded raster (see [`Prepared::padded`]). Unchanged
+/// without filters, or for pictures not decoded here (GIFs, SVGs).
+pub fn filtered(
+    image: &Arc<Image>,
+    padded: &Option<Arc<RenderImage>>,
+    frames: &Option<Arc<RenderImage>>,
+    filters: Option<&[style::Filter]>,
+) -> (ImageSource, Option<Arc<RenderImage>>) {
+    let colors: Vec<style::Filter> = filters.unwrap_or_default().iter().copied().filter(|f| f.is_color()).collect();
+    thread_local! {
+        static FILTERED: RefCell<HashMap<(usize, String), (Arc<RenderImage>, Arc<RenderImage>)>> = RefCell::default();
+        static ANIMATIONS: RefCell<HashMap<(usize, String), Arc<RenderImage>>> = RefCell::default();
+    }
+    // An animation: every frame, filtered.
+    if let Some(frames) = frames {
+        if colors.is_empty() {
+            return (frames.clone().into(), None);
+        }
+        let key = (Arc::as_ptr(frames) as usize, format!("{colors:?}"));
+        if let Some(hit) = ANIMATIONS.with_borrow(|c| c.get(&key).cloned()) {
+            return (hit.into(), None);
+        }
+        let out: Vec<image::Frame> = (0..frames.frame_count())
+            .filter_map(|i| {
+                let size = frames.size(i);
+                let mut buf = image::RgbaImage::from_raw(size.width.0 as u32, size.height.0 as u32, frames.as_bytes(i)?.to_vec())?;
+                for px in buf.pixels_mut() {
+                    filter_bgra(&mut px.0, &colors);
+                }
+                Some(image::Frame::from_parts(buf, 0, 0, frames.delay(i)))
+            })
+            .collect();
+        let out = Arc::new(RenderImage::new(out));
+        ANIMATIONS.with_borrow_mut(|c| {
+            if c.len() > 128 {
+                c.clear();
+            }
+            c.insert(key, out.clone());
+        });
+        return (out.into(), None);
+    }
+    let Some(p) = padded.as_ref().filter(|_| !colors.is_empty()) else {
+        return (image.clone().into(), padded.clone());
+    };
+    let key = (Arc::as_ptr(p) as usize, format!("{colors:?}"));
+    if let Some((plain, padded)) = FILTERED.with_borrow(|c| c.get(&key).cloned()) {
+        return (plain.into(), Some(padded));
+    }
+    let size = p.size(0);
+    let (pw, ph) = (size.width.0 as u32, size.height.0 as u32);
+    let Some(bytes) = p.as_bytes(0).filter(|_| pw >= 3 && ph >= 3) else {
+        return (image.clone().into(), padded.clone());
+    };
+    // BGRA, straight alpha.
+    let Some(mut out) = image::RgbaImage::from_raw(pw, ph, bytes.to_vec()) else {
+        return (image.clone().into(), padded.clone());
+    };
+    for px in out.pixels_mut() {
+        filter_bgra(&mut px.0, &colors);
+    }
+    let plain = image::imageops::crop_imm(&out, 1, 1, pw - 2, ph - 2).to_image();
+    let plain = Arc::new(RenderImage::new(vec![image::Frame::new(plain)]));
+    let padded = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
+    FILTERED.with_borrow_mut(|c| {
+        if c.len() > 256 {
+            c.clear();
+        }
+        c.insert(key, (plain.clone(), padded.clone()));
+    });
+    (plain.into(), Some(padded))
 }
 
 /// Images for the current page, filled in as they arrive.
@@ -227,8 +314,41 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
     if width <= 0.0 || height <= 0.0 {
         bail!("empty image");
     }
-    let padded = padded(&bytes, format);
-    Ok(Prepared { image: Arc::new(Image::from_bytes(format, bytes)), padded, width, height })
+    let frames = animation(&bytes, format, width * height);
+    let padded = if frames.is_some() { None } else { padded(&bytes, format) };
+    Ok(Prepared { image: Arc::new(Image::from_bytes(format, bytes)), padded, frames, width, height })
+}
+
+/// A GIF's or animated WebP's frames, decoded to BGRA (`area`: one
+/// frame's, in pixels; very long or large animations are left to GPUI).
+fn animation(bytes: &[u8], format: ImageFormat, area: f32) -> Option<Arc<RenderImage>> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+    const MAX_PIXELS: f32 = 64.0 * 1024.0 * 1024.0;
+    let frames: Box<dyn Iterator<Item = image::ImageResult<image::Frame>>> = match format {
+        ImageFormat::Gif => Box::new(image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?.into_frames()),
+        ImageFormat::Webp => {
+            let mut decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            if !decoder.has_animation() {
+                return None;
+            }
+            let _ = decoder.set_background_color(image::Rgba([0, 0, 0, 0]));
+            Box::new(decoder.into_frames())
+        }
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for frame in frames {
+        let Ok(mut frame) = frame else { continue };
+        if (out.len() + 1) as f32 * area > MAX_PIXELS {
+            return None;
+        }
+        for px in frame.buffer_mut().chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        out.push(frame);
+    }
+    (!out.is_empty()).then(|| Arc::new(RenderImage::new(out)))
 }
 
 fn looks_like_svg(bytes: &[u8]) -> bool {

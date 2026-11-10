@@ -55,7 +55,7 @@ impl InlineFlow {
         Self {
             id: ElementId::NamedInteger("inline".into(), para.id as u64),
             para,
-            cx: RenderCx { round_clip: crate::view::current_round_clip(), ..cx.clone() },
+            cx: RenderCx { round_clip: crate::view::current_round_clip(), stacking: crate::view::current_stacking(), ..cx.clone() },
             state: Rc::default(),
             blocks: Vec::new(),
             leaf: None,
@@ -745,7 +745,7 @@ fn place(
                         let (w, h) = (m.width - ml - mr, m.ascent);
                         let (t, r, b, l) = edges(&image.style);
                         let picture = match &crate::view::shown_image(image, cx) {
-                            Some(ImageState::Ready { image: picture, padded, width, height }) => div()
+                            Some(ImageState::Ready { image: picture, padded, frames, width, height }) => div()
                                 .w(w - l - r)
                                 .h(h - t - b)
                                 .child(
@@ -769,7 +769,8 @@ fn place(
                                                 own,
                                             );
                                             let ratio = f32::from(w - l - r) / f32::from(h - t - b).max(1.0);
-                                            crate::images::picture_fitted(picture, padded, *width, *height, corners, image.style.object_fit, Some(ratio))
+                                            let (picture, padded) = crate::images::filtered(picture, padded, frames, cx.palette.filter.as_deref());
+                                            crate::images::picture_fitted(picture, &padded, *width, *height, corners, image.style.object_fit, Some(ratio))
                                         }),
                                 )
                                 .into_any_element(),

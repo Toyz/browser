@@ -1240,6 +1240,9 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// Feather: what painting maps every point through (`p * scale +
+    /// offset`), for CSS `transform: scale()` (see [`Window::with_paint_scale`]).
+    paint_scale: (f32, Point<Pixels>),
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2368,6 +2371,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            paint_scale: (1.0, Point::default()),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -3448,6 +3452,7 @@ impl Window {
         exclusions: &[Range<ScaledPixels>],
     ) {
         self.invalidator.debug_assert_paint();
+        let (origin, width) = (self.scaled_point(origin), self.scaled_len(width));
         let underline = self.underline(origin, width, style);
         if exclusions.is_empty() {
             self.next_frame.scene.insert_primitive(underline);
@@ -4393,7 +4398,8 @@ impl Window {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         self.invalidator.debug_assert_paint_or_prepaint();
-        if let Some(mask) = mask {
+        if let Some(mut mask) = mask {
+            mask.bounds = self.scaled_bounds(mask.bounds);
             let mask = mask.intersect(&self.content_mask());
             self.content_mask_stack.push(mask);
             let result = f(self);
@@ -4524,6 +4530,49 @@ impl Window {
             .last()
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Feather: paint what `f` paints scaled by `scale` about `pivot` (CSS
+    /// `transform: scale()`), on top of any scale already in effect. Only
+    /// drawing changes: layout and hit testing stay where they were.
+    pub fn with_paint_scale<R>(&mut self, pivot: Point<Pixels>, scale: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        if scale == 1.0 || !scale.is_finite() {
+            return f(self);
+        }
+        let outer = self.paint_scale;
+        // outer(pivot + (p - pivot) * scale)
+        let (s, t) = outer;
+        let offset = point(pivot.x * (1.0 - scale) * s, pivot.y * (1.0 - scale) * s) + t;
+        self.paint_scale = (s * scale, offset);
+        let result = f(self);
+        self.paint_scale = outer;
+        result
+    }
+
+    /// Feather: `p` where the current paint scale puts it.
+    #[inline]
+    fn scaled_point(&self, p: Point<Pixels>) -> Point<Pixels> {
+        let (s, t) = self.paint_scale;
+        if s == 1.0 && t.is_zero() {
+            return p;
+        }
+        point(p.x * s, p.y * s) + t
+    }
+
+    /// Feather: `b` where the current paint scale puts it.
+    #[inline]
+    fn scaled_bounds(&self, b: Bounds<Pixels>) -> Bounds<Pixels> {
+        let s = self.paint_scale.0;
+        if s == 1.0 && self.paint_scale.1.is_zero() {
+            return b;
+        }
+        Bounds { origin: self.scaled_point(b.origin), size: size(b.size.width * s, b.size.height * s) }
+    }
+
+    /// Feather: a length as the current paint scale draws it.
+    #[inline]
+    fn scaled_len(&self, l: Pixels) -> Pixels {
+        l * self.paint_scale.0
     }
 
     /// Obtain the current element opacity. This method should only be called during the
@@ -4793,12 +4842,20 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
+        let bounds = self.scaled_bounds(bounds);
+        let corner_radii = corner_radii.map(|r| self.scaled_len(*r));
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
             if shadow.inset {
                 continue;
             }
+            let shadow = &BoxShadow {
+                offset: shadow.offset.map(|c| self.scaled_len(c)),
+                spread_radius: self.scaled_len(shadow.spread_radius),
+                blur_radius: self.scaled_len(shadow.blur_radius),
+                ..shadow.clone()
+            };
             let shadow_bounds = (bounds + shadow.offset).dilate(shadow.spread_radius);
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
@@ -4829,12 +4886,20 @@ impl Window {
         let scale_factor = self.scale_factor();
         let content_mask = self.snapped_content_mask();
         let opacity = self.element_opacity();
+        let bounds = self.scaled_bounds(bounds);
+        let corner_radii = corner_radii.map(|r| self.scaled_len(*r));
         let element_bounds = self.cover_bounds(bounds);
         let element_corner_radii = corner_radii.scale(scale_factor);
         for shadow in shadows {
             if !shadow.inset {
                 continue;
             }
+            let shadow = &BoxShadow {
+                offset: shadow.offset.map(|c| self.scaled_len(c)),
+                spread_radius: self.scaled_len(shadow.spread_radius),
+                blur_radius: self.scaled_len(shadow.blur_radius),
+                ..shadow.clone()
+            };
             let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
             // Clamp at zero so a large spread can't produce negative radii, which would
             // break the SDF in the shader.
@@ -4908,8 +4973,13 @@ impl Window {
     /// Note that the `quad.corner_radii` are allowed to exceed the bounds, creating sharp corners
     /// where the circular arcs meet. This will not display well when combined with dashed borders.
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
-    pub fn paint_quad(&mut self, quad: PaintQuad) {
+    pub fn paint_quad(&mut self, mut quad: PaintQuad) {
         self.invalidator.debug_assert_paint();
+        if self.paint_scale.0 != 1.0 || !self.paint_scale.1.is_zero() {
+            quad.bounds = self.scaled_bounds(quad.bounds);
+            quad.corner_radii = quad.corner_radii.map(|r| self.scaled_len(*r));
+            quad.border_widths = quad.border_widths.map(|w| self.scaled_len(*w));
+        }
 
         let opacity = self.element_opacity();
         let snapped_bounds = self.snap_bounds(quad.bounds);
@@ -5003,6 +5073,7 @@ impl Window {
         style: &UnderlineStyle,
     ) {
         self.invalidator.debug_assert_paint();
+        let (origin, width) = (self.scaled_point(origin), self.scaled_len(width));
         let underline = self.underline(origin, width, style);
         self.next_frame.scene.insert_primitive(underline);
     }
@@ -5017,6 +5088,7 @@ impl Window {
         style: &StrikethroughStyle,
     ) {
         self.invalidator.debug_assert_paint();
+        let (origin, width) = (self.scaled_point(origin), self.scaled_len(width));
 
         let scale_factor = self.scale_factor();
         let height = style.thickness;
@@ -5054,6 +5126,7 @@ impl Window {
         color: Hsla,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        let (origin, font_size) = (self.scaled_point(origin), self.scaled_len(font_size));
 
         let element_opacity = self.element_opacity();
         let scale_factor = self.scale_factor();
@@ -5158,6 +5231,7 @@ impl Window {
         font_size: Pixels,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        let (origin, font_size) = (self.scaled_point(origin), self.scaled_len(font_size));
 
         let scale_factor = self.scale_factor();
         let glyph_origin = origin.scale(scale_factor);
@@ -5219,7 +5293,7 @@ impl Window {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
-        let bounds = self.snap_bounds(bounds);
+        let bounds = self.snap_bounds(self.scaled_bounds(bounds));
 
         let params = RenderSvgParams {
             path,
@@ -5287,6 +5361,8 @@ impl Window {
         grayscale: bool,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        let (bounds, image_bounds) = (self.scaled_bounds(bounds), self.scaled_bounds(image_bounds));
+        let corner_radii = corner_radii.map(|r| self.scaled_len(*r));
 
         let visible_bounds = bounds.intersect(&image_bounds);
         if visible_bounds.size.width <= Pixels::ZERO || visible_bounds.size.height <= Pixels::ZERO {

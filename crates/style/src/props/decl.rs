@@ -120,6 +120,7 @@ pub enum Decl {
     Overflow(Overflow),
     Opacity(f32),
     BoxShadow(Option<Arc<[ShadowSpec]>>),
+    Filter(Option<Arc<[FilterSpec]>>),
     TransitionProperty(Vec<Arc<str>>),
     TransitionDuration(Vec<f32>),
     TransitionDelay(Vec<f32>),

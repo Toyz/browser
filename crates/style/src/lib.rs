@@ -110,6 +110,8 @@ pub struct ComputedStyle {
     pub animations: Option<Arc<[Animation]>>,
     /// `box-shadow` layers (front first).
     pub shadows: Option<Arc<[Shadow]>>,
+    /// `filter` functions, in order.
+    pub filter: Option<Arc<[Filter]>>,
     /// `transform: translate(x, y)`: drawn this far from where it's laid out.
     pub translate: (Offset, Offset),
     /// `transform: rotate()` / `rotate`: degrees, clockwise, about the center.
@@ -264,6 +266,7 @@ impl ComputedStyle {
             text_fill: None,
             scale: (1.0, 1.0),
             shadows: None,
+            filter: None,
             transitions: None,
             animations: None,
             masked: false,

@@ -591,7 +591,8 @@
     }
   }
   const mouseListeners = new Set();
-  const MOUSE_TYPES = ["mousedown", "mouseup", "mousemove", "dblclick", "wheel", "pointerdown", "pointerup", "pointermove", "contextmenu"];
+  const MOUSE_TYPES = ["mousedown", "mouseup", "mousemove", "dblclick", "wheel", "pointerdown", "pointerup", "pointermove", "contextmenu",
+    "mouseover", "mouseout", "mouseenter", "mouseleave", "pointerover", "pointerout", "pointerenter", "pointerleave"];
 
   // ---- nodes -----------------------------------------------------------
 
@@ -1016,7 +1017,7 @@
     get outerText() { return this.textContent; }
   }
   reflect(HTMLElement, [["title", "title"], ["lang", "lang"], ["dir", "dir"], ["hidden", "hidden", "bool"], ["tabIndex", "tabindex", "num"], ["accessKey", "accesskey"], ["contentEditable", "contenteditable"], ["draggable", "draggable", "bool"]]);
-  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mousedown", "mouseup", "scroll", "resize", "abort", "loadstart", "loadend", "progress", "timeout", "readystatechange", "message", "open", "close", "popstate", "hashchange", "visibilitychange"]) {
+  for (const ev of ["click", "input", "change", "submit", "load", "error", "keydown", "keyup", "focus", "blur", "mouseover", "mouseout", "mouseenter", "mouseleave", "mousemove", "mousedown", "mouseup", "scroll", "resize", "abort", "loadstart", "loadend", "progress", "timeout", "readystatechange", "message", "open", "close", "popstate", "hashchange", "visibilitychange"]) {
     for (const target of [HTMLElement.prototype, EventTarget.prototype]) {
       Object.defineProperty(target, "on" + ev, {
         configurable: true,
@@ -3296,7 +3297,9 @@
       ev.isTrusted = true;
       target.dispatchEvent(ev);
     },
-    __dispatchMouse(kind, id, x, y, button, buttons, dx, dy) {
+    // `bubbles` false: a boundary event (`mouseenter`...), whose order and
+    // targets the runtime works out; `related`: the element left/entered.
+    __dispatchMouse(kind, id, x, y, button, buttons, dx, dy, bubbles = true, related = null) {
       const n = wrap(id);
       if (!n) return;
       const r = layoutRects.get(id);
@@ -3306,7 +3309,10 @@
         offsetX: r ? x - r[0] : x, offsetY: r ? y - r[1] : y, movementX: 0, movementY: 0,
         button, buttons,
       };
+      if (related !== null) init.relatedTarget = wrap(related);
+      if (!bubbles) { init.bubbles = false; init.cancelable = false; }
       const fire = (type, Kind) => { const ev = new Kind(type, init); Object.assign(ev, init); ev.isTrusted = true; n.dispatchEvent(ev); };
+      if (/^(mouse|pointer)(over|out|enter|leave)$/.test(kind)) return fire(kind, MouseEvent);
       if (kind === "wheel") {
         const ev = new MouseEvent("wheel", init);
         Object.assign(ev, init, { deltaX: dx, deltaY: dy, deltaZ: 0, deltaMode: 0 });

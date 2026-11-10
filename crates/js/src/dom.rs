@@ -154,6 +154,8 @@ type Shared = Rc<RefCell<Dom>>;
 type NativeBody = Box<dyn Fn(&Shared, &[JsValue], &mut Context) -> JsResult<JsValue>>;
 
 pub(crate) struct Runtime {
+    /// The element under the pointer (for `mouseenter` and friends).
+    hover: Option<NodeId>,
     cx: Context,
     dom: Shared,
     rx: mpsc::Receiver<ToJs>,
@@ -232,7 +234,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None, started: Instant::now() };
+        let mut rt = Runtime { hover: None, cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -451,6 +453,70 @@ impl Runtime {
         !due.is_empty()
     }
 
+    /// Element ancestors of `n`, itself first, across shadow boundaries.
+    fn composed_chain(&self, n: NodeId) -> Vec<NodeId> {
+        let dom = self.dom.borrow();
+        let mut out = Vec::new();
+        let mut node = Some(n);
+        while let Some(c) = node {
+            if dom.doc.element(c).is_some() {
+                out.push(c);
+            }
+            node = dom.doc.parent(c).or_else(|| dom.hosts.get(&c).copied());
+        }
+        out
+    }
+
+    /// The pointer moved onto `target`: `out` / `over` (bubbling) at the
+    /// old and new elements, `leave` / `enter` at each one it left or
+    /// entered (parents before children).
+    fn move_hover(&mut self, target: NodeId, x: f32, y: f32, buttons: u16) {
+        let next = {
+            let dom = self.dom.borrow();
+            if dom.doc.element(target).is_some() { Some(target) } else { dom.doc.parent(target) }
+        };
+        let prev = self.hover;
+        if prev == next {
+            return;
+        }
+        self.hover = next;
+        let was = prev.map(|p| self.composed_chain(p)).unwrap_or_default();
+        let now = next.map(|n| self.composed_chain(n)).unwrap_or_default();
+        let id = |n: Option<NodeId>| n.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
+        let fire = |rt: &mut Self, kind: &str, at: NodeId, bubbles: bool, related: Option<NodeId>| {
+            let args = [
+                js_str(kind),
+                JsValue::from(node_to_number(at)),
+                JsValue::from(x),
+                JsValue::from(y),
+                JsValue::from(0),
+                JsValue::from(buttons),
+                JsValue::from(0),
+                JsValue::from(0),
+                JsValue::from(bubbles),
+                id(related),
+            ];
+            rt.call_global("__dispatchMouse", &args);
+        };
+        if let Some(p) = prev.filter(|_| !was.is_empty()) {
+            fire(self, "pointerout", p, true, next);
+            fire(self, "mouseout", p, true, next);
+            for &t in was.iter().take_while(|t| !now.contains(t)) {
+                fire(self, "pointerleave", t, false, next);
+                fire(self, "mouseleave", t, false, next);
+            }
+        }
+        if let Some(n) = next {
+            fire(self, "pointerover", n, true, prev);
+            fire(self, "mouseover", n, true, prev);
+            let entered: Vec<NodeId> = now.iter().copied().take_while(|t| !was.contains(t)).collect();
+            for &t in entered.iter().rev() {
+                fire(self, "pointerenter", t, false, prev);
+                fire(self, "mouseenter", t, false, prev);
+            }
+        }
+    }
+
     /// The DOM as it is now, as the page renders it: shadow trees flattened
     /// into their hosts (for the first paint and the tab).
     pub fn snapshot_doc(&mut self) -> Document {
@@ -661,6 +727,9 @@ impl Runtime {
                 self.call_global("__dispatchKey", &args);
             }
             ToJs::Mouse { kind, node, x, y, button, buttons, delta } => {
+                if kind == "mousemove" {
+                    self.move_hover(node, x, y, buttons);
+                }
                 let args = [
                     js_str(kind),
                     JsValue::from(node_to_number(node)),

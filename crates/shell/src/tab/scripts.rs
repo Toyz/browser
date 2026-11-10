@@ -173,7 +173,11 @@ impl Tab {
             path.push(p);
             n = p;
         }
-        if !host.hears_mouse(&path) {
+        // Moving off something that listens still reaches scripts once,
+        // for its `mouseleave` / `mouseout`.
+        let hears = host.hears_mouse(&path);
+        let leaving = kind == "mousemove" && std::mem::replace(&mut self.script_hovering, hears);
+        if !hears && !leaving {
             return;
         }
         let buttons = if self.mouse_down { 1 } else { 0 };

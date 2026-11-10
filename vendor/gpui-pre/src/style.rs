@@ -1552,53 +1552,79 @@ pub struct CssGrid(pub std::sync::Arc<CssGridTemplate>);
 /// Feather: the parts of a grid container's style GPUI's own fields can't say.
 #[derive(Debug, Default)]
 pub struct CssGridTemplate {
-    /// `grid-template-columns` / `-rows`.
+    /// `grid-template-columns`.
     pub columns: Vec<CssGridTemplateEntry>,
+    /// `grid-template-rows`.
     pub rows: Vec<CssGridTemplateEntry>,
     /// Line names: one list per line of the explicit tracks (not counting
     /// those inside an auto-repeat).
     pub column_names: Vec<Vec<String>>,
+    /// The rows' line names, likewise.
     pub row_names: Vec<Vec<String>>,
-    /// `grid-auto-columns` / `-rows`.
+    /// `grid-auto-columns`.
     pub auto_columns: Vec<CssTrackSize>,
+    /// `grid-auto-rows`.
     pub auto_rows: Vec<CssTrackSize>,
-    /// `grid-auto-flow`: column-major? dense?
+    /// `grid-auto-flow: column`.
     pub auto_flow_column: bool,
+    /// `grid-auto-flow: dense`.
     pub auto_flow_dense: bool,
     /// `grid-template-areas`: (name, row start, row end, column start,
     /// column end), 1-based lines; and the template's size.
     pub areas: Vec<(String, u16, u16, u16, u16)>,
+    /// How many rows `grid-template-areas` has.
     pub area_rows: u16,
+    /// How many columns `grid-template-areas` has.
     pub area_columns: u16,
+    /// `justify-items`.
     pub justify_items: Option<AlignItems>,
 }
 
 /// One entry of a track list.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CssGridTemplateEntry {
+    /// A single track.
     Track(CssTrackSize),
     /// `repeat(count | auto-fill | auto-fit, tracks)`, with its line names.
-    Repeat { count: CssRepeatCount, tracks: Vec<CssTrackSize>, names: Vec<Vec<String>> },
+    Repeat {
+        /// How many times.
+        count: CssRepeatCount,
+        /// The tracks repeated.
+        tracks: Vec<CssTrackSize>,
+        /// Line names: one list per line of the repeated tracks.
+        names: Vec<Vec<String>>,
+    },
 }
 
+/// How many times a `repeat()` repeats.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CssRepeatCount {
+    /// A fixed number of times.
     Count(u16),
+    /// `auto-fill`: as many as fit.
     AutoFill,
+    /// `auto-fit`: as many as fit, empty ones collapsed.
     AutoFit,
 }
 
 /// A track's size.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CssTrackSize {
+    /// A fixed size, px.
     Px(f32),
     /// A percentage, as a fraction (0.5 = 50%).
     Percent(f32),
+    /// A share of the free space.
     Fr(f32),
+    /// `auto`.
     Auto,
+    /// `min-content`.
     MinContent,
+    /// `max-content`.
     MaxContent,
+    /// `fit-content(px)`.
     FitContent(f32),
+    /// `minmax(min, max)`.
     MinMax(Box<CssTrackSize>, Box<CssTrackSize>),
 }
 
@@ -1609,23 +1635,31 @@ pub struct CssGridItem(pub std::sync::Arc<CssGridPlacement>);
 /// Feather: `grid-row`, `grid-column` and `justify-self`.
 #[derive(Debug, Default)]
 pub struct CssGridPlacement {
+    /// `grid-row-start`.
     pub row_start: CssGridLine,
+    /// `grid-row-end`.
     pub row_end: CssGridLine,
+    /// `grid-column-start`.
     pub column_start: CssGridLine,
+    /// `grid-column-end`.
     pub column_end: CssGridLine,
+    /// `justify-self`.
     pub justify_self: Option<AlignSelf>,
 }
 
 /// One end of a placement.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum CssGridLine {
+    /// `auto`: placed automatically.
     #[default]
     Auto,
     /// A line number (negative counts from the end).
     Line(i16),
     /// The nth line called this (`name-start` and `name-end` for areas).
     Named(String, i16),
+    /// `span n`: this many tracks from the other end.
     Span(u16),
+    /// `span name n`: to the nth line called this.
     NamedSpan(String, u16),
 }
 

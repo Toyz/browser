@@ -86,6 +86,9 @@ pub struct Palette {
     pub serif: SharedString,
     pub mono: SharedString,
     pub fonts: Rc<FontBook>,
+    /// CSS `filter` color functions the content being drawn is under
+    /// (innermost element's first): every color goes through them.
+    pub filter: Option<Arc<[style::Filter]>>,
 }
 
 impl Palette {
@@ -99,16 +102,33 @@ impl Palette {
             serif: "Times New Roman".into(),
             mono: "Menlo".into(),
             fonts,
+            filter: None,
         }
     }
 
     pub fn color(&self, c: Color) -> Hsla {
-        match c {
+        let color = match c {
             Color::Foreground | Color::CurrentColor => self.foreground,
             Color::Link => self.link,
             Color::Muted => self.muted,
             Color::Rgba(v) | Color::LightDark(v, _) => rgba(v).into(),
+        };
+        match &self.filter {
+            Some(filters) => {
+                let c = gpui_kit::Rgba::from(color);
+                let [r, g, b, a] = filters.iter().fold([c.r, c.g, c.b, c.a], |c, f| f.color(c));
+                gpui_kit::Rgba { r, g, b, a }.into()
+            }
+            None => color,
         }
+    }
+
+    /// This palette under `filters` too (a filtered element's own,
+    /// applied before the ones it's inside).
+    fn under(&self, filters: &[style::Filter]) -> Palette {
+        let own = filters.iter().copied().filter(|f| f.is_color());
+        let list: Vec<style::Filter> = own.chain(self.filter.iter().flat_map(|f| f.iter().copied())).collect();
+        Palette { filter: (!list.is_empty()).then(|| list.into()), ..self.clone() }
     }
 
     /// The family to draw with: the page's first installed font, else our default for its kind.
@@ -151,6 +171,9 @@ pub struct RenderCx {
     /// The rounded clipping box text being built sits in (see
     /// `ROUND_CLIP`), for its inline images, painted after it's built.
     pub round_clip: Option<(f32, f32, f32)>,
+    /// The stacking context text being built sits in (see `STACKING`):
+    /// its inline-blocks are rendered later, when it's no longer current.
+    pub stacking: (usize, u32),
     /// Bumped when web fonts arrive (every cached text layout is stale).
     pub fonts_generation: u64,
     pub on_link_click: LinkClick,
@@ -399,7 +422,16 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
             d.style().aspect_ratio = Some(r);
             d
         })
-        .when_some(s.shadows.as_ref(), |d, shadows| d.shadow(visible_shadows(shadows, s, palette)))
+        .map(|d| {
+            // `filter: drop-shadow()`: drawn as the box's shadow.
+            let mut shadows = s.shadows.as_ref().map(|sh| visible_shadows(sh, s, palette)).unwrap_or_default();
+            if let Some(filters) = &s.filter {
+                let drops: Vec<style::Shadow> =
+                    filters.iter().filter_map(|f| if let style::Filter::DropShadow(sh) = f { Some(*sh) } else { None }).collect();
+                shadows.extend(box_shadows(&drops, palette));
+            }
+            if shadows.is_empty() { d } else { d.shadow(shadows) }
+        })
         .flex_grow(s.flex_grow)
         .flex_shrink(s.flex_shrink)
         .when(!s.flex_basis.is_auto(), |d| d.flex_basis(len(s.flex_basis)))
@@ -616,9 +648,23 @@ pub(crate) fn render_block_box(block: &Block, cx: &RenderCx) -> AnyElement {
     // in the rounded clip the paragraph was in (an avatar frame around an
     // inline-block picture).
     let outer = ROUND_CLIP.replace(cx.round_clip);
-    let el = render_block(block, cx, Edges::all(CssLength::ZERO), false);
+    let outer_stacking = STACKING.replace(cx.stacking);
+    // A relatively positioned one with a `z-index` paints with the
+    // positioned boxes, in their order (a hovered badge over its neighbors).
+    let is_raised = matches!(block.style.position, style::Position::Relative | style::Position::Sticky)
+        && block.style.z_index.is_some_and(|z| z > 0);
+    let el = is_raised
+        .then(|| deferred(&LayoutBox::Block(block.clone()), true, || render_block(block, cx, Edges::all(CssLength::ZERO), false)))
+        .flatten()
+        .unwrap_or_else(|| render_block(block, cx, Edges::all(CssLength::ZERO), false));
+    STACKING.set(outer_stacking);
     ROUND_CLIP.set(outer);
     el
+}
+
+/// The stacking context being rendered into (see `STACKING`).
+pub(crate) fn current_stacking() -> (usize, u32) {
+    STACKING.with(|s| s.get())
 }
 
 /// A `position: fixed` box, for the viewport overlay layer: drawn after
@@ -809,6 +855,15 @@ fn round_clip(s: &ComputedStyle) -> Option<(f32, f32, f32)> {
 }
 
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    // `filter`: its colors change everything drawn in the box.
+    if let Some(filters) = block.style.filter.as_ref().filter(|f| f.iter().any(|f| f.is_color())) {
+        let inner = RenderCx { palette: cx.palette.under(filters), ..cx.clone() };
+        return render_block_clipped(block, &inner, margin, in_flow);
+    }
+    render_block_clipped(block, cx, margin, in_flow)
+}
+
+fn render_block_clipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
     if let Some(clip) = round_clip(&block.style) {
         let outer = ROUND_CLIP.replace(Some(clip));
         let el = render_block_unclipped(block, cx, margin, in_flow);
@@ -829,7 +884,77 @@ fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>
         return Shifted { child: Some(el), pct: later }.into_any_element();
     }
     // A rotated box rotates the icons inside it (all GPUI can turn).
-    transform::within(block.style.rotate, || render_block_inner(block, cx, margin, in_flow))
+    let el = transform::within(block.style.rotate, || render_block_inner(block, cx, margin, in_flow));
+    // `transform: scale()`: everything in it drawn bigger or smaller about
+    // its center (an empty decorated box is drawn scaled already, as SVG).
+    match block.style.scale {
+        (x, y) if x == y && x != 1.0 && !block.children.is_empty() => Scaled { child: el, scale: x }.into_any_element(),
+        _ => el,
+    }
+}
+
+/// A box drawn scaled about its center (CSS `transform: scale()`); it's laid
+/// out, and takes the pointer, at its own size.
+struct Scaled {
+    child: AnyElement,
+    scale: f32,
+}
+
+impl IntoElement for Scaled {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Scaled {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let child = &mut self.child;
+        window.with_paint_scale(bounds.center(), self.scale, |window| child.paint(window, cx));
+    }
 }
 
 thread_local! {
@@ -1115,6 +1240,14 @@ pub(crate) fn shown_image(i: &ImageBox, cx: &RenderCx) -> Option<ImageState> {
 }
 
 fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElement {
+    let filtered;
+    let cx = match i.style.filter.as_ref().filter(|f| f.iter().any(|f| f.is_color())) {
+        Some(filters) => {
+            filtered = RenderCx { palette: cx.palette.under(filters), ..cx.clone() };
+            &filtered
+        }
+        None => cx,
+    };
     let s = &*i.style;
     let state = shown_image(i, cx);
     let intrinsic = match &state {
@@ -1155,7 +1288,7 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
     }
     let content = match state {
         _ if !s.visible => div().into_any_element(),
-        Some(ImageState::Ready { image, padded, width, height }) => {
+        Some(ImageState::Ready { image, padded, frames, width, height }) => {
             // `50%` makes a circle: a share of the image's own size.
             let box_w = match s.width { CssLength::Px(v) => Some(v), _ => natural_width };
             let box_h = match s.height { CssLength::Px(v) => Some(v), _ => natural_height.or(box_w) };
@@ -1172,7 +1305,10 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
                 _ => clip.map(|(_, w, h)| w / h.max(1.0)),
             };
             transform::image(i, cx)
-                .unwrap_or_else(|| crate::images::picture_fitted(&image, &padded, width, height, corners, s.object_fit, ratio))
+                .unwrap_or_else(|| {
+                    let (picture, padded) = crate::images::filtered(&image, &padded, &frames, cx.palette.filter.as_deref());
+                    crate::images::picture_fitted(picture, &padded, width, height, corners, s.object_fit, ratio)
+                })
         }
         // Alt text stands in for a broken image (not one still loading:
         // that's blank, so it doesn't flash).

@@ -578,6 +578,91 @@ pub struct Shadow {
     pub inset: bool,
 }
 
+/// One `filter` function, resolved (amounts as fractions, angles in
+/// degrees, lengths in px).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Filter {
+    Brightness(f32),
+    Contrast(f32),
+    Grayscale(f32),
+    Invert(f32),
+    Opacity(f32),
+    Saturate(f32),
+    Sepia(f32),
+    HueRotate(f32),
+    Blur(f32),
+    DropShadow(Shadow),
+}
+
+impl Filter {
+    /// `rgba` (0..1 each) through this function, if it changes colors
+    /// (blur and drop-shadow don't).
+    pub fn color(&self, [r, g, b, a]: [f32; 4]) -> [f32; 4] {
+        let lin = |c: f32, slope: f32, icept: f32| (c * slope + icept).clamp(0.0, 1.0);
+        let matrix = |m: [f32; 9]| {
+            [
+                (m[0] * r + m[1] * g + m[2] * b).clamp(0.0, 1.0),
+                (m[3] * r + m[4] * g + m[5] * b).clamp(0.0, 1.0),
+                (m[6] * r + m[7] * g + m[8] * b).clamp(0.0, 1.0),
+                a,
+            ]
+        };
+        match *self {
+            Filter::Brightness(v) => [lin(r, v, 0.0), lin(g, v, 0.0), lin(b, v, 0.0), a],
+            Filter::Contrast(v) => {
+                let i = 0.5 - 0.5 * v;
+                [lin(r, v, i), lin(g, v, i), lin(b, v, i), a]
+            }
+            Filter::Invert(v) => [lin(r, 1.0 - 2.0 * v, v), lin(g, 1.0 - 2.0 * v, v), lin(b, 1.0 - 2.0 * v, v), a],
+            Filter::Opacity(v) => [r, g, b, a * v.clamp(0.0, 1.0)],
+            Filter::Grayscale(v) => {
+                let v = 1.0 - v.clamp(0.0, 1.0);
+                matrix([
+                    0.2126 + 0.7874 * v, 0.7152 - 0.7152 * v, 0.0722 - 0.0722 * v,
+                    0.2126 - 0.2126 * v, 0.7152 + 0.2848 * v, 0.0722 - 0.0722 * v,
+                    0.2126 - 0.2126 * v, 0.7152 - 0.7152 * v, 0.0722 + 0.9278 * v,
+                ])
+            }
+            Filter::Sepia(v) => {
+                let v = 1.0 - v.clamp(0.0, 1.0);
+                matrix([
+                    0.393 + 0.607 * v, 0.769 - 0.769 * v, 0.189 - 0.189 * v,
+                    0.349 - 0.349 * v, 0.686 + 0.314 * v, 0.168 - 0.168 * v,
+                    0.272 - 0.272 * v, 0.534 - 0.534 * v, 0.131 + 0.869 * v,
+                ])
+            }
+            Filter::Saturate(v) => matrix([
+                0.213 + 0.787 * v, 0.715 - 0.715 * v, 0.072 - 0.072 * v,
+                0.213 - 0.213 * v, 0.715 + 0.285 * v, 0.072 - 0.072 * v,
+                0.213 - 0.213 * v, 0.715 - 0.715 * v, 0.072 + 0.928 * v,
+            ]),
+            Filter::HueRotate(deg) => {
+                let (sin, cos) = deg.to_radians().sin_cos();
+                matrix([
+                    0.213 + cos * 0.787 - sin * 0.213, 0.715 - cos * 0.715 - sin * 0.715, 0.072 - cos * 0.072 + sin * 0.928,
+                    0.213 - cos * 0.213 + sin * 0.143, 0.715 + cos * 0.285 + sin * 0.140, 0.072 - cos * 0.072 - sin * 0.283,
+                    0.213 - cos * 0.213 - sin * 0.787, 0.715 - cos * 0.715 + sin * 0.715, 0.072 + cos * 0.928 + sin * 0.072,
+                ])
+            }
+            Filter::Blur(_) | Filter::DropShadow(_) => [r, g, b, a],
+        }
+    }
+
+    /// Does this function change colors (as opposed to adding a shadow or
+    /// blurring)?
+    pub fn is_color(&self) -> bool {
+        !matches!(self, Filter::Blur(_) | Filter::DropShadow(_))
+    }
+}
+
+/// A `filter` function as specified (lengths unresolved).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FilterSpec {
+    Color(Filter),
+    Blur(LenSpec),
+    DropShadow(ShadowSpec),
+}
+
 /// A `box-shadow` layer as specified.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShadowSpec {

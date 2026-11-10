@@ -210,6 +210,58 @@ pub(super) fn p_opacity<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>
     Ok(())
 }
 
+pub(super) fn p_filter<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    use Decl as D;
+    if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
+        out.push(D::Filter(None));
+        return Ok(());
+    }
+    let mut list = Vec::new();
+    while !p.is_exhausted() {
+        let name = match p.next()?.clone() {
+            Token::Function(name) => name.to_ascii_lowercase(),
+            // `url(#svg-filter)`: not something we can draw.
+            Token::UnquotedUrl(_) => continue,
+            _ => return err(p),
+        };
+        let spec = p.parse_nested_block(|p| {
+            let amount = |p: &mut Parser<'i>| p.try_parse(parse_factor).ok().unwrap_or(1.0).max(0.0);
+            Ok(match name.as_str() {
+                "brightness" => FilterSpec::Color(Filter::Brightness(amount(p))),
+                "contrast" => FilterSpec::Color(Filter::Contrast(amount(p))),
+                "grayscale" => FilterSpec::Color(Filter::Grayscale(amount(p).min(1.0))),
+                "invert" => FilterSpec::Color(Filter::Invert(amount(p).min(1.0))),
+                "opacity" => FilterSpec::Color(Filter::Opacity(amount(p).min(1.0))),
+                "saturate" => FilterSpec::Color(Filter::Saturate(amount(p))),
+                "sepia" => FilterSpec::Color(Filter::Sepia(amount(p).min(1.0))),
+                "hue-rotate" => FilterSpec::Color(Filter::HueRotate(p.try_parse(parse_angle).unwrap_or(0.0))),
+                "blur" => FilterSpec::Blur(p.try_parse(parse_len).unwrap_or(LenSpec::Lin(Default::default()))),
+                "drop-shadow" => {
+                    let mut lengths = Vec::new();
+                    let mut color = None;
+                    while !p.is_exhausted() {
+                        if let Ok(l) = p.try_parse(parse_len) {
+                            lengths.push(l);
+                        } else if let Ok(c) = p.try_parse(parse_color) {
+                            color = Some(c);
+                        } else {
+                            p.next()?;
+                        }
+                    }
+                    if lengths.len() < 2 {
+                        return err(p);
+                    }
+                    FilterSpec::DropShadow(ShadowSpec { lengths, color: color.unwrap_or(Color::CurrentColor), inset: false })
+                }
+                _ => return err(p),
+            })
+        })?;
+        list.push(spec);
+    }
+    out.push(D::Filter((!list.is_empty()).then(|| list.into())));
+    Ok(())
+}
+
 /// The properties this module parses.
 pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("visibility", p_visibility),
@@ -222,4 +274,6 @@ pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("transform", p_transform),
     ("translate", p_transform),
     ("opacity", p_opacity),
+    ("filter", p_filter),
+    ("-webkit-filter", p_filter),
 ];
