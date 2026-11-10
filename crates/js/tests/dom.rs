@@ -798,6 +798,27 @@ fn canvas_context_is_native_with_state_and_pixels() {
 }
 
 #[test]
+fn blobs_and_bodies_keep_bytes() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        (async () => {
+          const raw = new Uint8Array([0, 255, 128, 10, 200]);
+          const b = new Blob([raw, "é"], { type: "Application/Octet" });
+          const back = new Uint8Array(await b.arrayBuffer());
+          const f = new File(["hi"], "a.txt", { type: "text/plain", lastModified: 5 });
+          const r = new Response(raw);
+          const rb = new Uint8Array(await r.arrayBuffer());
+          const fd = new FormData(); fd.append("k", "v"); fd.append("f", f);
+          const multipart = await new Response(fd).text();
+          const out = [b.size, b.type, Array.from(back).join(","), await b.slice(-2).text(), f instanceof Blob, f.name, f.lastModified, await f.text(),
+            Array.from(rb).join(","), multipart.includes('filename="a.txt"'), multipart.includes("hi"),
+            await new Response("ü").text(), (await new Response(new URLSearchParams("a=1")).text()), new Response(fd).headers.get("content-type").startsWith("multipart/form-data")];
+          document.getElementById("o").textContent = out.join(" ");
+        })();
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "7 application/octet 0,255,128,10,200,195,169 é true a.txt 5 hi 0,255,128,10,200 true true ü a=1 true");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
@@ -1013,7 +1034,7 @@ fn cloned_responses_read_the_body() {
         r._full = new Promise((res) => { resolve = res; });
         const c = r.clone();
         Promise.all([r.text(), c.text()]).then(([a, b]) => { document.getElementById("o").textContent = a + "|" + b; });
-        resolve("body");
+        resolve(new TextEncoder().encode("body"));
         </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "body|body");
 }

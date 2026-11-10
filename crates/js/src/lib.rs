@@ -22,6 +22,7 @@ mod dom;
 mod timers;
 mod web_storage;
 mod crypto;
+mod blob;
 mod window_api;
 mod images;
 mod modules;

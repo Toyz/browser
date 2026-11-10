@@ -4,7 +4,7 @@
 //! as they are.
 
 use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::object::builtins::{AlignedVec, JsArray, JsArrayBuffer, JsPromise};
+use boa_engine::object::builtins::{JsArray, JsPromise};
 use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsData, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string};
@@ -12,6 +12,7 @@ use boa_gc::{Finalize, Trace};
 use ring::rand::SecureRandom;
 use ring::signature::KeyPair;
 
+use crate::blob::{array_buffer, bytes_of, view_of};
 use crate::dom::js_value_string;
 
 /// A `DOMException` (the page's class) named `name`.
@@ -27,30 +28,8 @@ fn not_supported(what: &str, cx: &mut Context) -> JsError {
     dom_error("NotSupportedError", &format!("{what} isn't supported"), cx)
 }
 
-/// The bytes of an ArrayBuffer or a view of one.
-fn bytes_of(v: &JsValue, cx: &mut Context) -> JsResult<Vec<u8>> {
-    let err = || JsNativeError::typ().with_message("expected an ArrayBuffer or a view of one");
-    let o = v.as_object().ok_or_else(err)?;
-    if let Ok(buffer) = JsArrayBuffer::from_object(o.clone()) {
-        return Ok(buffer.data().map(|d| d.to_vec()).unwrap_or_default());
-    }
-    let (buffer, offset, len) = view_of(&o, cx)?;
-    let data = buffer.data().ok_or_else(err)?;
-    Ok(data.get(offset..offset + len).ok_or_else(err)?.to_vec())
-}
-
-/// A view's buffer, byte offset and length.
-fn view_of(o: &JsObject, cx: &mut Context) -> JsResult<(JsArrayBuffer, usize, usize)> {
-    let err = || JsNativeError::typ().with_message("expected an ArrayBuffer view");
-    let buffer = o.get(js_string!("buffer"), cx)?.as_object().ok_or_else(err)?;
-    let buffer = JsArrayBuffer::from_object(buffer).map_err(|_| err())?;
-    let offset = o.get(js_string!("byteOffset"), cx)?.to_index(cx)? as usize;
-    let len = o.get(js_string!("byteLength"), cx)?.to_index(cx)? as usize;
-    Ok((buffer, offset, len))
-}
-
 fn buffer(bytes: &[u8], cx: &mut Context) -> JsResult<JsValue> {
-    Ok(JsArrayBuffer::from_byte_block(AlignedVec::from_slice(0, bytes), cx)?.into())
+    array_buffer(bytes, cx)
 }
 
 fn random(n: usize) -> Vec<u8> {
@@ -300,7 +279,7 @@ const SUBTLE: &[(&str, usize, Method)] = &[
 fn get_random_values(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let view = arg(a, 0);
     let o = view.as_object().ok_or_else(|| JsNativeError::typ().with_message("getRandomValues needs an integer array"))?;
-    let (buffer, offset, len) = view_of(&o, cx)?;
+    let (buffer, offset, len) = view_of(&o, cx)?.ok_or_else(|| JsNativeError::typ().with_message("getRandomValues needs an integer array"))?;
     if len > 65536 {
         return Err(dom_error("QuotaExceededError", "more than 65536 bytes asked for", cx));
     }

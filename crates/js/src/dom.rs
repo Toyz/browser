@@ -785,7 +785,8 @@ impl Runtime {
                 self.call_global("__fetchHead", &args);
             }
             ToJs::FetchChunk { id, bytes } => {
-                self.call_global("__fetchChunk", &[JsValue::from(id), js_str(&latin1(&bytes))]);
+                let chunk = crate::blob::array_buffer(&bytes, &mut self.cx).unwrap_or_default();
+                self.call_global("__fetchChunk", &[JsValue::from(id), chunk]);
             }
             ToJs::Sse { id, kind, event, data, last_id } => {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
@@ -866,11 +867,14 @@ impl Runtime {
     /// `__socketEvent(id, kind, data, code, reason, clean)`.
     fn socket_event(&mut self, id: u32, event: crate::websocket::SocketEvent) {
         use crate::websocket::SocketEvent as E;
-        let latin1 = |b: &[u8]| -> String { b.iter().map(|&c| c as char).collect() };
+        let mut binary = None;
         let (kind, data, code, reason, clean) = match event {
             E::Open { protocol } => ("open", protocol, 0, String::new(), true),
             E::Text(t) => ("text", t, 0, String::new(), true),
-            E::Binary(b) => ("binary", latin1(&b), 0, String::new(), true),
+            E::Binary(b) => {
+                binary = Some(b);
+                ("binary", String::new(), 0, String::new(), true)
+            }
             E::Error(e) => {
                 if self.opts.debug {
                     eprintln!("js: websocket {id}: {e}");
@@ -882,9 +886,14 @@ impl Runtime {
                 ("close", String::new(), code, reason, clean)
             }
         };
+        // Binary messages as ArrayBuffers.
+        let data = match binary {
+            Some(b) => crate::blob::array_buffer(&b, &mut self.cx).unwrap_or_default(),
+            None => js_str(&data),
+        };
         self.call_global(
             "__socketEvent",
-            &[JsValue::from(id), js_str(kind), js_str(&data), JsValue::from(code), js_str(&reason), JsValue::from(clean)],
+            &[JsValue::from(id), js_str(kind), data, JsValue::from(code), js_str(&reason), JsValue::from(clean)],
         );
     }
 
@@ -1692,18 +1701,16 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         dom.sockets.insert(id, tx);
         Ok(js_str(url.as_str()))
     }));
-    // wsSend(id, data, binary): binary data comes as a latin1 string.
+    // wsSend(id, data): a string, or binary data.
     add("wsSend", 3, Box::new(|d, a, cx| {
         let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
-        let data = arg_string(a, 1, cx)?;
-        let binary = a.get_or_undefined(2).to_boolean();
+        // Binary (ArrayBuffer, view, Blob) or text.
+        let msg = match crate::blob::binary_of(a.get_or_undefined(1), cx)? {
+            Some(bytes) => crate::websocket::Outgoing::Binary(bytes),
+            None => crate::websocket::Outgoing::Text(arg_string(a, 1, cx)?),
+        };
         let dom = d.borrow();
         if let Some(tx) = dom.sockets.get(&id) {
-            let msg = if binary {
-                crate::websocket::Outgoing::Binary(data.chars().map(|c| c as u32 as u8).collect())
-            } else {
-                crate::websocket::Outgoing::Text(data)
-            };
             tx.send(msg).ok();
         }
         Ok(JsValue::undefined())
@@ -1789,6 +1796,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     observers::install(cx);
     context2d::install(&obj, cx);
     crate::crypto::install(cx);
+    crate::blob::install(&obj, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
@@ -1810,13 +1818,11 @@ fn script_request(d: &Shared, a: &[JsValue], cx: &mut Context) -> JsResult<Optio
     }
     let body = match a.get_or_undefined(4) {
         v if v.is_null_or_undefined() => None,
-        // `{bytes}`: binary, one byte per character.
-        v if v.is_object() => {
-            let bytes = v.as_object().map(|o| o.get(js_string!("bytes"), cx)).transpose()?.unwrap_or_default();
-            let s = bytes.to_string(cx)?;
-            Some(s.iter().map(|u| u as u8).collect())
-        }
-        v => Some(v.to_string(cx)?.to_std_string_escaped().into_bytes()),
+        // An ArrayBuffer (`encodeBody`'s binary bodies), else text.
+        v => match crate::blob::binary_of(v, cx)? {
+            Some(bytes) => Some(bytes),
+            None => Some(v.to_string(cx)?.to_std_string_escaped().into_bytes()),
+        },
     };
     let mode = arg_string(a, 5, cx)?;
     let credentials = arg_string(a, 6, cx)?;
@@ -1825,7 +1831,7 @@ fn script_request(d: &Shared, a: &[JsValue], cx: &mut Context) -> JsResult<Optio
 }
 
 /// `__fetchDone`'s arguments: (id, error|null, status, statusText, url,
-/// [[name, value]...], body text, type, redirected).
+/// [[name, value]...], body (an ArrayBuffer), type, redirected).
 fn response_args(id: u32, result: Result<crate::cors::ScriptResponse, String>, cx: &mut Context) -> Vec<JsValue> {
     match result {
         Err(e) => vec![JsValue::from(id), js_str(&e)],
@@ -1842,7 +1848,7 @@ fn response_args(id: u32, result: Result<crate::cors::ScriptResponse, String>, c
                 js_str(&r.status_text),
                 js_str(r.url.as_str()),
                 JsArray::from_iter(headers, cx).into(),
-                js_str(&String::from_utf8_lossy(&r.body)),
+                crate::blob::array_buffer(&r.body, cx).unwrap_or_default(),
                 js_str(r.kind),
                 JsValue::from(r.redirected),
             ]
@@ -2097,10 +2103,6 @@ fn canvas_image(base: &Url, src: &str) -> Option<Arc<tiny_skia::Pixmap>> {
         m.insert(src.to_owned(), picture.clone());
     });
     picture.map(|p| p.now())
-}
-
-fn latin1(bytes: &[u8]) -> String {
-    bytes.iter().map(|&b| b as char).collect()
 }
 
 /// Attribute names are case-insensitive on HTML elements only (`viewBox`

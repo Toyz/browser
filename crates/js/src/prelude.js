@@ -2062,19 +2062,7 @@
     constructor() { const e = new TextEncoder(); super({ transform(chunk, c) { c.enqueue(e.encode(chunk)); } }); this.encoding = "utf-8"; }
   }
 
-  class Blob {
-    constructor(parts, opts) {
-      this._text = (parts || []).map((p) => (p instanceof Blob ? p._text : typeof p === "string" ? p : new TextDecoder().decode(p))).join("");
-      this.type = (opts && opts.type) || "";
-    }
-    get size() { return new TextEncoder().encode(this._text).length; }
-    text() { return Promise.resolve(this._text); }
-    arrayBuffer() { return Promise.resolve(new TextEncoder().encode(this._text).buffer); }
-    slice(a, b) { return new Blob([this._text.slice(a, b)], { type: this.type }); }
-  }
-  class File extends Blob {
-    constructor(parts, name, opts) { super(parts, opts); this.name = name; this.lastModified = Date.now(); }
-  }
+  // Blob and File are native (blob.rs), holding bytes.
 
   class FormData {
     constructor(form) {
@@ -2103,38 +2091,12 @@
     [Symbol.iterator]() { return this.entries(); }
   }
 
-  // A body (string, URLSearchParams, FormData, Blob, typed array) as
-  // text, plus the content type it implies.
-  function encodeBody(body) {
-    if (body === undefined || body === null) return [null, null];
-    if (typeof body === "string") return [body, "text/plain;charset=UTF-8"];
-    if (body instanceof URLSearchParams) return [body.toString(), "application/x-www-form-urlencoded;charset=UTF-8"];
-    if (body instanceof FormData) {
-      const boundary = "----FeatherFormBoundary" + Math.random().toString(16).slice(2);
-      let out = "";
-      for (const [k, v] of body._list) {
-        out += "--" + boundary + "\r\n";
-        if (v instanceof Blob) out += 'Content-Disposition: form-data; name="' + k + '"; filename="' + (v.name || "blob") + '"\r\nContent-Type: ' + (v.type || "application/octet-stream") + "\r\n\r\n" + v._text + "\r\n";
-        else out += 'Content-Disposition: form-data; name="' + k + '"\r\n\r\n' + v + "\r\n";
-      }
-      return [out + "--" + boundary + "--\r\n", "multipart/form-data; boundary=" + boundary];
-    }
-    if (body instanceof Blob) return [body._text, body.type || null];
-    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return [new TextDecoder().decode(body instanceof ArrayBuffer ? new Uint8Array(body) : body), null];
-    return [String(body), "text/plain;charset=UTF-8"];
-  }
-
-  // A request body for the network: bytes stay bytes (gzipped JSON,
-  // protobuf), passed as a byte string the native side unpacks.
-  function requestBody(body) {
-    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
-      const b = body instanceof ArrayBuffer ? new Uint8Array(body) : new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
-      let s = "";
-      for (let i = 0; i < b.length; i += 8192) s += String.fromCharCode.apply(null, b.subarray(i, i + 8192));
-      return [{ bytes: s }, null];
-    }
-    return encodeBody(body);
-  }
+  // Bodies are bytes: `N.encodeBody` makes a body ([string | ArrayBuffer,
+  // content type]) from what scripts pass (blob.rs); responses keep
+  // theirs as a Uint8Array.
+  const utf8Decoder = new TextDecoder(), utf8Encoder = new TextEncoder();
+  const encodeBody = (body) => (body === undefined || body === null ? [null, null] : N.encodeBody(body));
+  const bodyBytes = (payload) => (payload === null ? new Uint8Array(0) : typeof payload === "string" ? utf8Encoder.encode(payload) : new Uint8Array(payload));
 
   class Request {
     constructor(input, init) {
@@ -2157,10 +2119,12 @@
   class Response {
     constructor(body, init) {
       init = init || {};
-      this._text = body === undefined || body === null ? "" : encodeBody(body)[0];
+      const [payload, type] = encodeBody(body);
+      this._bytes = bodyBytes(payload);
       this.status = init.status === undefined ? 200 : init.status;
       this.statusText = init.statusText || "";
       this.headers = init.headers instanceof Headers ? init.headers : new Headers(init.headers);
+      if (type && !this.headers.has("content-type")) this.headers.set("content-type", type);
       this.type = "default";
       this.url = "";
       this.redirected = false;
@@ -2171,45 +2135,46 @@
     _consume() {
       if (this.bodyUsed) return Promise.reject(new TypeError("Body has already been consumed."));
       this.bodyUsed = true;
-      return this._full || Promise.resolve(this._text);
+      return this._full || Promise.resolve(this._bytes);
     }
     get body() {
       if (this._stream) return this._stream;
       const stream = (this._stream = new ReadableStream());
       if (this._id !== undefined && !this._finished) N.fetchStream(this._id);
-      else { if (this._text) stream._push(new TextEncoder().encode(this._text)); stream._close(); }
+      else { if (this._bytes.length) stream._push(this._bytes.slice()); stream._close(); }
       return stream;
     }
     set body(_) {}
-    _chunk(latin1) {
+    _chunk(buffer) {
       if (!this._stream) return;
-      const bytes = new Uint8Array(latin1.length);
-      for (let i = 0; i < latin1.length; i++) bytes[i] = latin1.charCodeAt(i);
+      const bytes = new Uint8Array(buffer);
       this._delivered = (this._delivered || 0) + bytes.length;
       this._stream._push(bytes);
     }
-    _finish(text) {
+    _finish(buffer) {
       this._finished = true;
-      this._text = text;
+      this._bytes = new Uint8Array(buffer || 0);
       if (this._stream) {
-        if (!this._delivered && text) this._stream._push(new TextEncoder().encode(text));
+        if (!this._delivered && this._bytes.length) this._stream._push(this._bytes.slice());
         this._stream._close();
       }
-      if (this._resolveFull) this._resolveFull(text);
+      if (this._resolveFull) this._resolveFull(this._bytes);
     }
     _fail(e) {
       this._finished = true;
       if (this._stream) this._stream._fail(e);
       if (this._rejectFull) this._rejectFull(e);
     }
-    text() { return this._consume(); }
-    json() { return this._consume().then((t) => JSON.parse(t)); }
-    arrayBuffer() { return this._consume().then((t) => new TextEncoder().encode(t).buffer); }
-    blob() { return this._consume().then((t) => new Blob([t], { type: this.headers.get("content-type") || "" })); }
-    formData() { return this._consume().then((t) => { const f = new FormData(); new URLSearchParams(t).forEach((v, k) => f.append(k, v)); return f; }); }
+    text() { return this._consume().then((b) => utf8Decoder.decode(b)); }
+    json() { return this.text().then((t) => JSON.parse(t)); }
+    arrayBuffer() { return this._consume().then((b) => b.slice().buffer); }
+    bytes() { return this._consume().then((b) => b.slice()); }
+    blob() { return this._consume().then((b) => new Blob([b], { type: this.headers.get("content-type") || "" })); }
+    formData() { return this.text().then((t) => { const f = new FormData(); new URLSearchParams(t).forEach((v, k) => f.append(k, v)); return f; }); }
     clone() {
       if (this.bodyUsed) throw new TypeError("Response.clone: Body has already been consumed.");
-      const r = new Response(this._text, this);
+      const r = new Response(null, this);
+      r._bytes = this._bytes;
       Object.assign(r, { type: this.type, url: this.url, redirected: this.redirected });
       // A body still arriving: both read it when it's there.
       if (this._full) r._full = this._full;
@@ -2246,7 +2211,8 @@
   let nextRequest = 1;
   function toResponse(args) {
     const [, , status, statusText, url, headers, body, type, redirected] = args;
-    const r = new Response(body, { status, statusText, headers: new Headers(headers) });
+    const r = new Response(null, { status, statusText, headers: new Headers(headers) });
+    r._bytes = new Uint8Array(body || 0);
     r.url = url; r.type = type; r.redirected = redirected;
     return r;
   }
@@ -2254,7 +2220,7 @@
     let req;
     try { req = new Request(input, init); } catch (e) { return Promise.reject(e); }
     if (req.signal && req.signal.aborted) return Promise.reject(req.signal.reason);
-    const [body, type] = requestBody(req._body);
+    const [body, type] = encodeBody(req._body);
     if (type && !req.headers.has("content-type")) req.headers.set("content-type", type);
     return new Promise((resolve, reject) => {
       const id = nextRequest++;
@@ -2263,7 +2229,7 @@
       // The promise settles with the head; the body follows.
       const start = (args) => {
         response = toResponse(args);
-        response._text = "";
+        response._bytes = new Uint8Array(0);
         response._id = id;
         response._full = new Promise((res, rej) => { response._resolveFull = res; response._rejectFull = rej; });
         response._full.catch(() => {});
@@ -2296,8 +2262,9 @@
     get response() {
       if (this.readyState !== 4) return this.responseType === "" || this.responseType === "text" ? "" : null;
       if (this.responseType === "json") { try { return JSON.parse(this.responseText); } catch (_) { return null; } }
-      if (this.responseType === "arraybuffer") return new TextEncoder().encode(this.responseText).buffer;
-      if (this.responseType === "blob") return new Blob([this.responseText]);
+      const bytes = this._response ? this._response._bytes : new Uint8Array(0);
+      if (this.responseType === "arraybuffer") return bytes.slice().buffer;
+      if (this.responseType === "blob") return new Blob([bytes], { type: this.getResponseHeader("content-type") || "" });
       if (this.responseType === "document") return new DOMParser().parseFromString(this.responseText, "text/html");
       return this.responseText;
     }
@@ -2333,13 +2300,13 @@
       }
       const r = toResponse(args);
       this._response = r;
-      this.status = r.status; this.statusText = r.statusText; this.responseURL = r.url; this.responseText = r._text;
+      this.status = r.status; this.statusText = r.statusText; this.responseURL = r.url; this.responseText = utf8Decoder.decode(r._bytes);
       this._set(2); this._set(3); this._set(4);
       this._fire("load");
       this._fire("loadend");
     }
     send(body) {
-      const [text, type] = this._method === "GET" || this._method === "HEAD" ? [null, null] : requestBody(body);
+      const [text, type] = this._method === "GET" || this._method === "HEAD" ? [null, null] : encodeBody(body);
       if (type && !this._headers.has("content-type")) this._headers.set("content-type", type);
       const credentials = this.withCredentials ? "include" : "same-origin";
       this._fire("loadstart");
@@ -2360,7 +2327,6 @@
 
   const sockets = new Map();
   let nextSocket = 1;
-  const latin1 = (bytes) => { let s = ""; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; };
   class MessageEvent extends Event {
     constructor(type, init) { super(type, init); init = init || {}; this.data = init.data; this.origin = init.origin || ""; this.lastEventId = ""; this.source = null; this.ports = []; }
   }
@@ -2407,11 +2373,7 @@
     send(data) {
       if (this.readyState === 0) throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", "InvalidStateError");
       if (this.readyState !== 1) return;
-      if (typeof data === "string") N.wsSend(this._id, data, false);
-      else if (data instanceof Blob) N.wsSend(this._id, latin1(new TextEncoder().encode(data._text)), true);
-      else if (data instanceof ArrayBuffer) N.wsSend(this._id, latin1(new Uint8Array(data)), true);
-      else if (ArrayBuffer.isView(data)) N.wsSend(this._id, latin1(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)), true);
-      else N.wsSend(this._id, String(data), false);
+      N.wsSend(this._id, data);
     }
     close(code, reason) {
       if (this.readyState >= 2) return;
@@ -2448,12 +2410,7 @@
     if (!ws) return;
     if (kind === "open") { ws.readyState = 1; ws.protocol = data; ws.dispatchEvent(new Event("open")); }
     else if (kind === "text") ws.dispatchEvent(new MessageEvent("message", { data }));
-    else if (kind === "binary") {
-      const bytes = new Uint8Array(data.length);
-      for (let i = 0; i < data.length; i++) bytes[i] = data.charCodeAt(i);
-      const payload = ws.binaryType === "arraybuffer" ? bytes.buffer : new Blob([new TextDecoder().decode(bytes)]);
-      ws.dispatchEvent(new MessageEvent("message", { data: payload }));
-    } else if (kind === "error") ws.dispatchEvent(new Event("error"));
+    else if (kind === "binary") ws.dispatchEvent(new MessageEvent("message", { data: ws.binaryType === "arraybuffer" ? data : new Blob([data]) })); else if (kind === "error") ws.dispatchEvent(new Event("error"));
     else if (kind === "close") {
       ws.readyState = 3;
       sockets.delete(id);
@@ -2463,7 +2420,7 @@
 
   Object.assign(window, {
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
-    fetch, Headers, Request, Response, XMLHttpRequest, FormData, Blob, File, TextEncoder, TextDecoder,
+    fetch, Headers, Request, Response, XMLHttpRequest, FormData, TextEncoder, TextDecoder,
     AbortController, AbortSignal, DOMException,
     __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
     __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },
