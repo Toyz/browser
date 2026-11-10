@@ -383,7 +383,121 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
 /// `position` + `top`/`right`/`bottom`/`left`. Absolute boxes are placed
 /// relative to their parent's box (in CSS: the nearest positioned ancestor,
 /// which usually *is* the parent); fixed ones relative to the viewport overlay.
+/// A grid container's template for GPUI's layout (taffy's CSS grid).
+fn css_grid(s: &ComputedStyle) -> CssGrid {
+    fn track(t: &style::TrackSize) -> CssTrackSize {
+        match t {
+            style::TrackSize::Px(v) => CssTrackSize::Px(*v),
+            style::TrackSize::Percent(p) => CssTrackSize::Percent(*p),
+            style::TrackSize::Fr(f) => CssTrackSize::Fr(*f),
+            style::TrackSize::Auto => CssTrackSize::Auto,
+            style::TrackSize::MinContent => CssTrackSize::MinContent,
+            style::TrackSize::MaxContent => CssTrackSize::MaxContent,
+            style::TrackSize::FitContent(v) => CssTrackSize::FitContent(*v),
+            style::TrackSize::MinMax(a, b) => CssTrackSize::MinMax(Box::new(track(a)), Box::new(track(b))),
+        }
+    }
+    let names = |n: &[Vec<Arc<str>>]| n.iter().map(|l| l.iter().map(|s| s.to_string()).collect()).collect::<Vec<Vec<String>>>();
+    let entries = |t: &Option<Arc<style::GridTemplate>>| {
+        t.iter()
+            .flat_map(|t| t.entries.iter())
+            .map(|e| match e {
+                style::TemplateEntry::Track(t) => CssGridTemplateEntry::Track(track(t)),
+                style::TemplateEntry::Repeat { count, tracks, names: n } => CssGridTemplateEntry::Repeat {
+                    count: match count {
+                        style::RepeatCount::Count(c) => CssRepeatCount::Count(*c),
+                        style::RepeatCount::AutoFill => CssRepeatCount::AutoFill,
+                        style::RepeatCount::AutoFit => CssRepeatCount::AutoFit,
+                    },
+                    tracks: tracks.iter().map(track).collect(),
+                    names: names(n),
+                },
+            })
+            .collect::<Vec<_>>()
+    };
+    let line_names = |t: &Option<Arc<style::GridTemplate>>| t.as_ref().map(|t| names(&t.names)).unwrap_or_default();
+    // `grid-template-areas`: each name's rectangle, as 1-based lines.
+    let mut areas: Vec<(String, u16, u16, u16, u16)> = Vec::new();
+    let (mut area_rows, mut area_columns) = (0u16, 0u16);
+    if let Some(rows) = &s.grid_areas {
+        area_rows = rows.len() as u16;
+        for (r, row) in rows.iter().enumerate() {
+            area_columns = area_columns.max(row.len() as u16);
+            for (c, cell) in row.iter().enumerate() {
+                if &**cell == "." {
+                    continue;
+                }
+                let (r, c) = (r as u16 + 1, c as u16 + 1);
+                match areas.iter_mut().find(|a| a.0 == **cell) {
+                    Some(a) => {
+                        a.1 = a.1.min(r);
+                        a.2 = a.2.max(r + 1);
+                        a.3 = a.3.min(c);
+                        a.4 = a.4.max(c + 1);
+                    }
+                    None => areas.push((cell.to_string(), r, r + 1, c, c + 1)),
+                }
+            }
+        }
+    }
+    let align = |a: style::Align| match a {
+        style::Align::Start => AlignItems::Start,
+        style::Align::Center => AlignItems::Center,
+        style::Align::End => AlignItems::End,
+        style::Align::Stretch => AlignItems::Stretch,
+        style::Align::Baseline => AlignItems::Baseline,
+    };
+    CssGrid(Arc::new(CssGridTemplate {
+        columns: entries(&s.grid_template_columns),
+        rows: entries(&s.grid_template_rows),
+        column_names: line_names(&s.grid_template_columns),
+        row_names: line_names(&s.grid_template_rows),
+        auto_columns: s.grid_auto_columns.iter().map(track).collect(),
+        auto_rows: s.grid_auto_rows.iter().map(track).collect(),
+        auto_flow_column: s.grid_auto_flow.0,
+        auto_flow_dense: s.grid_auto_flow.1,
+        areas,
+        area_rows,
+        area_columns,
+        justify_items: s.justify_items.map(align),
+    }))
+}
+
+/// Where a grid item goes, if it says (GPUI's layout ignores it elsewhere).
+fn css_grid_item(s: &ComputedStyle) -> Option<CssGridItem> {
+    let (rs, re) = &s.grid_row_lines;
+    let (cs, ce) = &s.grid_column_lines;
+    if rs.is_auto() && re.is_auto() && cs.is_auto() && ce.is_auto() && s.justify_self.is_none() {
+        return None;
+    }
+    let line = |l: &style::GridLine| match l {
+        style::GridLine::Auto => CssGridLine::Auto,
+        style::GridLine::Line(n) => CssGridLine::Line(*n),
+        style::GridLine::Named(n, i) => CssGridLine::Named(n.to_string(), *i),
+        style::GridLine::Span(n) => CssGridLine::Span(*n),
+        style::GridLine::NamedSpan(n, i) => CssGridLine::NamedSpan(n.to_string(), *i),
+    };
+    let justify_self = s.justify_self.map(|a| match a {
+        style::Align::Start => AlignSelf::Start,
+        style::Align::Center => AlignSelf::Center,
+        style::Align::End => AlignSelf::End,
+        style::Align::Stretch => AlignSelf::Stretch,
+        style::Align::Baseline => AlignSelf::Baseline,
+    });
+    Some(CssGridItem(Arc::new(CssGridPlacement {
+        row_start: line(rs),
+        row_end: line(re),
+        column_start: line(cs),
+        column_end: line(ce),
+        justify_self,
+    })))
+}
+
 fn apply_position(d: Div, s: &ComputedStyle) -> Div {
+    let mut d = d;
+    if let Some(item) = css_grid_item(s) {
+        d.style().css_grid_item = Some(item);
+    }
     // `transform: translate()`: shift the box without moving anything else,
     // which is what a relative offset does. Percentages are of its own size.
     // Of the border box: with `box-sizing: border-box` that's the width itself.
@@ -783,6 +897,11 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
             });
             let d = apply_gap(apply_alignment(d.when(s.flex_wrap, |d| d.flex_wrap()), s), s);
             d.children(render_items(&block.children, cx))
+        }
+        BlockKind::Grid if s.taffy_grid => {
+            let mut d = base.grid();
+            d.style().css_grid = Some(css_grid(s));
+            apply_gap(apply_alignment(d, s), s).children(render_items(&block.children, cx))
         }
         BlockKind::Grid => {
             let n = s.grid_columns.unwrap_or(1);

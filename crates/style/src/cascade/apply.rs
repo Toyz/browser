@@ -224,6 +224,21 @@ impl Styler {
             Decl::GridColumn(v) => s.grid_column = *v,
             Decl::GridTracks(None) => s.grid_tracks = None,
             Decl::GridContentMin(v) => s.grid_content_min = *v,
+            Decl::GridTemplateFull { rows, value } => {
+                let value = value.as_ref().map(|v| Arc::new(resolve_template(v, &len)));
+                if *rows { s.grid_template_rows = value } else { s.grid_template_columns = value }
+            }
+            Decl::GridAutoTracks { rows, tracks } => {
+                let tracks: Arc<[TrackSize]> = tracks.iter().map(|t| resolve_track(t, &len)).collect();
+                if *rows { s.grid_auto_rows = tracks } else { s.grid_auto_columns = tracks }
+            }
+            Decl::GridAutoFlow { column, dense } => s.grid_auto_flow = (*column, *dense),
+            Decl::GridPlace { row, end, line } => {
+                let lines = if *row { &mut s.grid_row_lines } else { &mut s.grid_column_lines };
+                if *end { lines.1 = line.clone() } else { lines.0 = line.clone() }
+            }
+            Decl::JustifyItems(v) => s.justify_items = *v,
+            Decl::JustifySelf(v) => s.justify_self = *v,
             Decl::GridTracks(Some(specs)) => {
                 let tracks: Vec<Track> = specs
                     .iter()
@@ -427,5 +442,42 @@ impl Styler {
             container_width,
             container_height,
         }
+    }
+}
+
+
+/// A track size with its lengths resolved.
+fn resolve_track(t: &TrackSizeSpec, len: &impl Fn(&LenSpec) -> Length) -> TrackSize {
+    let length = |l: &LenSpec| match len(l) {
+        Length::Px(v) => TrackSize::Px(v),
+        Length::Percent(p) => TrackSize::Percent(p / 100.0),
+        _ => TrackSize::Auto,
+    };
+    match t {
+        TrackSizeSpec::Len(l) => length(l),
+        TrackSizeSpec::Fr(f) => TrackSize::Fr(*f),
+        TrackSizeSpec::Auto => TrackSize::Auto,
+        TrackSizeSpec::MinContent => TrackSize::MinContent,
+        TrackSizeSpec::MaxContent => TrackSize::MaxContent,
+        TrackSizeSpec::FitContent(l) => TrackSize::FitContent(len(l).px_or_zero()),
+        TrackSizeSpec::MinMax(min, max) => TrackSize::MinMax(Box::new(resolve_track(min, len)), Box::new(resolve_track(max, len))),
+    }
+}
+
+fn resolve_template(t: &GridTemplateSpec, len: &impl Fn(&LenSpec) -> Length) -> GridTemplate {
+    GridTemplate {
+        entries: t
+            .entries
+            .iter()
+            .map(|e| match e {
+                TemplateEntrySpec::Track(t) => TemplateEntry::Track(resolve_track(t, len)),
+                TemplateEntrySpec::Repeat { count, tracks, names } => TemplateEntry::Repeat {
+                    count: *count,
+                    tracks: tracks.iter().map(|t| resolve_track(t, len)).collect(),
+                    names: names.clone(),
+                },
+            })
+            .collect(),
+        names: t.names.clone(),
     }
 }

@@ -31,8 +31,8 @@ behavior are checked for exact equivalence (see "parser parity" below).
    `var()` that can't be resolved making the property `unset` (invalid at
    computed-value time), not leaving earlier rules' values in place.
 3. **Lossless values**: parse into what CSS specifies and resolve late,
-   against the box. Known losses: grid track lists (`max()`, `calc()`,
-   `minmax(auto, …)` become `Auto`), lengths with units we don't keep,
+   against the box. Grid templates and placements are now kept whole
+   (see stage 2). Known losses: lengths with units we don't keep,
    `background-repeat` beyond x/y, `transform` lists beyond
    translate/rotate/scale.
 4. **Split `cascade.rs`** (done): `cascade/` has the cascade itself in
@@ -57,6 +57,15 @@ Done so far, inside the current renderer:
   inherited CSS variables, hundreds there, compared map by map. Equal
   maps are now shared (interned per page), so they compare by pointer:
   under 1ms.
+- Real CSS grid: the style crate keeps full track lists (`repeat()`,
+  `minmax()`, `fit-content()`, line names, `auto-fill`/`auto-fit`),
+  `grid-auto-*`, `grid-template-areas` and every placement form
+  (`name`, `2 name`, `span name`, negative lines). GPUI is vendored
+  (`vendor/gpui-pre`) with `Style::css_grid`/`css_grid_item`, handed to
+  taffy as-is. Grids whose items need it (named lines, rows, line ranges)
+  go through it; simple column grids keep the row-splitting path. The
+  Guardian's fronts (named-line columns, `grid-column: content`) now lay
+  out like Edge; they were stacked into one column before.
 
 GPUI's layout (taffy underneath) supports only part of CSS: grids are N
 equal columns, there are no floats, absolute boxes position against their

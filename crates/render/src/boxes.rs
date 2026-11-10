@@ -194,7 +194,7 @@ impl Block {
     #[allow(clippy::result_large_err)]
     fn into_stack(mut self) -> Result<Block, Block> {
         let s = self.style.clone();
-        if !self.sliceable_box() || self.children.is_empty() {
+        if !self.sliceable_box() || self.children.is_empty() || s.taffy_grid {
             return Err(self);
         }
         // One item filling the container (a flex column's stretched child,
@@ -1784,7 +1784,12 @@ impl Builder<'_> {
         }
         // Grids with explicit tracks or named areas (sidebar layouts) become
         // plain blocks of bands; see `template_grid`.
-        let kind = if kind == BlockKind::Grid && (style.grid_areas.is_some() || style.grid_tracks.is_some()) {
+        // Grids placing items by name, by row, or by both column lines are
+        // laid out as real CSS grids (whole: they don't split into rows).
+        let kind = if kind == BlockKind::Grid && needs_real_grid(&children) {
+            Arc::make_mut(&mut style).taffy_grid = true;
+            kind
+        } else if kind == BlockKind::Grid && (style.grid_areas.is_some() || style.grid_tracks.is_some()) {
             children = self.template_grid(&style, children);
             BlockKind::Normal
         } else {
@@ -2209,6 +2214,34 @@ fn round_corner_children(style: &ComputedStyle, kind: &BlockKind, children: &mut
             s.border_radius[2] = Length::Px(r);
         }
     }
+}
+
+/// Do these grid items need a real grid layout (named lines, rows, line
+/// ranges, lines counted from the end)? The row-based one only places items
+/// by column start and span, in reading order.
+fn needs_real_grid(children: &[LayoutBox]) -> bool {
+    children.iter().any(|c| {
+        let LayoutBox::Block(b) = c else { return false };
+        let s = &b.style;
+        let named = |l: &style::GridLine| matches!(l, style::GridLine::Named(..) | style::GridLine::NamedSpan(..));
+        let negative = |l: &style::GridLine| matches!(l, style::GridLine::Line(n) if *n < 0);
+        let (rs, re) = &s.grid_row_lines;
+        let (cs, ce) = &s.grid_column_lines;
+        // `grid-area: name` (all four ends the area's name) and `span 1`
+        // placements are what the row-based layout already does.
+        let area = |l: &style::GridLine| matches!(l, style::GridLine::Named(_, 0));
+        if area(rs) && [re, cs, ce].iter().all(|l| *l == rs) {
+            return false;
+        }
+        let trivial = |l: &style::GridLine| matches!(l, style::GridLine::Auto | style::GridLine::Span(1));
+        if [rs, re].iter().all(|l| trivial(l)) && [cs, ce].iter().all(|l| trivial(l)) {
+            return false;
+        }
+        !trivial(rs)
+            || !trivial(re)
+            || [cs, ce].into_iter().any(|l| named(l) || negative(l))
+            || (matches!(cs, style::GridLine::Line(_)) && matches!(ce, style::GridLine::Line(_)))
+    })
 }
 
 /// How many boxes `b` holds, counting up to `limit`.

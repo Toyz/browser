@@ -259,13 +259,6 @@ pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("flex-shrink", p_flex_shrink),
     ("flex-basis", p_flex_basis),
     ("flex", p_flex),
-    ("grid-template-columns", p_grid_template_columns),
     ("grid-template-areas", p_grid_template_areas),
     ("grid-template", p_grid_template),
-    ("grid-area", p_grid_area),
-    ("grid-row-start", p_grid_row_start),
-    ("grid-row", p_grid_row_start),
-    ("grid-column-start", p_grid_column_start),
-    ("grid-column", p_grid_column),
-    ("grid-column-end", p_grid_column),
 ];

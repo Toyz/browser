@@ -101,6 +101,18 @@ pub enum Decl {
     GridAreas(Option<GridAreas>),
     GridArea(Option<Arc<str>>),
     GridRowStart(Option<i16>),
+    /// `grid-template-columns` (`rows: false`) / `-rows` in full (`None`:
+    /// `none`).
+    GridTemplateFull { rows: bool, value: Option<Arc<GridTemplateSpec>> },
+    /// `grid-auto-columns` / `-rows`.
+    GridAutoTracks { rows: bool, tracks: Arc<[TrackSizeSpec]> },
+    /// `grid-auto-flow`.
+    GridAutoFlow { column: bool, dense: bool },
+    /// One end of a placement: `grid-row-start` (`row`, not `end`) and the
+    /// rest of the four.
+    GridPlace { row: bool, end: bool, line: GridLine },
+    JustifyItems(Option<Align>),
+    JustifySelf(Option<Align>),
     /// `width: fit-content` and friends.
     FitWidth(bool),
     GridColumnStart(Option<i16>),

@@ -804,3 +804,90 @@ impl Default for BgRepeat {
         BgRepeat { x: true, y: true }
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// CSS grid, as specified (for the grid layout; `GridCols`/`Track` above are
+// the older summary the row-based layout uses).
+
+/// A track's size as written (lengths still to resolve).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackSizeSpec {
+    Len(LenSpec),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+    FitContent(LenSpec),
+    MinMax(Box<TrackSizeSpec>, Box<TrackSizeSpec>),
+}
+
+/// `repeat()`'s count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatCount {
+    Count(u16),
+    AutoFill,
+    AutoFit,
+}
+
+/// An entry of a track list as written.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateEntrySpec {
+    Track(TrackSizeSpec),
+    Repeat { count: RepeatCount, tracks: Vec<TrackSizeSpec>, names: Vec<Vec<Arc<str>>> },
+}
+
+/// `grid-template-columns`/`-rows` as written: entries, and the names of the
+/// lines around them (`entries.len() + 1` lists).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GridTemplateSpec {
+    pub entries: Vec<TemplateEntrySpec>,
+    pub names: Vec<Vec<Arc<str>>>,
+}
+
+/// A track's size, resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackSize {
+    Px(f32),
+    /// A fraction (0.5 = 50%).
+    Percent(f32),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+    FitContent(f32),
+    MinMax(Box<TrackSize>, Box<TrackSize>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateEntry {
+    Track(TrackSize),
+    Repeat { count: RepeatCount, tracks: Vec<TrackSize>, names: Vec<Vec<Arc<str>>> },
+}
+
+/// `grid-template-columns`/`-rows`, resolved.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GridTemplate {
+    pub entries: Vec<TemplateEntry>,
+    pub names: Vec<Vec<Arc<str>>>,
+}
+
+/// One end of a grid item's placement (`grid-row-start` and friends).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum GridLine {
+    #[default]
+    Auto,
+    /// A line number (negative counts from the end).
+    Line(i16),
+    /// The nth line with this name. 0 is a bare name (no index given): the
+    /// matching edge of the area with that name, else the first such line.
+    Named(Arc<str>, i16),
+    Span(u16),
+    NamedSpan(Arc<str>, u16),
+}
+
+impl GridLine {
+    pub fn is_auto(&self) -> bool {
+        *self == GridLine::Auto
+    }
+}

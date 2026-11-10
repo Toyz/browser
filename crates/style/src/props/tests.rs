@@ -71,32 +71,58 @@ fn shorthands() {
 
 #[test]
 fn grid_columns() {
-    assert_eq!(
-        parse("grid-template-columns", "1fr 2fr [end] 100px"),
+    // The summary the row-based layout reads, then the full value.
+    let starts = |name: &str, value: &str, want: Vec<Decl>| {
+        let got = parse(name, value);
+        assert_eq!(&got[..want.len()], &want[..], "{got:?}");
+        got
+    };
+    let full = starts(
+        "grid-template-columns",
+        "1fr 2fr [end] 100px",
         vec![
             Decl::GridColumns(GridCols::Count(3)),
             Decl::GridContentMin(true),
             Decl::GridTracks(Some(vec![TrackSpec::Fr(1.0), TrackSpec::Fr(2.0), TrackSpec::Len(LenSpec::px(100.0))].into())),
-        ]
+        ],
     );
+    let Some(Decl::GridTemplateFull { rows: false, value: Some(t) }) = full.last() else { panic!("{full:?}") };
+    assert_eq!(t.entries.len(), 3);
+    assert_eq!(t.names[2], vec![Arc::<str>::from("end")]);
     // Equal columns don't need tracks.
-    assert_eq!(
-        parse("grid-template-columns", "repeat(4, minmax(0, 1fr))"),
-        vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridContentMin(false), Decl::GridTracks(None)]
+    starts(
+        "grid-template-columns",
+        "repeat(4, minmax(0, 1fr))",
+        vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridContentMin(false), Decl::GridTracks(None)],
     );
     // `1fr` alone never gets narrower than its content.
-    assert_eq!(
-        parse("grid-template-columns", "repeat(6, 1fr)"),
-        vec![Decl::GridColumns(GridCols::Count(6)), Decl::GridContentMin(true), Decl::GridTracks(None)]
-    );
+    starts("grid-template-columns", "repeat(6, 1fr)", vec![Decl::GridColumns(GridCols::Count(6)), Decl::GridContentMin(true), Decl::GridTracks(None)]);
     assert_eq!(
         parse("flex", "1 1 0"),
         vec![Decl::FlexGrow(1.0), Decl::FlexShrink(1.0), Decl::FlexBasis(LenSpec::px(0.0))]
     );
-    assert_eq!(
-        parse("grid-template-columns", "repeat(auto-fill, minmax(200px, 1fr))"),
-        vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridContentMin(false), Decl::GridTracks(None)]
+    starts(
+        "grid-template-columns",
+        "repeat(auto-fill, minmax(200px, 1fr))",
+        vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridContentMin(false), Decl::GridTracks(None)],
     );
+}
+
+#[test]
+fn grid_placements() {
+    let d = parse("grid-column", "main-column-start / main-column-end");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: false, line: GridLine::Named("main-column-start".into(), 0) }), "{d:?}");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: true, line: GridLine::Named("main-column-end".into(), 0) }), "{d:?}");
+    let d = parse("grid-column", "content");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: true, line: GridLine::Named("content".into(), 0) }), "{d:?}");
+    let d = parse("grid-column", "2 content");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: false, line: GridLine::Named("content".into(), 2) }), "{d:?}");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: true, line: GridLine::Auto }), "{d:?}");
+    let d = parse("grid-row", "1");
+    assert!(d.contains(&Decl::GridPlace { row: true, end: false, line: GridLine::Line(1) }), "{d:?}");
+    let d = parse("grid-row", "span 2 / -1");
+    assert!(d.contains(&Decl::GridPlace { row: true, end: true, line: GridLine::Line(-1) }), "{d:?}");
+    assert!(d.contains(&Decl::GridPlace { row: true, end: false, line: GridLine::Span(2) }), "{d:?}");
 }
 
 #[test]
@@ -109,7 +135,9 @@ fn grid_templates() {
     let Decl::GridAreas(Some(rows)) = &areas[0] else { panic!("{areas:?}") };
     assert_eq!(rows.len(), 2);
     assert_eq!(&*rows[1][1], "c");
-    assert_eq!(parse("grid-area", "pageContent"), vec![Decl::GridArea(Some("pageContent".into()))]);
+    let area = parse("grid-area", "pageContent");
+    assert_eq!(area[0], Decl::GridArea(Some("pageContent".into())));
+    assert!(area.contains(&Decl::GridPlace { row: true, end: true, line: GridLine::Named("pageContent".into(), 0) }), "{area:?}");
 }
 
 #[test]

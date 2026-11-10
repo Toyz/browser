@@ -79,6 +79,21 @@ pub struct ComputedStyle {
     /// Equal columns are at least as wide as their content (see
     /// `Decl::GridContentMin`).
     pub grid_content_min: bool,
+    /// The grid in full (see `GridTemplate`), for the grid layout.
+    pub grid_template_columns: Option<Arc<GridTemplate>>,
+    pub grid_template_rows: Option<Arc<GridTemplate>>,
+    pub grid_auto_columns: Arc<[TrackSize]>,
+    pub grid_auto_rows: Arc<[TrackSize]>,
+    /// `grid-auto-flow`: column-major? dense?
+    pub grid_auto_flow: (bool, bool),
+    /// Placement as a grid item: (start, end) lines.
+    pub grid_row_lines: (GridLine, GridLine),
+    pub grid_column_lines: (GridLine, GridLine),
+    pub justify_items: Option<Align>,
+    pub justify_self: Option<Align>,
+    /// (Set by the renderer.) Laid out as a real CSS grid, whole: its
+    /// placements are more than the row-based layout can express.
+    pub taffy_grid: bool,
     pub grid_areas: Option<GridAreas>,
     /// `grid-area: <name>` on a grid item.
     pub grid_area: Option<Arc<str>>,
@@ -216,6 +231,16 @@ impl ComputedStyle {
             grid_column: None,
             grid_tracks: None,
             grid_content_min: false,
+            grid_template_columns: None,
+            grid_template_rows: None,
+            grid_auto_columns: Arc::from([]),
+            grid_auto_rows: Arc::from([]),
+            grid_auto_flow: (false, false),
+            grid_row_lines: (GridLine::Auto, GridLine::Auto),
+            grid_column_lines: (GridLine::Auto, GridLine::Auto),
+            justify_items: None,
+            justify_self: None,
+            taffy_grid: false,
             grid_areas: None,
             grid_area: None,
             fit_width: false,

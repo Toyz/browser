@@ -10,6 +10,7 @@ mod background;
 mod box_model;
 mod effects;
 mod flex_grid;
+mod grid;
 pub mod meta;
 mod text;
 
@@ -157,6 +158,7 @@ fn registry() -> &'static HashMap<&'static str, ParseFn> {
             text::PROPERTIES,
             background::PROPERTIES,
             flex_grid::PROPERTIES,
+            grid::PROPERTIES,
             effects::PROPERTIES,
             animation::PROPERTIES,
             FAMILIES,
