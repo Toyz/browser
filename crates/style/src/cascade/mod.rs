@@ -63,7 +63,13 @@ pub struct StyleData {
     state_reaches_others: bool,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
     font_faces: Arc<Vec<FontFace>>,
+    /// Custom property maps handed out so far (see `Styler::intern_custom`),
+    /// shared by every restyle of the page.
+    custom_maps: CustomInterner,
 }
+
+/// Equal custom property maps, shared: by hash of their entries.
+type CustomInterner = Arc<std::sync::Mutex<HashMap<u64, Vec<CustomProps>>>>;
 
 impl StyleData {
     pub fn from_sheets(sheets: Vec<Stylesheet>, base: Option<Url>) -> Self {
@@ -115,6 +121,7 @@ impl StyleData {
             state_reaches_others,
             keyframes,
             font_faces: Arc::new(font_faces),
+            custom_maps: CustomInterner::default(),
         }
     }
 
@@ -224,6 +231,7 @@ impl StyleData {
             attr_cache: RefCell::default(),
             var_cache: RefCell::default(),
             keyframes: self.keyframes.clone(),
+            custom_maps: self.custom_maps.clone(),
         }
     }
 }
@@ -242,9 +250,36 @@ pub struct Styler {
     attr_cache: RefCell<HashMap<String, Rc<ParsedAttr>>>,
     var_cache: RefCell<HashMap<VarKey, Rc<Vec<Decl>>>>,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
+    custom_maps: CustomInterner,
 }
 
 impl Styler {
+    /// The shared copy of a custom property map. Every style carries its
+    /// element's (inherited) variables, hundreds on some sites; with each
+    /// restyle making new maps, telling an unchanged layout from a changed
+    /// one compared them all, box by box (160ms on a YouTube update).
+    /// Shared maps compare by pointer.
+    fn intern_custom(&self, map: HashMap<Arc<str>, Arc<str>>) -> CustomProps {
+        use std::hash::{Hash, Hasher};
+        // Order-independent: the sum of each entry's hash.
+        let key = map.iter().fold(map.len() as u64, |acc, entry| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            entry.hash(&mut h);
+            acc.wrapping_add(h.finish())
+        });
+        let mut maps = self.custom_maps.lock().unwrap_or_else(|e| e.into_inner());
+        if maps.len() > 16_384 {
+            maps.clear();
+        }
+        let bucket = maps.entry(key).or_default();
+        if let Some(found) = bucket.iter().find(|m| ***m == map) {
+            return found.clone();
+        }
+        let shared = CustomProps::new(map);
+        bucket.push(shared.clone());
+        shared
+    }
+
     /// The styles of an element at each keyframe of `@keyframes name`
     /// (offset, style), with the element's own style at 0% and 100% where
     /// the keyframes don't say.
@@ -449,7 +484,7 @@ impl Styler {
             }
         }
         if let Some(custom) = custom {
-            style.custom = CustomProps::new(custom);
+            style.custom = self.intern_custom(custom);
         }
 
         // Pass 2: font-size (everything else may be em-relative).

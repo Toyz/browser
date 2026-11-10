@@ -52,8 +52,11 @@ Done so far, inside the current renderer:
   virtualized, nothing to anchor the scroll to) to ~100; a scripted scroll
   recording renders ~4x faster with fewer, smaller jumps.
 - The view is kept on the row with the same element across rebuilds.
-- Known cost: `LayoutTree::reuse_unchanged` deep-compares every row
-  (~160ms for YouTube's ~100 rows); it needs a cheap per-row change check.
+- `LayoutTree::reuse_unchanged` (keeping unchanged rows across a rebuild)
+  took ~160ms per update on YouTube: every box's style carries its
+  inherited CSS variables, hundreds there, compared map by map. Equal
+  maps are now shared (interned per page), so they compare by pointer:
+  under 1ms.
 
 GPUI's layout (taffy underneath) supports only part of CSS: grids are N
 equal columns, there are no floats, absolute boxes position against their
