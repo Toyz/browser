@@ -248,6 +248,91 @@ fn client_size(d: &Shared, n: NodeId, axis: usize) -> f32 {
     box_size(d, n, axis)
 }
 
+/// Where `node`'s scrolling box is scrolled and how big its content is
+/// (scrollLeft, scrollTop, scrollWidth, scrollHeight), asked of the tab
+/// (`None`: it doesn't scroll, or nothing's showing yet).
+fn element_scroll(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
+    let tab = {
+        let dom = d.borrow();
+        if !dom.laid_out {
+            return None;
+        }
+        dom.tab.clone()
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    tab.send_blocking(FromJs::ElementScroll(node, tx)).ok()?;
+    rx.recv_timeout(Duration::from_millis(30)).ok().flatten()
+}
+
+/// `<html>` or `<body>`: their scrolling is the page's.
+fn is_root(d: &Shared, node: NodeId) -> bool {
+    let dom = d.borrow();
+    let (html, body) = roots(&dom);
+    Some(node) == html || Some(node) == body
+}
+
+/// Scroll the page to (x, y), as `window.scrollTo` does.
+fn scroll_page(d: &Shared, x: f32, y: f32, smooth: bool) {
+    let tab = {
+        let mut dom = d.borrow_mut();
+        dom.scroll = (x.max(0.0), y.max(0.0));
+        dom.tab.clone()
+    };
+    tab.send_blocking(FromJs::ScrollTo { x: x.max(0.0), y: y.max(0.0), smooth }).ok();
+}
+
+/// Scroll `node` (its box, or the page for the root) to (x, y).
+fn scroll_node(d: &Shared, node: NodeId, x: f32, y: f32, smooth: bool) {
+    if is_root(d, node) {
+        scroll_page(d, x, y, smooth);
+        return;
+    }
+    let tab = d.borrow().tab.clone();
+    tab.send_blocking(FromJs::ScrollElement { node, x: x.max(0.0), y: y.max(0.0) }).ok();
+}
+
+/// Where `node` is scrolled now: (left, top).
+fn scrolled_to(d: &Shared, node: NodeId) -> (f32, f32) {
+    if is_root(d, node) {
+        return d.borrow().scroll;
+    }
+    element_scroll(d, node).map_or((0.0, 0.0), |i| (i[0], i[1]))
+}
+
+/// `scrollTo(x, y)` / `scrollTo({ left, top, behavior })` arguments,
+/// relative to `base`: the target and whether it's smooth.
+fn scroll_args(a: &[JsValue], now: (f32, f32), base: (f32, f32), cx: &mut Context) -> JsResult<(f32, f32, bool)> {
+    let num = |v: &JsValue, cx: &mut Context| -> JsResult<Option<f32>> {
+        if v.is_undefined() { Ok(None) } else { Ok(Some(v.to_number(cx)? as f32).filter(|n| n.is_finite())) }
+    };
+    let (x, y, smooth) = match a.first().and_then(|v| v.as_object()) {
+        Some(o) => {
+            let left = o.get(js_string!("left"), cx)?;
+            let top = o.get(js_string!("top"), cx)?;
+            let behavior = o.get(js_string!("behavior"), cx)?;
+            (num(&left, cx)?, num(&top, cx)?, behavior.as_string().is_some_and(|b| b.to_std_string_escaped() == "smooth"))
+        }
+        None => (num(&a.first().cloned().unwrap_or_default(), cx)?, num(&a.get(1).cloned().unwrap_or_default(), cx)?, false),
+    };
+    Ok((x.map_or(now.0, |x| base.0 + x), y.map_or(now.1, |y| base.1 + y), smooth))
+}
+
+type ArgMethod = fn(&Shared, NodeId, &[JsValue], &mut Context) -> JsResult<JsValue>;
+
+/// A native method (or setter) on elements that takes arguments.
+fn arg_method(d: &Shared, name: &str, f: ArgMethod, cx: &mut Context) -> JsObject {
+    let d = d.clone();
+    // SAFETY: the closure captures only the Rc'd DOM, which holds no
+    // garbage-collected values.
+    let native = unsafe {
+        NativeFunction::from_closure(move |this, a, cx| match this_node(&d, this, cx) {
+            Some(n) => f(&d, n, a, cx),
+            None => Ok(JsValue::undefined()),
+        })
+    };
+    FunctionObjectBuilder::new(cx.realm(), native).name(JsString::from(name)).build().into()
+}
+
 /// Install the element geometry methods on `proto` (`Element.prototype`).
 fn install_on(d: &Shared, proto: &JsObject, cx: &mut Context) -> JsResult<()> {
     let methods: [(&str, Method); 2] = [
@@ -285,6 +370,91 @@ fn install_on(d: &Shared, proto: &JsObject, cx: &mut Context) -> JsResult<()> {
     for (name, f) in getters {
         let f = method(d, name, f, cx);
         proto.define_property_or_throw(JsString::from(name), PropertyDescriptor::builder().get(f).configurable(true).enumerable(false), cx)?;
+    }
+    // Scrolling: an element's own box, or the page for the root.
+    let scroll_getters: [(&str, Method, ArgMethod); 4] = [
+        ("scrollTop", |d, n, _| Ok(JsValue::from(scrolled_to(d, n).1.round())), |d, n, a, cx| {
+            let y = a.first().cloned().unwrap_or_default().to_number(cx)? as f32;
+            if y.is_finite() {
+                let x = scrolled_to(d, n).0;
+                scroll_node(d, n, x, y, false);
+            }
+            Ok(JsValue::undefined())
+        }),
+        ("scrollLeft", |d, n, _| Ok(JsValue::from(scrolled_to(d, n).0.round())), |d, n, a, cx| {
+            let x = a.first().cloned().unwrap_or_default().to_number(cx)? as f32;
+            if x.is_finite() {
+                let y = scrolled_to(d, n).1;
+                scroll_node(d, n, x, y, false);
+            }
+            Ok(JsValue::undefined())
+        }),
+        // What it scrolls; a box that doesn't scroll is as big as itself.
+        ("scrollWidth", |d, n, _| {
+            let w = element_scroll(d, n).map(|i| i[2]).unwrap_or_else(|| box_size(d, n, 0));
+            rounded(w)
+        }, |_, _, _, _| Ok(JsValue::undefined())),
+        ("scrollHeight", |d, n, _| {
+            let h = element_scroll(d, n).map(|i| i[3]).unwrap_or_else(|| client_size(d, n, 1));
+            rounded(h)
+        }, |_, _, _, _| Ok(JsValue::undefined())),
+    ];
+    for (name, get, set) in scroll_getters {
+        let get = method(d, name, get, cx);
+        let set = arg_method(d, name, set, cx);
+        proto.define_property_or_throw(JsString::from(name), PropertyDescriptor::builder().get(get).set(set).configurable(true).enumerable(false), cx)?;
+    }
+    let scroll_methods: [(&str, ArgMethod); 4] = [
+        ("scrollTo", |d, n, a, cx| {
+            let now = scrolled_to(d, n);
+            let (x, y, smooth) = scroll_args(a, now, (0.0, 0.0), cx)?;
+            scroll_node(d, n, x, y, smooth);
+            Ok(JsValue::undefined())
+        }),
+        ("scroll", |d, n, a, cx| {
+            let now = scrolled_to(d, n);
+            let (x, y, smooth) = scroll_args(a, now, (0.0, 0.0), cx)?;
+            scroll_node(d, n, x, y, smooth);
+            Ok(JsValue::undefined())
+        }),
+        ("scrollBy", |d, n, a, cx| {
+            let now = scrolled_to(d, n);
+            let (x, y, smooth) = scroll_args(a, now, now, cx)?;
+            scroll_node(d, n, x, y, smooth);
+            Ok(JsValue::undefined())
+        }),
+        // The page scrolls to put the element in view (`block`: start,
+        // center, end or nearest; `true`/`false` as start/end).
+        ("scrollIntoView", |d, n, a, cx| {
+            let Some([_, y, _, h]) = measure(d, n) else { return Ok(JsValue::undefined()) };
+            let (block, smooth) = match a.first() {
+                Some(v) if v.is_object() => {
+                    let o = v.as_object().expect("an object");
+                    let block = o.get(js_string!("block"), cx)?;
+                    let block = if block.is_undefined() { "start".to_owned() } else { block.to_string(cx)?.to_std_string_escaped() };
+                    let behavior = o.get(js_string!("behavior"), cx)?;
+                    (block, behavior.as_string().is_some_and(|b| b.to_std_string_escaped() == "smooth"))
+                }
+                Some(v) if v.is_boolean() && !v.to_boolean() => ("end".to_owned(), false),
+                _ => ("start".to_owned(), false),
+            };
+            let (sx, sy) = d.borrow().scroll;
+            let vh = d.borrow().geometry.viewport.1;
+            let target = match block.as_str() {
+                "center" => sy + y - (vh - h) / 2.0,
+                "end" => sy + y + h - vh,
+                "nearest" if y >= 0.0 && y + h <= vh => return Ok(JsValue::undefined()),
+                "nearest" if y < 0.0 => sy + y,
+                "nearest" => sy + y + h - vh,
+                _ => sy + y,
+            };
+            scroll_page(d, sx, target, smooth);
+            Ok(JsValue::undefined())
+        }),
+    ];
+    for (name, f) in scroll_methods {
+        let f = arg_method(d, name, f, cx);
+        proto.define_property_or_throw(JsString::from(name), PropertyDescriptor::builder().value(f).writable(true).configurable(true).enumerable(false), cx)?;
     }
     Ok(())
 }

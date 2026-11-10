@@ -1200,7 +1200,12 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         return el.into_any_element();
     }
     let el = el.id(("block", block.id));
-    let el = if scrolls { el.overflow_y_scroll() } else { el };
+    let el = match (scrolls, block.node) {
+        // Scripts read and set where it's scrolled (`scrollTop`).
+        (true, Some(node)) => el.overflow_y_scroll().track_scroll(&scrolled::handle(node)),
+        (true, None) => el.overflow_y_scroll(),
+        _ => el,
+    };
     match hover {
         Some(node) => {
             let report = cx.on_block_hover.clone();
@@ -1562,6 +1567,50 @@ fn render_paragraph(p: &Arc<Paragraph>, cx: &RenderCx) -> AnyElement {
 }
 
 /// Sideways scrolling inside the page (`<pre>` and nowrap text) wins over
+/// Scrolling boxes' positions by element, for scripts (`el.scrollTop`,
+/// `el.scrollTo()`): the tab answers and applies them.
+pub mod scrolled {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use gpui_kit::{ScrollHandle, point, px};
+    use page::NodeId;
+
+    thread_local! {
+        static HANDLES: RefCell<HashMap<NodeId, ScrollHandle>> = RefCell::new(HashMap::new());
+    }
+
+    pub(crate) fn handle(node: NodeId) -> ScrollHandle {
+        HANDLES.with_borrow_mut(|h| h.entry(node).or_default().clone())
+    }
+
+    /// A new page: the old one's positions go.
+    pub fn forget() {
+        HANDLES.with_borrow_mut(HashMap::clear);
+    }
+
+    /// Scroll `node`'s box to (x, y) px (clamped to what it has): whether
+    /// it's a scrolling box.
+    pub fn scroll_to(node: NodeId, x: f32, y: f32) -> bool {
+        let Some(h) = HANDLES.with_borrow(|h| h.get(&node).cloned()) else { return false };
+        let max = h.max_offset();
+        h.set_offset(point(-px(x.clamp(0.0, f32::from(max.x).max(0.0))), -px(y.clamp(0.0, f32::from(max.y).max(0.0)))));
+        true
+    }
+
+    /// `node`'s box: (scrollLeft, scrollTop, scrollWidth, scrollHeight).
+    pub fn info(node: NodeId) -> Option<[f32; 4]> {
+        let h = HANDLES.with_borrow(|h| h.get(&node).cloned())?;
+        let (offset, max, bounds) = (h.offset(), h.max_offset(), h.bounds());
+        Some([
+            f32::from(-offset.x),
+            f32::from(-offset.y),
+            f32::from(bounds.size.width + max.x),
+            f32::from(bounds.size.height + max.y),
+        ])
+    }
+}
+
 /// the shell's swipe-to-go-back while there's room to scroll that way.
 pub mod sideways {
     use std::cell::{Cell, RefCell};

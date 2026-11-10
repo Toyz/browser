@@ -1418,6 +1418,37 @@ fn window_scrolling_goes_to_the_tab_and_back() {
 }
 
 #[test]
+fn element_scrolling_reaches_the_tab() {
+    let doc = html::parse_scripted(
+        r##"<body><div id="box" style="overflow:auto;height:50px"><p>x</p></div><p id="o"></p><script>
+        const box = document.getElementById("box");
+        box.scrollTop = 40;
+        box.scrollTo({ left: 5, top: 60 });
+        document.body.scrollTop = 300;
+        document.getElementById("o").textContent = [box.scrollTop, document.body.scrollTop, scrollY, typeof box.scrollIntoView].join(" ");
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let box_node = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("box")).unwrap();
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    // Before the tab has shown it, scripts can't read a box's scroll; the
+    // page's they can (the body scrolls the page).
+    assert_eq!(text_of(&doc, "o"), "0 300 300 function");
+    let host = host.unwrap();
+    let mut asked = Vec::new();
+    while let Ok(msg) = host.updates.try_recv() {
+        match msg {
+            js::FromJs::ScrollElement { node, x, y } => asked.push(format!("{} {x} {y}", node == box_node)),
+            js::FromJs::ScrollTo { y, .. } => asked.push(format!("page {y}")),
+            _ => {}
+        }
+    }
+    assert_eq!(asked, vec!["true 0 40", "true 5 60", "page 300"]);
+}
+
+#[test]
 fn location_navigator_and_console_are_native() {
     let doc = html::parse_scripted(
         r##"<body><p id="o"></p><script>

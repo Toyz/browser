@@ -127,6 +127,12 @@ pub enum FromJs {
     /// `window.scrollTo()` and friends: scroll the page to (x, y), px;
     /// `smooth`: animated (`behavior: "smooth"`).
     ScrollTo { x: f32, y: f32, smooth: bool },
+    /// Where is this element's scrolling box scrolled, and how big is what
+    /// it scrolls (scrollLeft, scrollTop, scrollWidth, scrollHeight)?
+    /// `None`: it doesn't scroll. Asked and waited for, as `Locate`.
+    ElementScroll(NodeId, std::sync::mpsc::Sender<Option<[f32; 4]>>),
+    /// `el.scrollTop = y` and friends: scroll its box to (x, y).
+    ScrollElement { node: NodeId, x: f32, y: f32 },
 }
 
 /// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height` (handed

@@ -894,9 +894,6 @@
     matches(sel) { return N.matches(this.__id, String(sel)); }
     webkitMatchesSelector(sel) { return this.matches(sel); }
     closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
-    scrollIntoView() {}
-    scrollTo() {}
-    scroll() {}
     focus() { if (focusedElement !== this) { moveFocus(this); N.setFocus(this.__id); } }
     blur() { if (focusedElement === this) { moveFocus(null); N.setFocus(null); } }
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
@@ -935,14 +932,9 @@
       if (this === document.body || this === document.documentElement || !N.connected(this.__id)) return null;
       return document.body;
     }
-    get scrollTop() { return 0; }
-    set scrollTop(_) {}
-    get scrollLeft() { return 0; }
-    set scrollLeft(_) {}
-    get scrollWidth() { return 0; }
-    get scrollHeight() { return 0; }
   }
-  // getBoundingClientRect, clientWidth, offsetTop...: geometry.rs.
+  // getBoundingClientRect, clientWidth, offsetTop, scrollTop, scrollTo,
+  // scrollIntoView...: geometry.rs.
   N.geometry(Element.prototype);
   // ariaCurrent, ariaLabel, role...: their attributes (aria.rs).
   N.aria(Element.prototype);

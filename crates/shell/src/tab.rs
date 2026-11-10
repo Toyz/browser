@@ -529,6 +529,7 @@ impl Tab {
 
     /// Put a loaded page on screen.
     fn install(&mut self, page: LoadedPage, window: &mut Window, cx: &mut Context<Self>) {
+        render::view::scrolled::forget();
         if std::env::var_os("BROWSER_DEBUG").is_some() {
             eprintln!("install {} ({} rows, title {:?})", page.url, page.layout.rows.len(), page.title);
         }
@@ -646,6 +647,25 @@ impl Tab {
             return;
         }
         self.bounds_checked = frame;
+        // The first paint: scripts hear the viewport even when nothing they
+        // measure is on it (until a layout comes they get no answers about
+        // where things are: `clientHeight`, `scrollTop` were 0).
+        if self.layout_viewport_sent == (0.0, 0.0) && !self.layout_scheduled.get() {
+            let size = self.list_state.viewport_bounds().size;
+            let viewport = (f32::from(size.width), f32::from(size.height));
+            if viewport.0 > 0.0 && viewport.1 > 0.0 {
+                let mut store = self.measured_bounds.borrow_mut();
+                if store.1 == (0.0, 0.0) {
+                    store.1 = viewport;
+                }
+                drop(store);
+                self.layout_scheduled.set(true);
+                let tab = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    tab.update(cx, |this, _| this.send_layout()).ok();
+                });
+            }
+        }
         let seen = self.bounds_seen.borrow();
         let now: HashSet<NodeId> = seen.iter().filter(|(_, f)| **f == frame).map(|(n, _)| *n).collect();
         drop(seen);
