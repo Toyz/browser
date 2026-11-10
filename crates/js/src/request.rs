@@ -159,7 +159,7 @@ impl Class for Request {
             Some(b) => b.0.clone(),
             None => {
                 let href = js_value_string(&input, cx);
-                let resolved = crate::dom::page(cx).borrow().doc.resolve_url(&href).map(|u| u.to_string());
+                let resolved = crate::dom::resolve(cx, &href).map(|u| u.to_string());
                 resolved.ok_or_else(|| JsNativeError::typ().with_message(format!("Request: invalid URL {href:?}")))?
             }
         };

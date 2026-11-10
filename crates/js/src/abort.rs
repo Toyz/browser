@@ -184,10 +184,5 @@ pub(crate) fn install(cx: &mut Context) {
 
 /// Make `AbortSignal` an `EventTarget` (once the prelude has made that).
 pub(crate) fn link(cx: &mut Context) {
-    let Some(target) = cx.global_object().get(js_string!("EventTarget"), cx).ok().and_then(|t| t.as_object()) else { return };
-    let Some(proto) = target.get(js_string!("prototype"), cx).ok().and_then(|p| p.as_object()) else { return };
-    if let Some(signal) = cx.get_global_class::<AbortSignal>() {
-        signal.prototype().set_prototype(Some(proto));
-        signal.constructor().set_prototype(Some(target));
-    }
+    crate::dom::extend_event_target::<AbortSignal>(cx);
 }

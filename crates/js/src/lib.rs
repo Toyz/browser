@@ -31,6 +31,7 @@ mod structured_clone;
 mod form_data;
 mod abort;
 mod request;
+pub mod worker;
 mod window_api;
 mod images;
 mod modules;
@@ -46,6 +47,9 @@ use page::{Document, NodeId};
 use url::Url;
 
 pub use dom::{canvas_url, node_from_number, to_html};
+
+/// What scripts see as `navigator.userAgent` (page and workers).
+pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Feather/0.1 Safari/537.36";
 
 /// Fetches a script's source (blocking).
 pub type FetchText = Arc<dyn Fn(&Url) -> Option<String> + Send + Sync>;
@@ -106,6 +110,8 @@ pub enum ToJs {
     Focus { node: Option<NodeId> },
     /// An image a script loaded finished: its size, or `None` if it failed.
     Image { id: u32, size: Option<(u32, u32)> },
+    /// One of the page's workers posted a message (or failed).
+    Worker { id: u32, event: worker::WorkerEvent },
     Shutdown,
 }
 

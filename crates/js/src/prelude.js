@@ -1931,8 +1931,6 @@
         window.dispatchEvent(ev);
       }, 0);
     },
-    atob: (s) => { const r = N.atob(String(s)); if (r === null) throw new DOMException("The string to be decoded is not correctly encoded.", "InvalidCharacterError"); return r; },
-    btoa: (s) => { const r = N.btoa(String(s)); if (r === null) throw new DOMException("The string to be encoded contains characters outside of the Latin1 range.", "InvalidCharacterError"); return r; },
     reportError,
     isSecureContext: true,
     customElements, ShadowRoot, CSSStyleSheet,

@@ -53,6 +53,34 @@ pub(crate) fn uint8_array(bytes: &[u8], cx: &mut Context) -> JsResult<JsValue> {
 }
 
 /// A blob's bytes and type (`File`s are blobs too).
+/// `URL.createObjectURL` blobs, by URL (any thread may read them: a
+/// worker loads its script from one).
+static OBJECT_URLS: std::sync::Mutex<Option<std::collections::HashMap<String, (Arc<[u8]>, String)>>> = std::sync::Mutex::new(None);
+
+/// A `blob:` URL for blob `o` (under `origin`), `None` if it isn't one.
+pub(crate) fn object_url(o: &JsObject, origin: &str) -> Option<String> {
+    use ring::rand::SecureRandom;
+    let blob = blob_of(o)?;
+    let mut b = [0u8; 16];
+    ring::rand::SystemRandom::new().fill(&mut b).ok();
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let url = format!("blob:{origin}/{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]);
+    let mut urls = OBJECT_URLS.lock().unwrap_or_else(|e| e.into_inner());
+    urls.get_or_insert_with(Default::default).insert(url.clone(), blob);
+    Some(url)
+}
+
+/// What a `blob:` URL is (its bytes and type), while it isn't revoked.
+pub(crate) fn object_url_data(url: &str) -> Option<(Arc<[u8]>, String)> {
+    OBJECT_URLS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()?.get(url).cloned()
+}
+
+pub(crate) fn revoke_object_url(url: &str) {
+    if let Some(urls) = OBJECT_URLS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        urls.remove(url);
+    }
+}
+
 /// Whether `o` is a `File`.
 pub(crate) fn is_file(o: &JsObject) -> bool {
     o.downcast_ref::<File>().is_some()
@@ -113,7 +141,7 @@ fn this_blob(this: &JsValue) -> JsResult<(Arc<[u8]>, String)> {
     this.as_object().as_ref().and_then(blob_of).ok_or_else(|| JsNativeError::typ().with_message("not a Blob").into())
 }
 
-fn new_blob(bytes: Arc<[u8]>, kind: String, cx: &mut Context) -> JsValue {
+pub(crate) fn new_blob(bytes: Arc<[u8]>, kind: String, cx: &mut Context) -> JsValue {
     let proto = cx.get_global_class::<Blob>().map(|c| c.prototype());
     JsObject::from_proto_and_data(proto, Blob { bytes, kind }).into()
 }

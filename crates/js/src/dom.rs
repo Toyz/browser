@@ -94,6 +94,10 @@ pub(crate) fn runnable(e: &ElementData) -> bool {
 
 impl Dom {
     /// The document changed: send it, and recompute styles asked of it.
+    pub(crate) fn debug(&self) -> bool {
+        self.debug
+    }
+
     /// The DOM changed, somewhere (for a forced layout: possibly anything).
     pub(crate) fn changed(&mut self) {
         self.mark_dirty();
@@ -167,6 +171,26 @@ pub(crate) fn page(cx: &Context) -> Shared {
     cx.get_data::<PageDom>().expect("natives installed").0.clone()
 }
 
+/// `href` resolved against the page's base URL (a worker's script URL in a
+/// worker).
+pub(crate) fn resolve(cx: &Context, href: &str) -> Option<Url> {
+    match cx.get_data::<PageDom>() {
+        Some(p) => p.0.borrow().doc.resolve_url(href),
+        None => cx.get_data::<crate::worker::Base>()?.0.join(href).ok(),
+    }
+}
+
+/// Make native class `C` an `EventTarget` (the prelude's; in a worker,
+/// whatever `EventTarget` there is): its prototype and constructor chain.
+pub(crate) fn extend_event_target<C: boa_engine::class::Class>(cx: &mut Context) {
+    let Some(target) = cx.global_object().get(js_string!("EventTarget"), cx).ok().and_then(|t| t.as_object()) else { return };
+    let Some(proto) = target.get(js_string!("prototype"), cx).ok().and_then(|p| p.as_object()) else { return };
+    if let Some(class) = cx.get_global_class::<C>() {
+        class.prototype().set_prototype(Some(proto));
+        class.constructor().set_prototype(Some(target));
+    }
+}
+
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
 }
@@ -217,6 +241,8 @@ pub(crate) struct Dom {
     published: Published,
     /// When the tab was last sent the DOM.
     last_sent: Instant,
+    /// For workers' scripts.
+    pub(crate) fetch_text: crate::FetchText,
     /// Where the DOM changed since then (`touched_all`: anywhere).
     touched: HashSet<NodeId>,
     touched_all: bool,
@@ -240,7 +266,7 @@ pub(crate) struct Dom {
     shadows: HashMap<NodeId, NodeId>,
     hosts: HashMap<NodeId, NodeId>,
     /// Where finished requests report back.
-    fetch_tx: mpsc::Sender<ToJs>,
+    pub(crate) fetch_tx: mpsc::Sender<ToJs>,
     /// Requests in flight.
     fetches: usize,
     /// The tab, for sessionStorage.
@@ -321,6 +347,7 @@ impl Runtime {
             tab: updates.clone(),
             published: Published { listening: listening.clone(), measured: measured.clone(), mouse: mouse_listening.clone() },
             last_sent: Instant::now(),
+            fetch_text: opts.fetch_text.clone(),
             touched: HashSet::new(),
             touched_all: false,
             scroll: (0.0, 0.0),
@@ -350,6 +377,7 @@ impl Runtime {
             eprintln!("js prelude failed: {e}");
         }
         crate::abort::link(&mut cx);
+        crate::worker::link(&mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
@@ -801,6 +829,11 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Worker { id, event } => {
+                if let Err(e) = crate::worker::deliver(id, event, &mut self.cx) {
+                    self.log_error("worker message", e);
+                }
+            }
             ToJs::Key { kind, key, code, target, modifiers } => {
                 let target = target.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
                 let args = [
@@ -1063,7 +1096,12 @@ pub(crate) fn session_of(dom: &Dom) -> u64 {
 
 /// Milliseconds since the page started (`performance.now()`).
 pub(crate) fn now_ms(d: &Shared) -> f64 {
-    d.borrow().started.elapsed().as_secs_f64() * 1000.0
+    now_ms_of(&d.borrow())
+}
+
+/// ms since the page started (`performance.now()`).
+pub(crate) fn now_ms_of(dom: &Dom) -> f64 {
+    dom.started.elapsed().as_secs_f64() * 1000.0
 }
 
 /// Traverse session history by `delta` (the tab does it, then tells us).
@@ -1824,8 +1862,9 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::form_data::install(cx);
     crate::abort::install(cx);
     crate::request::install(cx);
+    crate::worker::install(cx);
     crate::window_api::install(&obj, dom, cx);
-    crate::timers::install(&obj, dom, cx);
+    crate::timers::install(&obj, dom.clone(), cx);
     crate::web_storage::install(&obj, dom, cx);
     geometry::install(&obj, dom, cx);
     cx.insert_data(PageDom(dom.clone()));

@@ -1032,6 +1032,37 @@ fn request_is_native() {
 }
 
 #[test]
+fn workers_run_scripts_on_their_own_thread() {
+    let doc = run(r##"<body><p id="o"></p><p id="e"></p><script>
+        const code = `
+          importScripts("data:text/javascript,self.imported%20%3D%2042");
+          self.addEventListener("message", (e) => {
+            if (e.data === "boom") throw new Error("kaboom");
+            postMessage({ echo: e.data, doubled: e.data.n * 2, imported: self.imported, bytes: new Uint8Array([1, 2, 3]),
+                          when: e.data.when instanceof Date && e.data.when.getTime(), origin: location.origin, self: self === globalThis });
+          });
+          setTimeout(() => postMessage("timer"), 5);
+        `;
+        const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+        const w = new Worker(url), seen = [];
+        w.onmessage = (e) => {
+          const d = e.data;
+          seen.push(typeof d === "string" ? d : [d.echo.n, d.doubled, d.imported, Array.from(d.bytes).join("+"), d.when, d.origin, d.self].join(","));
+          if (seen.length === 2) {
+            document.getElementById("o").textContent = seen.sort().join(" | ") + " " + (w instanceof EventTarget) + " " + url.startsWith("blob:https://example.com/");
+            w.postMessage("boom");
+          }
+        };
+        w.addEventListener("error", (e) => { document.getElementById("e").textContent = "error: " + e.message; w.terminate(); });
+        w.postMessage({ n: 21, when: new Date(7) });
+        // (The first paint waits for timers, not workers: hold it open.)
+        setTimeout(() => {}, 400);
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "21,42,42,1+2+3,7,https://example.com,true | timer true true");
+    assert_eq!(text_of(&doc, "e"), "error: Uncaught Error: kaboom");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

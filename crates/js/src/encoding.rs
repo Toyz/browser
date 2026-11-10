@@ -216,6 +216,11 @@ fn base64_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Base64 (forgiving, as `atob`) as bytes.
+pub(crate) fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    atob(input).map(|s| s.chars().map(|c| c as u8).collect())
+}
+
 /// `atob`: the HTML Standard's forgiving-base64 decode (ASCII whitespace
 /// ignored, padding optional), as a latin1 string; `None` if it isn't base64.
 fn atob(input: &str) -> Option<String> {
@@ -254,15 +259,35 @@ pub(crate) fn register(cx: &mut Context, native: &JsObject) {
         let f = f.to_js_function(cx.realm());
         native.set(JsString::from(name), f, false, cx).ok();
     };
-    // null: not latin1 / not base64 (the prelude throws the DOMException).
-    add(cx, "btoa", NativeFunction::from_fn_ptr(|_, args, cx| {
-        let s = args.get_or_undefined(0).to_string(cx)?;
-        Ok(btoa(&s.iter().collect::<Vec<u16>>()).map_or(JsValue::null(), |b| JsString::from(b.as_str()).into()))
-    }));
-    add(cx, "atob", NativeFunction::from_fn_ptr(|_, args, cx| {
-        let s = args.get_or_undefined(0).to_string(cx)?.to_std_string_escaped();
-        Ok(atob(&s).map_or(JsValue::null(), |b| JsString::from(b.as_str()).into()))
-    }));
+    // (Also on the natives, for the prelude.)
+    add(cx, "btoa", NativeFunction::from_fn_ptr(btoa_js));
+    add(cx, "atob", NativeFunction::from_fn_ptr(atob_js));
+    install_globals(cx);
+}
+
+fn btoa_js(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
+    let s = args.get_or_undefined(0).to_string(cx)?;
+    match btoa(&s.iter().collect::<Vec<u16>>()) {
+        Some(b) => Ok(JsString::from(b.as_str()).into()),
+        None => Err(crate::dom_exception::error("InvalidCharacterError", "The string to be encoded contains characters outside of the Latin1 range.", cx)),
+    }
+}
+
+fn atob_js(_: &JsValue, args: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
+    let s = args.get_or_undefined(0).to_string(cx)?.to_std_string_escaped();
+    match atob(&s) {
+        Some(b) => Ok(JsString::from(b.as_str()).into()),
+        None => Err(crate::dom_exception::error("InvalidCharacterError", "The string to be decoded is not correctly encoded.", cx)),
+    }
+}
+
+/// `atob` and `btoa` on the global object.
+fn install_globals(cx: &mut Context) {
+    for (name, f) in [("atob", atob_js as boa_engine::native_function::NativeFunctionPointer), ("btoa", btoa_js)] {
+        if let Err(e) = cx.register_global_builtin_callable(JsString::from(name), 1, NativeFunction::from_fn_ptr(f)) {
+            eprintln!("js: {name}: {e}");
+        }
+    }
 }
 
 #[cfg(test)]

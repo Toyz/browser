@@ -12,7 +12,7 @@ use boa_engine::property::Attribute;
 use boa_engine::{Context, JsData, JsObject, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
 use boa_gc::{Finalize, GcRefCell, Trace};
 
-use crate::dom::Shared;
+use std::rc::Rc;
 
 /// What kind of timer, and so how it's called.
 #[derive(Clone, Copy, PartialEq)]
@@ -41,12 +41,33 @@ struct Table {
     next: Cell<u32>,
 }
 
-/// What each timer function closes over: the page's DOM (where due times
-/// are kept) and the table.
+/// Where a context's timers are due (the page's DOM, or a worker's
+/// clock): the runtime's loop asks it what's due and fires those.
+pub(crate) trait TimerHost {
+    fn schedule(&self, at: Instant, id: u32);
+    fn cancel(&self, id: u32);
+    /// `performance.now()`, ms.
+    fn now_ms(&self) -> f64;
+}
+
+impl TimerHost for std::cell::RefCell<crate::dom::Dom> {
+    fn schedule(&self, at: Instant, id: u32) {
+        self.borrow_mut().timers.push((at, id));
+    }
+    fn cancel(&self, id: u32) {
+        self.borrow_mut().timers.retain(|(_, t)| *t != id);
+    }
+    fn now_ms(&self) -> f64 {
+        crate::dom::now_ms_of(&self.borrow())
+    }
+}
+
+/// What each timer function closes over: where due times are kept, and
+/// the table.
 #[derive(Trace, Finalize)]
 struct Captures {
     #[unsafe_ignore_trace]
-    dom: Shared,
+    host: Rc<dyn TimerHost>,
     table: JsObject,
 }
 
@@ -63,13 +84,13 @@ fn add(c: &Captures, callback: JsValue, args: Vec<JsValue>, ms: f64, kind: Kind)
         t.timers.borrow_mut().insert(id, Timer { callback, args, kind });
         id
     });
-    c.dom.borrow_mut().timers.push((Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0), id));
+    c.host.schedule(Instant::now() + Duration::from_secs_f64(ms.max(0.0) / 1000.0), id);
     id
 }
 
 fn clear(c: &Captures, id: u32) {
     with_table(c, |t| t.timers.borrow_mut().remove(&id));
-    c.dom.borrow_mut().timers.retain(|(_, t)| *t != id);
+    c.host.cancel(id);
 }
 
 fn delay(a: &[JsValue], i: usize, cx: &mut Context) -> f64 {
@@ -82,10 +103,10 @@ fn id_of(a: &[JsValue], cx: &mut Context) -> u32 {
 
 /// Install the timer functions on the natives object (`N.timers`), and the
 /// runtime's `fireTimer` hook.
-pub(crate) fn install(natives: &JsObject, dom: &Shared, cx: &mut Context) {
+pub(crate) fn install(natives: &JsObject, host: Rc<dyn TimerHost>, cx: &mut Context) {
     let table = JsObject::from_proto_and_data(None, Table { timers: GcRefCell::new(HashMap::new()), next: Cell::new(1) });
     let f = |cx: &mut Context, name: &str, len: usize, body: fn(&JsValue, &[JsValue], &Captures, &mut Context) -> JsResult<JsValue>| {
-        let captures = Captures { dom: dom.clone(), table: table.clone() };
+        let captures = Captures { host: host.clone(), table: table.clone() };
         FunctionObjectBuilder::new(cx.realm(), NativeFunction::from_copy_closure_with_captures(body, captures))
             .name(JsString::from(name))
             .length(len)
@@ -135,10 +156,10 @@ fn fire(_: &JsValue, a: &[JsValue], c: &Captures, cx: &mut Context) -> JsResult<
     });
     let Some((callback, args, kind)) = due else { return Ok(JsValue::undefined()) };
     if let Kind::Interval(ms) = kind {
-        c.dom.borrow_mut().timers.push((Instant::now() + Duration::from_secs_f64(ms / 1000.0), id));
+        c.host.schedule(Instant::now() + Duration::from_secs_f64(ms / 1000.0), id);
     }
     let args = match kind {
-        Kind::Frame => vec![JsValue::from(crate::dom::now_ms(&c.dom))],
+        Kind::Frame => vec![JsValue::from(c.host.now_ms())],
         Kind::Idle => {
             let remaining = FunctionObjectBuilder::new(cx.realm(), NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::from(10))))
                 .name(js_string!("timeRemaining"))

@@ -96,7 +96,7 @@ fn console(dom: &Shared, cx: &mut Context) -> JsValue {
 }
 
 fn navigator(cx: &mut Context) -> JsValue {
-    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Feather/0.1 Safari/537.36";
+    let ua = crate::USER_AGENT;
     let languages = boa_engine::object::builtins::JsArray::from_iter([js_string!("en-US").into(), js_string!("en").into()], cx);
     // `sendBeacon(url, data)`: a fire-and-forget POST, through `fetch`.
     let send_beacon = NativeFunction::from_fn_ptr(|_, a, cx| {

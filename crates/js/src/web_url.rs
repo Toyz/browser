@@ -206,9 +206,17 @@ impl Class for WebUrl {
                 }
             }),
         );
-        // Object URLs for blobs: not backed by anything here.
-        class.static_method(js_string!("createObjectURL"), 1, NativeFunction::from_fn_ptr(|_, _, _| Ok(js("blob:feather"))));
-        class.static_method(js_string!("revokeObjectURL"), 1, NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())));
+        // Object URLs for blobs (workers load scripts from them).
+        class.static_method(js_string!("createObjectURL"), 1, NativeFunction::from_fn_ptr(|_, a, cx| {
+            let origin = crate::dom::resolve(cx, "/").map(|u| u.origin().ascii_serialization()).unwrap_or_else(|| "null".into());
+            let url = a.first().and_then(JsValue::as_object).and_then(|o| crate::blob::object_url(&o, &origin));
+            Ok(js(url.as_deref().unwrap_or("blob:null/unknown")))
+        }));
+        class.static_method(js_string!("revokeObjectURL"), 1, NativeFunction::from_fn_ptr(|_, a, cx| {
+            let url = a.first().cloned().unwrap_or_default().to_string(cx)?.to_std_string_escaped();
+            crate::blob::revoke_object_url(&url);
+            Ok(JsValue::undefined())
+        }));
         Ok(())
     }
 }
