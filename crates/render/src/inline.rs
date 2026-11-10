@@ -331,6 +331,23 @@ fn object_extent(valign: VerticalAlign, h: Pixels, strut: Extent, font_size: f32
     Extent { above, below: h - above }
 }
 
+/// The parts of `shadow` outside `inner`: up to four rectangles.
+fn outside(shadow: Bounds<Pixels>, inner: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+    let (sl, st, sr, sb) = (shadow.left(), shadow.top(), shadow.right(), shadow.bottom());
+    let (il, it, ir, ib) = (inner.left(), inner.top(), inner.right(), inner.bottom());
+    let rect = |l: Pixels, t: Pixels, r: Pixels, b: Pixels| (r > l && b > t).then(|| Bounds::new(point(l, t), size(r - l, b - t)));
+    let (mt, mb) = (st.max(it), sb.min(ib));
+    [
+        rect(sl, st, sr, sb.min(it)),
+        rect(sl, st.max(ib), sr, sb),
+        rect(sl, mt, sr.min(il), mb),
+        rect(sl.max(ir), mt, sr, mb),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Padding + border on each side of an inline-block, px.
 fn edges(s: &style::ComputedStyle) -> (Pixels, Pixels, Pixels, Pixels) {
     let p = |l: style::Length| l.px_or_zero();
@@ -919,7 +936,24 @@ fn paint_flow(
                     bottom_right: r(s.border_radius[2]),
                     bottom_left: r(s.border_radius[3]),
                 };
-                window.paint_drop_shadows(bounds, corners, &crate::view::box_shadows(shadows, palette));
+                if s.painted_background().is_some() {
+                    window.paint_drop_shadows(bounds, corners, &crate::view::box_shadows(shadows, palette));
+                } else {
+                    // CSS paints an outer shadow only outside the box; with
+                    // nothing over it, GPUI's whole shape showed (MDN's
+                    // contents links, ruled by `box-shadow: -2px 0 0`, became
+                    // grey slabs). Hard ones are painted as what's outside;
+                    // blurred ones are left out, as on blocks.
+                    for sh in shadows.iter().filter(|sh| !sh.inset && sh.blur <= 0.0) {
+                        let shadow = Bounds::new(
+                            point(bounds.origin.x + px(sh.x - sh.spread), bounds.origin.y + px(sh.y - sh.spread)),
+                            size(bounds.size.width + px(2.0 * sh.spread), bounds.size.height + px(2.0 * sh.spread)),
+                        );
+                        for strip in outside(shadow, bounds) {
+                            window.paint_quad(fill(strip, palette.color(sh.color)));
+                        }
+                    }
+                }
             }
             if s.painted_background().is_some() || s.has_border() {
                 let corner = |l: style::Length| {
