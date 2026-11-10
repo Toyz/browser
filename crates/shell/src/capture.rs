@@ -1,6 +1,6 @@
 //! Command-line options, and offscreen screenshots for development.
 //!
-//! `feather [URL...] [--dark|--light] [--screenshot out.png] [--pages N] [--scroll PX] [--row N] [--size WxH] [--resize WxH] [--mouse X,Y] [--bench FRAMES]`
+//! `feather --help` lists the options (see [`HELP`]).
 //!
 //! With `--screenshot`, the browser loads the page, renders frames to PNG
 //! (scrolling a viewport between pages) and quits. Rendering goes through
@@ -8,6 +8,50 @@
 //! screen-recording permission. Requires `--features screenshot`.
 
 use std::path::PathBuf;
+
+const HELP: &str = "\
+Feather, a web browser.
+
+Usage: feather [URL...] [OPTIONS]
+
+Each URL opens in its own tab.
+
+Options:
+  -h, --help             Show this help
+  --dark, --light        Override the system appearance
+  --size WxH             Window size (default 1100x800)
+
+Screenshots (builds with `--features screenshot`; render offscreen, then quit):
+  --screenshot OUT.png   Load the page, save a screenshot, and quit
+  --wait MS              Extra time before capturing (scripted pages)
+  --pages N              N viewport-sized shots, scrolling between them
+  --scroll PX            Scroll this far first
+  --row N                Start at this top-level row
+  --resize WxH           Resize the window after loading
+  --mouse X,Y[;X,Y...]   Move the mouse through these points (:hover)
+  --click X,Y            Click here (window coordinates) and let it settle
+  --type TEXT            Type into the address bar
+  --keys TEXT            Keystrokes after the click (`enter` ends with Enter)
+  --swipe PX[,end]       A two-finger sideways swipe (held, or released)
+  --wheel PX             A trackpad scroll gesture with momentum
+  --frames N             Save N frames from first paint (OUT-f1.png...)
+  --interval MS          Time between --frames (default 100)
+  --frame-scroll PX      Scroll this far before each frame
+  --bench FRAMES         Time scrolling FRAMES frames and print stats
+
+Environment:
+  FEATHER_NO_JS          Don't run scripts
+  FEATHER_NO_WEBFONTS    Don't load web fonts
+  FEATHER_DATA_DIR       Where history, cookies and favicons are kept
+  FEATHER_EVAL=FILE      Run this script in each page, FEATHER_EVAL_DELAY ms
+                         in (default 5000; negative: before the page's own)
+  FEATHER_DUMP_DOM=FILE  Keep writing the latest DOM snapshot here
+  FEATHER_JS_TRACE       Log who removes large subtrees
+  FEATHER_DEBUG_IO       Log IntersectionObserver decisions
+  FEATHER_DEBUG_SHADOW   Log shadow-tree styling
+  FEATHER_DEBUG_Z        Log stacking (z-index) priorities
+  BROWSER_DEBUG          Log navigation, clicks and script timing
+";
 
 #[derive(Debug, Clone)]
 pub struct Args {
@@ -100,6 +144,10 @@ impl Args {
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
+                "-h" | "--help" => {
+                    print!("{HELP}");
+                    std::process::exit(0);
+                }
                 "--dark" => args.dark = Some(true),
                 "--light" => args.dark = Some(false),
                 "--screenshot" => screenshot = it.next().map(PathBuf::from),

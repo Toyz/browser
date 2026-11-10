@@ -1825,6 +1825,23 @@ impl Builder<'_> {
         if shrink_to_fit {
             auto_percent_images(&style, &mut children);
         }
+        // A percentage height against a box whose height depends on its
+        // content behaves as `auto`: the image takes its natural ratio. One
+        // against a definite height (a 28px avatar frame) stays, and the
+        // picture fills it.
+        let definite_height = !style.height.is_auto()
+            || (matches!(style.position, style::Position::Absolute | style::Position::Fixed)
+                && !style.inset.top.is_auto()
+                && !style.inset.bottom.is_auto());
+        if !definite_height {
+            for child in &mut children {
+                if let LayoutBox::Image(i) = child
+                    && matches!(i.style.height, Length::Percent(_))
+                {
+                    Arc::make_mut(&mut i.style).height = Length::Auto;
+                }
+            }
+        }
         // So is a flex or grid item with no width of its own (content-sized:
         // Badge Directory's thumbnails, a <loom-image> in a flex box).
         if matches!(kind, BlockKind::Flex | BlockKind::Grid) {

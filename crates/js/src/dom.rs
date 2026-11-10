@@ -575,24 +575,9 @@ impl Runtime {
         self.dom.borrow_mut().changed();
         self.last_sent = Instant::now() - SNAPSHOT_EVERY;
         self.flush();
-        // Debugging: FEATHER_EVAL runs this script once, FEATHER_EVAL_MS
-        // (default 6000) after the page started, and prints what it returns.
-        let mut eval_at = std::env::var("FEATHER_EVAL").ok().map(|code| {
-            let ms = std::env::var("FEATHER_EVAL_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(6000);
-            (self.started + Duration::from_millis(ms), code)
-        });
         loop {
             self.settle();
-            if let Some((at, code)) = eval_at.take_if(|(at, _)| Instant::now() >= *at) {
-                let _ = at;
-                let out = self.cx.eval(Source::from_bytes(&code)).map(|v| v.display().to_string()).unwrap_or_else(|e| format!("error: {e}"));
-                eprintln!("eval: {out}");
-            }
             let next_timer = self.dom.borrow().timers.iter().map(|(t, _)| *t).min();
-            let next_timer = match &eval_at {
-                Some((at, _)) => Some(next_timer.map_or(*at, |t| t.min(*at))),
-                None => next_timer,
-            };
             let deadline = match (next_timer, self.flush_at) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),

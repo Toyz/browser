@@ -612,7 +612,13 @@ fn apply_position(d: Div, s: &ComputedStyle) -> Div {
 
 /// An inline-block's subtree (its margins are handled by the line it sits in).
 pub(crate) fn render_block_box(block: &Block, cx: &RenderCx) -> AnyElement {
-    render_block(block, cx, Edges::all(CssLength::ZERO), false)
+    // Laid out with its paragraph, after the boxes around it were rendered:
+    // in the rounded clip the paragraph was in (an avatar frame around an
+    // inline-block picture).
+    let outer = ROUND_CLIP.replace(cx.round_clip);
+    let el = render_block(block, cx, Edges::all(CssLength::ZERO), false);
+    ROUND_CLIP.set(outer);
+    el
 }
 
 /// A `position: fixed` box, for the viewport overlay layer: drawn after
@@ -930,17 +936,9 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
     let base = apply_box(div(), s, margin, cx)
         .when_some(shape.map(|(_, layers)| layers), |d, layers| d.child(layers))
         .text_color(cx.palette.color(s.color))
-        .when(fill, |d| d.w_full())
-        // Clipping boxes can shrink below their content (CSS's automatic
-        // minimum size is 0 for them: how `text-overflow` gets to show).
-        // Positioned boxes have no automatic minimum: they're as wide as
-        // their content measures (the estimate made Badge Directory's
-        // one-word labels wider than their text).
-        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible && !matches!(s.position, style::Position::Absolute | style::Position::Fixed), |d| {
-            // `min_content` is a border-box width.
-            let edges = if content_box(s) { s.horizontal_edges() } else { 0.0 };
-            d.min_w(px((block.min_content - edges).max(0.0)))
-        });
+        .when(fill, |d| d.w_full());
+    // (A flex item's automatic minimum width is its min-content width:
+    // taffy asks the text itself, shaped, not an estimate.)
     let scrolls = s.overflow == Overflow::Scroll && (!s.height.is_auto() || !s.max_height.is_auto());
     // Gradients, then a background image / mask icon, painted first
     // (behind the content).
@@ -1143,16 +1141,16 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
             d = d.w(px(w));
         }
     }
-    if s.height.is_auto() || matches!(s.height, CssLength::Percent(_)) {
+    // (A percentage height against a content-sized box was made `auto` when
+    // the boxes were built.)
+    if s.height.is_auto() {
         match ratio {
-            // (With a percentage height that resolves, the ratio is moot.)
             Some(r) => d.style().aspect_ratio = Some(r),
-            None if s.height.is_auto() => {
+            None => {
                 if let Some(h) = natural_height {
                     d = d.h(px(h));
                 }
             }
-            None => {}
         }
     }
     let content = match state {
