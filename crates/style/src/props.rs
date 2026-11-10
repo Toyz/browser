@@ -2549,13 +2549,19 @@ mod tests {
             parse("grid-template-columns", "1fr 2fr [end] 100px"),
             vec![
                 Decl::GridColumns(GridCols::Count(3)),
+                Decl::GridContentMin(true),
                 Decl::GridTracks(Some(vec![TrackSpec::Fr(1.0), TrackSpec::Fr(2.0), TrackSpec::Len(LenSpec::px(100.0))].into())),
             ]
         );
         // Equal columns don't need tracks.
         assert_eq!(
             parse("grid-template-columns", "repeat(4, minmax(0, 1fr))"),
-            vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridTracks(None)]
+            vec![Decl::GridColumns(GridCols::Count(4)), Decl::GridContentMin(false), Decl::GridTracks(None)]
+        );
+        // `1fr` alone never gets narrower than its content.
+        assert_eq!(
+            parse("grid-template-columns", "repeat(6, 1fr)"),
+            vec![Decl::GridColumns(GridCols::Count(6)), Decl::GridContentMin(true), Decl::GridTracks(None)]
         );
         assert_eq!(
             parse("flex", "1 1 0"),
@@ -2563,7 +2569,7 @@ mod tests {
         );
         assert_eq!(
             parse("grid-template-columns", "repeat(auto-fill, minmax(200px, 1fr))"),
-            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridTracks(None)]
+            vec![Decl::GridColumns(GridCols::AutoFill(LenSpec::px(200.0), false)), Decl::GridContentMin(false), Decl::GridTracks(None)]
         );
     }
 
