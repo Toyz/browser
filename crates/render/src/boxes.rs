@@ -3526,6 +3526,11 @@ impl InlineBuilder {
         spacer_style.strikethrough = false;
         spacer_style.white_space = style::WhiteSpace::Normal;
         spacer_style.text_transform = TextTransform::None;
+        // In the default sans-serif, where en and thin spaces are the widths
+        // counted on (a monospace font draws them a whole cell wide: GitHub's
+        // inline `code` had three times its padding).
+        spacer_style.font_family = style::FontFamily::Sans;
+        spacer_style.font_names = Default::default();
         // A spacer at the very start of a line shouldn't count as text that
         // later whitespace collapses against.
         let after_space = self.after_space;
