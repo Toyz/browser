@@ -5,7 +5,15 @@
 //! Declarations containing `var()` can't be parsed until the element's custom
 //! properties are known, so they're kept as [`Decl::Unresolved`].
 
-use std::sync::Arc;
+mod animation;
+mod background;
+mod box_model;
+mod effects;
+mod flex_grid;
+mod text;
+
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use cssparser::{ParseError, Parser, Token};
 
@@ -329,672 +337,102 @@ fn logical_sides(suffix: &str) -> Option<&'static [Side]> {
 }
 
 fn parse_property<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
-    use Decl as D;
-
-    // margin / padding (+ sides, + logical)
-    for (prefix, make) in [
-        ("margin", D::Margin as fn(Side, LenSpec) -> Decl),
-        ("padding", D::Padding as fn(Side, LenSpec) -> Decl),
-    ] {
-        if name == prefix {
-            let v = four(p, parse_len)?;
-            for (side, len) in Side::ALL.into_iter().zip(v) {
-                out.push(make(side, len));
-            }
-            return Ok(());
-        }
-        if let Some(sides) = name.strip_prefix(prefix).and_then(|s| s.strip_prefix('-')).and_then(logical_sides) {
-            let first = parse_len(p)?;
-            let second = p.try_parse(parse_len).unwrap_or_else(|_| first.clone());
-            for (i, &side) in sides.iter().enumerate() {
-                out.push(make(side, if i == 0 { first.clone() } else { second.clone() }));
-            }
-            return Ok(());
-        }
-    }
-
-    if let Some(rest) = name.strip_prefix("border") {
-        return parse_border_inner(rest, p, out);
-    }
-
-    match name {
-        "display" => out.push(D::Display(parse_display(p)?)),
-        "position" => out.push(D::Position(keyword(p, &[
-            ("static", Position::Static),
-            ("relative", Position::Relative),
-            ("absolute", Position::Absolute),
-            ("fixed", Position::Fixed),
-            ("sticky", Position::Sticky),
-            ("-webkit-sticky", Position::Sticky),
-        ])?)),
-        "top" | "right" | "bottom" | "left" | "inset-block-start" | "inset-block-end"
-        | "inset-inline-start" | "inset-inline-end" => {
-            let side = match name.trim_start_matches("inset-") {
-                "top" | "block-start" => Side::Top,
-                "right" | "inline-end" => Side::Right,
-                "bottom" | "block-end" => Side::Bottom,
-                _ => Side::Left,
-            };
-            out.push(D::Inset(side, parse_len(p)?));
-        }
-        "inset" => {
-            for (side, v) in Side::ALL.into_iter().zip(four(p, parse_len)?) {
-                out.push(D::Inset(side, v));
-            }
-        }
-        "inset-inline" | "inset-block" => {
-            let first = parse_len(p)?;
-            let second = p.try_parse(parse_len).unwrap_or_else(|_| first.clone());
-            let sides = if name == "inset-inline" { [Side::Left, Side::Right] } else { [Side::Top, Side::Bottom] };
-            out.push(D::Inset(sides[0], first));
-            out.push(D::Inset(sides[1], second));
-        }
-        "width" | "inline-size" => {
-            // `fit-content` / `max-content` / `min-content`: shrink to the content.
-            let fit = p
-                .try_parse(|p| match p.next()?.clone() {
-                    Token::Ident(id)
-                        if matches!(
-                            &*id.to_ascii_lowercase(),
-                            "fit-content" | "max-content" | "min-content" | "-moz-fit-content" | "-webkit-fit-content" | "-moz-max-content" | "-webkit-max-content"
-                        ) =>
-                    {
-                        Ok(())
-                    }
-                    Token::Function(f) if f.eq_ignore_ascii_case("fit-content") => p.parse_nested_block(|p| {
-                        while p.next().is_ok() {}
-                        Ok(())
-                    }),
-                    _ => err(p),
-                })
-                .is_ok();
-            if fit {
-                out.push(D::Width(LenSpec::Auto));
-                out.push(D::FitWidth(true));
-            } else {
-                out.push(D::Width(parse_len(p)?));
-            }
-        }
-        "height" | "block-size" => out.push(D::Height(parse_len(p)?)),
-        "min-width" | "min-inline-size" => out.push(D::MinWidth(parse_len(p)?)),
-        "min-height" | "min-block-size" => out.push(D::MinHeight(parse_len(p)?)),
-        "max-width" | "max-inline-size" => out.push(D::MaxWidth(parse_len(p)?)),
-        "max-height" | "max-block-size" => out.push(D::MaxHeight(parse_len(p)?)),
-
-        "color" => out.push(D::Color(parse_color(p)?)),
-        "background-color" => out.push(D::BackgroundColor(parse_color(p)?)),
-        // `text`: the background shows through the glyphs (gradient text).
-        "background-clip" | "-webkit-background-clip" => {
-            let mut text = false;
-            let mut layers = vec![true];
-            while !p.is_exhausted() {
-                match p.next() {
-                    Ok(Token::Ident(id)) => {
-                        text |= id.eq_ignore_ascii_case("text");
-                        if let Some(last) = layers.last_mut() {
-                            *last = id.eq_ignore_ascii_case("border-box");
-                        }
-                    }
-                    Ok(Token::Comma) => layers.push(true),
-                    _ => {}
-                }
-            }
-            out.push(D::ClipText(text));
-            out.push(D::BgClipBorder(layers.into()));
-        }
-        "-webkit-text-fill-color" => out.push(D::TextFill(parse_color(p)?)),
-        // `1`, `16 / 9`, `auto 4/3` (`auto` alone: none).
-        "aspect-ratio" => {
-            let mut nums = Vec::new();
-            while !p.is_exhausted() {
-                match p.next()?.clone() {
-                    Token::Number { value, .. } => nums.push(value),
-                    Token::Ident(_) | Token::Delim('/') => {}
-                    _ => return err(p),
-                }
-            }
-            let ratio = match nums.as_slice() {
-                [w] => Some(*w),
-                [w, h] if *h > 0.0 => Some(w / h),
-                _ => None,
-            };
-            out.push(D::AspectRatio(ratio.filter(|r| *r > 0.0)));
-        }
-        "background" => parse_background(p, out)?,
-        "background-image" => {
-            let layer = parse_image_layer(p)?;
-            out.push(D::BackgroundImage(layer.gradient));
-            out.push(D::Gradients(layer.gradients()));
-            out.push(D::BackgroundUrl(layer.url));
-        }
-        "background-repeat" => {
-            let layer = parse_image_layer(p)?;
-            out.push(D::BackgroundRepeat(layer.repeat.unwrap_or_default()));
-        }
-
-        "font" => parse_font(p, out)?,
-        "font-size" => out.push(D::FontSize(parse_font_size(p)?)),
-        "font-weight" => out.push(D::FontWeight(parse_weight(p)?)),
-        "font-style" => {
-            let v = ident(p)?;
-            // `oblique 10deg`
-            let _ = p.try_parse(|p| p.next().map(|_| ()));
-            out.push(D::Italic(matches!(v.as_str(), "italic" | "oblique")));
-        }
-        "font-family" => {
-            let (family, names) = parse_font_family(p)?;
-            out.extend([D::FontFamily(family), D::FontNames(names)]);
-        }
-        "line-height" => out.push(D::LineHeight(parse_line_height(p)?)),
-
-        "text-align" => out.push(D::TextAlign(keyword(p, &[
-            ("left", TextAlign::Left),
-            ("start", TextAlign::Left),
-            ("justify", TextAlign::Left),
-            ("-webkit-left", TextAlign::Left),
-            ("center", TextAlign::Center),
-            ("-webkit-center", TextAlign::Center),
-            ("-moz-center", TextAlign::Center),
-            ("right", TextAlign::Right),
-            ("end", TextAlign::Right),
-            ("-webkit-right", TextAlign::Right),
-            ("match-parent", TextAlign::Left),
-        ])?)),
-        "text-decoration" | "text-decoration-line" => parse_text_decoration(p, out)?,
-        "text-transform" => out.push(D::TextTransform(keyword(p, &[
-            ("none", TextTransform::None),
-            ("uppercase", TextTransform::Uppercase),
-            ("lowercase", TextTransform::Lowercase),
-            ("capitalize", TextTransform::Capitalize),
-        ])?)),
-        "white-space" => out.push(D::WhiteSpace(keyword(p, &[
-            ("normal", WhiteSpace::Normal),
-            ("nowrap", WhiteSpace::NoWrap),
-            ("pre", WhiteSpace::Pre),
-            ("pre-wrap", WhiteSpace::PreWrap),
-            ("break-spaces", WhiteSpace::PreWrap),
-            ("pre-line", WhiteSpace::PreLine),
-        ])?)),
-        "visibility" => out.push(D::Visible(ident(p)? == "visible")),
-        "list-style" | "list-style-type" => {
-            let mut found = None;
-            while !p.is_exhausted() {
-                if let Ok(ls) = p.try_parse(parse_list_style_type) {
-                    found = Some(ls);
-                } else {
-                    p.next()?; // image / position: ignored
-                }
-            }
-            match found {
-                Some(ls) => out.push(D::ListStyle(ls)),
-                None if name == "list-style" => out.push(D::ListStyle(ListStyle::Disc)),
-                None => return err(p),
-            }
-        }
-        "content" => out.push(D::Content(parse_content(p)?)),
-        "float" => out.push(D::Float(keyword(p, &[
-            ("none", Float::None),
-            ("left", Float::Left),
-            ("inline-start", Float::Left),
-            ("right", Float::Right),
-            ("inline-end", Float::Right),
-        ])?)),
-        "clear" => out.push(D::Clear(ident(p)? != "none")),
-        "color-scheme" => {
-            let mut dark = false;
-            while let Ok(id) = p.expect_ident_cloned() {
-                dark |= id.eq_ignore_ascii_case("dark");
-            }
-            out.push(D::ColorScheme(dark));
-        }
-        "z-index" => {
-            let z = p.try_parse(|p| p.expect_integer()).ok();
-            out.push(D::ZIndex(z));
-        }
-        "text-overflow" => {
-            let v = ident(p)?;
-            out.push(D::TextEllipsis(v.eq_ignore_ascii_case("ellipsis")));
-        }
-        "-webkit-line-clamp" | "line-clamp" => {
-            let n = p.try_parse(|p| p.expect_integer()).ok().filter(|&n| n > 0).map(|n| n as u32);
-            out.push(D::LineClamp(n));
-        }
-        "object-fit" => {
-            let fit = match ident(p)?.to_ascii_lowercase().as_str() {
-                "contain" => crate::ObjectFit::Contain,
-                "cover" => crate::ObjectFit::Cover,
-                "none" => crate::ObjectFit::None,
-                "scale-down" => crate::ObjectFit::ScaleDown,
-                _ => crate::ObjectFit::Fill,
-            };
-            out.push(D::ObjectFit(fit));
-        }
-        "container-type" | "container" => {
-            // `container: name / inline-size`: the type follows the slash.
-            let mut kind = 0;
-            while let Ok(token) = p.next() {
-                if let Token::Ident(id) = token {
-                    match id.to_ascii_lowercase().as_str() {
-                        "inline-size" => kind = 1,
-                        "size" => kind = 2,
-                        _ => {}
-                    }
-                }
-            }
-            out.push(D::ContainerType(kind));
-        }
-        "pointer-events" => {
-            let v = ident(p)?;
-            out.push(D::PointerEventsNone(v.eq_ignore_ascii_case("none")));
-        }
-        "cursor" => {
-            // `cursor: url(x.cur), pointer`: skip images, take the first keyword we know.
-            let mut cursor = None;
-            while !p.is_exhausted() {
-                if let Ok(Token::Ident(id)) = p.next().cloned() {
-                    let c = match id.to_ascii_lowercase().as_str() {
-                        "auto" | "default" | "none" | "context-menu" | "help" | "progress" | "wait" => Some(Cursor::Auto),
-                        "pointer" => Some(Cursor::Pointer),
-                        "text" | "vertical-text" => Some(Cursor::Text),
-                        "not-allowed" | "no-drop" => Some(Cursor::NotAllowed),
-                        "grab" => Some(Cursor::Grab),
-                        "grabbing" => Some(Cursor::Grabbing),
-                        "crosshair" | "cell" => Some(Cursor::Crosshair),
-                        "move" | "all-scroll" => Some(Cursor::Move),
-                        "col-resize" | "ew-resize" | "e-resize" | "w-resize" => Some(Cursor::ResizeColumn),
-                        "row-resize" | "ns-resize" | "n-resize" | "s-resize" => Some(Cursor::ResizeRow),
-                        _ => None,
-                    };
-                    if cursor.is_none() {
-                        cursor = c;
-                    }
-                }
-            }
-            out.push(D::Cursor(cursor.unwrap_or(Cursor::Auto)));
-        }
-        "box-sizing" | "-webkit-box-sizing" | "-moz-box-sizing" => {
-            out.push(D::BorderBox(ident(p)? == "border-box"))
-        }
-        "vertical-align" => {
-            let v = match p.try_parse(|p| keyword(p, &[
-                ("baseline", VerticalAlign::Baseline),
-                ("sub", VerticalAlign::Sub),
-                ("super", VerticalAlign::Super),
-                ("middle", VerticalAlign::Middle),
-                ("top", VerticalAlign::Top),
-                ("bottom", VerticalAlign::Bottom),
-                ("text-top", VerticalAlign::TextTop),
-                ("text-bottom", VerticalAlign::TextBottom),
-            ])) {
-                Ok(k) => VAlignSpec::Keyword(k),
-                Err(_) => VAlignSpec::Len(parse_len(p)?),
-            };
-            out.push(D::VerticalAlign(v));
-        }
-        "mask" | "-webkit-mask" => {
-            let layer = parse_image_layer(p)?;
-            out.push(D::Masked(layer.url.is_some() || layer.other_image));
-            out.push(D::MaskUrl(layer.url));
-            out.push(D::MaskSize(layer.size.unwrap_or(BgSizeSpec::Auto)));
-            out.push(D::MaskPosition(layer.position.unwrap_or(BgPos::TOP_LEFT)));
-        }
-        "mask-image" | "-webkit-mask-image" => {
-            let layer = parse_image_layer(p)?;
-            out.push(D::Masked(layer.url.is_some() || layer.other_image));
-            out.push(D::MaskUrl(layer.url));
-        }
-        "mask-size" | "-webkit-mask-size" => out.push(D::MaskSize(parse_bg_size(p)?)),
-        "mask-position" | "-webkit-mask-position" => out.push(D::MaskPosition(parse_bg_position(p)?)),
-        "background-size" => out.push(D::BackgroundSize(parse_bg_size(p)?)),
-        "background-position" => out.push(D::BackgroundPosition(parse_bg_position(p)?)),
-        "transition-property" => out.push(D::TransitionProperty(p.parse_comma_separated(|p| {
-            Ok(Arc::from(&*p.expect_ident_cloned()?.to_ascii_lowercase()))
-        })?)),
-        "transition-duration" => out.push(D::TransitionDuration(p.parse_comma_separated(parse_time)?)),
-        "transition-delay" => out.push(D::TransitionDelay(p.parse_comma_separated(parse_time)?)),
-        "transition-timing-function" => out.push(D::TransitionTiming(p.parse_comma_separated(parse_easing)?)),
-        "transition" => {
-            let items = p.parse_comma_separated(|p| {
-                let (mut property, mut times, mut easing) = (Arc::from("all"), Vec::new(), Easing::EASE);
-                while !p.is_exhausted() {
-                    if let Ok(t) = p.try_parse(parse_time) {
-                        times.push(t);
-                    } else if let Ok(e) = p.try_parse(parse_easing) {
-                        easing = e;
-                    } else if let Ok(id) = p.try_parse(|p| p.expect_ident_cloned()) {
-                        property = Arc::from(&*id.to_ascii_lowercase());
-                    } else {
-                        p.next()?;
-                    }
-                }
-                Ok((property, times.first().copied().unwrap_or(0.0), times.get(1).copied().unwrap_or(0.0), easing))
-            })?;
-            out.push(D::Transition(items));
-        }
-        "animation-name" => out.push(D::AnimationName(p.parse_comma_separated(|p| {
-            Ok(match p.next()?.clone() {
-                Token::Ident(s) | Token::QuotedString(s) => Arc::from(&*s),
-                _ => Arc::from("none"),
-            })
-        })?)),
-        "animation-duration" => out.push(D::AnimationDuration(p.parse_comma_separated(parse_time)?)),
-        "animation-delay" => out.push(D::AnimationDelay(p.parse_comma_separated(parse_time)?)),
-        "animation-timing-function" => out.push(D::AnimationTiming(p.parse_comma_separated(parse_easing)?)),
-        "animation-iteration-count" => out.push(D::AnimationIterations(p.parse_comma_separated(parse_iterations)?)),
-        "animation-direction" => out.push(D::AnimationDirection(p.parse_comma_separated(parse_direction)?)),
-        "animation-fill-mode" => out.push(D::AnimationFill(p.parse_comma_separated(parse_fill)?)),
-        "animation" => {
-            let items = p.parse_comma_separated(|p| {
-                let mut a = Animation {
-                    name: Arc::from("none"),
-                    duration: 0.0,
-                    delay: 0.0,
-                    easing: Easing::EASE,
-                    iterations: 1.0,
-                    direction: AnimDirection::Normal,
-                    fill_forwards: false,
-                    fill_backwards: false,
-                };
-                let mut times = 0;
-                while !p.is_exhausted() {
-                    if let Ok(t) = p.try_parse(parse_time) {
-                        if times == 0 { a.duration = t } else { a.delay = t }
-                        times += 1;
-                    } else if let Ok(e) = p.try_parse(parse_easing) {
-                        a.easing = e;
-                    } else if let Ok(n) = p.try_parse(parse_iterations) {
-                        a.iterations = n;
-                    } else if let Ok(d) = p.try_parse(parse_direction) {
-                        a.direction = d;
-                    } else if let Ok((f, b)) = p.try_parse(parse_fill) {
-                        (a.fill_forwards, a.fill_backwards) = (f, b);
-                    } else if let Ok(name) = p.try_parse(|p| match p.next()?.clone() {
-                        Token::Ident(s) if !matches!(&*s.to_ascii_lowercase(), "running" | "paused") => Ok(s),
-                        Token::QuotedString(s) => Ok(s),
-                        _ => err(p),
-                    }) {
-                        a.name = Arc::from(&*name);
-                    } else {
-                        p.next()?;
-                    }
-                }
-                Ok(a)
-            })?;
-            let items: Vec<Animation> = items.into_iter().filter(|a| &*a.name != "none").collect();
-            out.push(D::Animation((!items.is_empty()).then(|| items.into())));
-        }
-        "box-shadow" => {
-            if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
-                out.push(D::BoxShadow(None));
-            } else {
-                let layers = p.parse_comma_separated(|p| {
-                    let mut lengths = Vec::new();
-                    let mut color = None;
-                    let mut inset = false;
-                    while !p.is_exhausted() {
-                        if p.try_parse(|p| p.expect_ident_matching("inset")).is_ok() {
-                            inset = true;
-                        } else if let Ok(l) = p.try_parse(parse_len) {
-                            lengths.push(l);
-                        } else if let Ok(c) = p.try_parse(parse_color) {
-                            color = Some(c);
-                        } else {
-                            p.next()?;
-                        }
-                    }
-                    Ok(ShadowSpec { lengths, color: color.unwrap_or(Color::CurrentColor), inset })
-                })?;
-                let layers: Vec<ShadowSpec> = layers.into_iter().filter(|l| l.lengths.len() >= 2).collect();
-                out.push(D::BoxShadow((!layers.is_empty()).then(|| layers.into())));
-            }
-        }
-        "rotate" => {
-            // `rotate: 45deg` (axis forms like `rotate: x 45deg` aren't 2D).
-            let deg = if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() { 0.0 } else { parse_angle(p)? };
-            out.push(D::Rotate(deg));
-        }
-        "scale" => {
-            let (x, y) = if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
-                (1.0, 1.0)
-            } else {
-                let x = parse_factor(p)?;
-                (x, p.try_parse(parse_factor).unwrap_or(x))
-            };
-            out.push(D::Scale(x, y));
-        }
-        "transform" | "translate" => {
-            // Translations, rotations and scales (skews and 3D are ignored).
-            let (mut x, mut y) = (Vec::new(), Vec::new());
-            let (mut rotate, mut scale) = (0.0f32, (1.0f32, 1.0f32));
-            if name == "translate" {
-                if let Ok(v) = parse_len(p) {
-                    x.push(v);
-                }
-                if let Ok(v) = p.try_parse(parse_len) {
-                    y.push(v);
-                }
-            }
-            while !p.is_exhausted() {
-                let Ok(token) = p.next().cloned() else { break };
-                let Token::Function(f) = token else { continue };
-                let f = f.to_ascii_lowercase();
-                p.parse_nested_block(|p| {
-                    match f.as_str() {
-                        "rotate" | "rotatez" => rotate += parse_angle(p).unwrap_or(0.0),
-                        "scale" | "scalex" | "scaley" | "scale3d" => {
-                            let a = parse_factor(p).unwrap_or(1.0);
-                            let b = p.try_parse(|p| {
-                                p.expect_comma()?;
-                                parse_factor(p)
-                            });
-                            match f.as_str() {
-                                "scalex" => scale.0 *= a,
-                                "scaley" => scale.1 *= a,
-                                _ => {
-                                    scale.0 *= a;
-                                    scale.1 *= b.unwrap_or(a);
-                                }
-                            }
-                        }
-                        "matrix" => {
-                            let mut m = [0.0f32; 6];
-                            for (i, v) in m.iter_mut().enumerate() {
-                                if i > 0 {
-                                    p.expect_comma()?;
-                                }
-                                *v = p.expect_number()?;
-                            }
-                            let [a, b, c, d, e, f] = m;
-                            let sx = (a * a + b * b).sqrt();
-                            rotate += b.atan2(a).to_degrees();
-                            scale.0 *= sx;
-                            scale.1 *= if sx > 0.0 { (a * d - b * c) / sx } else { 0.0 };
-                            x.push(LenSpec::px(e));
-                            y.push(LenSpec::px(f));
-                        }
-                        _ => {
-                            let first = parse_len(p);
-                            let second = p.try_parse(|p| {
-                                p.expect_comma()?;
-                                parse_len(p)
-                            });
-                            match f.as_str() {
-                                "translate" | "translate3d" => {
-                                    x.extend(first.ok());
-                                    y.extend(second.ok());
-                                }
-                                "translatex" => x.extend(first.ok()),
-                                "translatey" => y.extend(first.ok()),
-                                _ => {}
-                            }
-                        }
-                    }
-                    while p.next().is_ok() {}
-                    Ok(())
-                })?;
-            }
-            let sum = |v: Vec<LenSpec>| match v.len() {
-                0 => LenSpec::px(0.0),
-                1 => v.into_iter().next().expect("one"),
-                _ => LenSpec::Lin(v.iter().filter_map(|l| match l { LenSpec::Lin(l) => Some(*l), _ => None }).fold(Lin::default(), |a, b| a + b)),
-            };
-            out.push(D::Translate(sum(x), sum(y)));
-            if name == "transform" {
-                out.push(D::Rotate(rotate));
-                out.push(D::Scale(scale.0, scale.1));
-            }
-        }
-        "opacity" => {
-            let v = match p.next()?.clone() {
-                Token::Number { value, .. } => value,
-                Token::Percentage { unit_value, .. } => unit_value,
-                _ => return err(p),
-            };
-            out.push(D::Opacity(v.clamp(0.0, 1.0)));
-        }
-        "overflow" | "overflow-x" | "overflow-y" => {
-            let mut overflow = Overflow::Visible;
-            while !p.is_exhausted() {
-                overflow = overflow.max_with(match ident(p)?.as_str() {
-                    "hidden" | "clip" => Overflow::Hidden,
-                    "auto" | "scroll" | "overlay" => Overflow::Scroll,
-                    _ => Overflow::Visible,
-                });
-            }
-            out.push(D::Overflow(overflow));
-        }
-
-        // ---- flexbox ----
-        "flex-direction" => out.push(D::FlexDirection(parse_flex_direction(p)?)),
-        "flex-wrap" => out.push(D::FlexWrap(ident(p)? != "nowrap")),
-        "flex-flow" => {
-            while !p.is_exhausted() {
-                if let Ok(d) = p.try_parse(parse_flex_direction) {
-                    out.push(D::FlexDirection(d));
-                } else {
-                    out.push(D::FlexWrap(ident(p)? != "nowrap"));
-                }
-            }
-        }
-        "justify-content" => out.push(D::JustifyContent(parse_justify(p)?)),
-        "align-items" => out.push(D::AlignItems(parse_align(p)?)),
-        "align-self" => {
-            out.push(D::AlignSelf(match p.try_parse(|p| p.expect_ident_matching("auto")) {
-                Ok(()) => None,
-                Err(_) => Some(parse_align(p)?),
-            }))
-        }
-        "align-content" => out.push(D::AlignContent(parse_justify(p)?)),
-        "place-items" => {
-            out.push(D::AlignItems(parse_align(p)?));
-            let _ = p.try_parse(parse_align);
-        }
-        "place-content" => {
-            let a = parse_justify(p)?;
-            let j = p.try_parse(parse_justify).unwrap_or(a);
-            out.push(D::AlignContent(a));
-            out.push(D::JustifyContent(j));
-        }
-        "gap" | "grid-gap" => {
-            let row = parse_len(p)?;
-            let col = p.try_parse(parse_len).unwrap_or_else(|_| row.clone());
-            out.push(D::RowGap(row));
-            out.push(D::ColumnGap(col));
-        }
-        "row-gap" | "grid-row-gap" => out.push(D::RowGap(parse_len(p)?)),
-        "column-gap" | "grid-column-gap" => out.push(D::ColumnGap(parse_len(p)?)),
-        "flex-grow" => out.push(D::FlexGrow(p.expect_number()?)),
-        "flex-shrink" => out.push(D::FlexShrink(p.expect_number()?)),
-        "flex-basis" => out.push(D::FlexBasis(parse_len(p)?)),
-        "flex" => parse_flex(p, out)?,
-
-        // ---- grid ----
-        "grid-template-columns" => parse_template_columns(p, out)?,
-        "grid-template-areas" => out.push(D::GridAreas(parse_areas(p))),
-        "grid-template" => {
-            // `<rows> / <columns>`, or `"a b" "c d" / <columns>`.
-            if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
-                out.push(D::GridColumns(GridCols::None));
-                out.push(D::GridTracks(None));
-                out.push(D::GridAreas(None));
-            } else {
-                let mut areas: Vec<Arc<[Arc<str>]>> = Vec::new();
-                let mut slash = false;
-                while !p.is_exhausted() {
-                    match p.next()?.clone() {
-                        Token::Delim('/') => {
-                            slash = true;
-                            break;
-                        }
-                        Token::QuotedString(row) => areas.push(area_row(&row)),
-                        _ => {}
-                    }
-                }
-                if slash {
-                    parse_template_columns(p, out)?;
-                }
-                if !areas.is_empty() {
-                    out.push(D::GridAreas(Some(areas.into())));
-                }
-            }
-        }
-        "grid-area" => {
-            let name = p.try_parse(|p| p.expect_ident_cloned()).ok().filter(|n| !n.eq_ignore_ascii_case("auto"));
-            // `grid-area: 1 / 1` (row start / column start / ...): line numbers.
-            let mut lines = Vec::new();
-            while let Ok(t) = p.next().cloned() {
-                if let Token::Number { int_value: Some(n), .. } = t {
-                    lines.push(n);
-                }
-            }
-            if name.is_none() && !lines.is_empty() {
-                out.push(D::GridRowStart(lines.first().map(|&n| n as i16)));
-                out.push(D::GridColumnStart(lines.get(1).map(|&n| n as i16)));
-            }
-            out.push(D::GridArea(name.map(|n| Arc::from(&*n))));
-        }
-        "grid-row-start" | "grid-row" => {
-            let n = p.try_parse(|p| p.expect_integer()).ok();
-            while p.next().is_ok() {}
-            out.push(D::GridRowStart(n.map(|n| n as i16)));
-        }
-        "grid-column-start" => {
-            let n = p.try_parse(|p| p.expect_integer()).ok();
-            while p.next().is_ok() {}
-            out.push(D::GridColumnStart(n.map(|n| n as i16)));
-        }
-        "grid-column" | "grid-column-end" => {
-            if name == "grid-column"
-                && let Ok(n) = p.try_parse(|p| p.expect_integer())
-            {
-                // `grid-column: 2 / 4`: a start line (and maybe an end).
-                out.push(D::GridColumnStart(Some(n as i16)));
-            }
-            let mut span = None;
-            let mut values = Vec::new();
-            while !p.is_exhausted() {
-                match p.next()?.clone() {
-                    Token::Ident(id) if id.eq_ignore_ascii_case("span") => {
-                        if let Ok(n) = p.expect_integer() {
-                            span = Some(GridSpan::Span(n.clamp(1, 100) as u16));
-                        }
-                    }
-                    Token::Number { int_value: Some(n), .. } => values.push(n),
-                    _ => {}
-                }
-            }
-            if values.last() == Some(&-1) {
-                span = Some(GridSpan::Full);
-            }
-            out.push(D::GridColumn(span));
-        }
-
-        _ => {
+    match registry().get(name) {
+        Some(parse) => parse(name, p, out),
+        None => {
             // Unsupported property: consume it so it isn't "invalid", just ignored.
             while p.next().is_ok() {}
+            Ok(())
         }
     }
+}
+
+/// How a property's value is parsed into declarations (`name` is the
+/// property as written, for parsers shared by several).
+pub(crate) type ParseFn = for<'i> fn(&str, &mut Parser<'i>, &mut Vec<Decl>) -> PResult<'i, ()>;
+
+/// Every property we understand, by name.
+fn registry() -> &'static HashMap<&'static str, ParseFn> {
+    static REGISTRY: OnceLock<HashMap<&'static str, ParseFn>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut map: HashMap<&'static str, ParseFn> = HashMap::new();
+        for table in [
+            box_model::PROPERTIES,
+            text::PROPERTIES,
+            background::PROPERTIES,
+            flex_grid::PROPERTIES,
+            effects::PROPERTIES,
+            animation::PROPERTIES,
+            FAMILIES,
+        ] {
+            for &(name, parse) in table {
+                let clash = map.insert(name, parse);
+                debug_assert!(clash.is_none(), "property {name} registered twice");
+            }
+        }
+        map
+    })
+}
+
+/// Whether the registry knows `name` (for `@supports` and tests).
+pub fn is_supported(name: &str) -> bool {
+    registry().contains_key(name.to_ascii_lowercase().as_str())
+}
+
+/// Margins, padding and borders: a property per side, per logical side and
+/// per component, all parsed by a few shared functions.
+const FAMILIES: &[(&str, ParseFn)] = &[
+    ("margin", p_margin), ("margin-top", p_margin), ("margin-right", p_margin), ("margin-bottom", p_margin), ("margin-left", p_margin),
+    ("margin-inline", p_margin), ("margin-block", p_margin), ("margin-inline-start", p_margin), ("margin-inline-end", p_margin),
+    ("margin-block-start", p_margin), ("margin-block-end", p_margin),
+    ("padding", p_padding), ("padding-top", p_padding), ("padding-right", p_padding), ("padding-bottom", p_padding), ("padding-left", p_padding),
+    ("padding-inline", p_padding), ("padding-block", p_padding), ("padding-inline-start", p_padding), ("padding-inline-end", p_padding),
+    ("padding-block-start", p_padding), ("padding-block-end", p_padding),
+    ("border", p_border), ("border-width", p_border), ("border-style", p_border), ("border-color", p_border), ("border-radius", p_border),
+    ("border-top", p_border), ("border-right", p_border), ("border-bottom", p_border), ("border-left", p_border),
+    ("border-top-width", p_border), ("border-right-width", p_border), ("border-bottom-width", p_border), ("border-left-width", p_border),
+    ("border-top-style", p_border), ("border-right-style", p_border), ("border-bottom-style", p_border), ("border-left-style", p_border),
+    ("border-top-color", p_border), ("border-right-color", p_border), ("border-bottom-color", p_border), ("border-left-color", p_border),
+    ("border-top-left-radius", p_border), ("border-top-right-radius", p_border), ("border-bottom-left-radius", p_border), ("border-bottom-right-radius", p_border),
+    ("border-inline", p_border), ("border-block", p_border), ("border-inline-start", p_border), ("border-inline-end", p_border),
+    ("border-block-start", p_border), ("border-block-end", p_border),
+    ("border-inline-width", p_border), ("border-block-width", p_border), ("border-inline-color", p_border), ("border-block-color", p_border),
+    ("border-inline-style", p_border), ("border-block-style", p_border),
+    ("border-inline-start-width", p_border), ("border-inline-end-width", p_border), ("border-block-start-width", p_border), ("border-block-end-width", p_border),
+    ("border-inline-start-color", p_border), ("border-inline-end-color", p_border), ("border-block-start-color", p_border), ("border-block-end-color", p_border),
+    ("border-inline-start-style", p_border), ("border-inline-end-style", p_border), ("border-block-start-style", p_border), ("border-block-end-style", p_border),
+    ("border-start-start-radius", p_border), ("border-start-end-radius", p_border), ("border-end-start-radius", p_border), ("border-end-end-radius", p_border),
+    ("border-collapse", p_border), ("border-spacing", p_border), ("border-image", p_border),
+];
+
+fn p_margin<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    box_sides("margin", Decl::Margin, name, p, out)
+}
+
+fn p_padding<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    box_sides("padding", Decl::Padding, name, p, out)
+}
+
+/// `margin`/`padding` and their per-side and logical longhands.
+fn box_sides<'i>(prefix: &str, make: fn(Side, LenSpec) -> Decl, name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    if name == prefix {
+        let v = four(p, parse_len)?;
+        for (side, len) in Side::ALL.into_iter().zip(v) {
+            out.push(make(side, len));
+        }
+        return Ok(());
+    }
+    let Some(sides) = name.strip_prefix(prefix).and_then(|s| s.strip_prefix('-')).and_then(logical_sides) else { return err(p) };
+    let first = parse_len(p)?;
+    let second = p.try_parse(parse_len).unwrap_or_else(|_| first.clone());
+    for (i, &side) in sides.iter().enumerate() {
+        out.push(make(side, if i == 0 { first.clone() } else { second.clone() }));
+    }
     Ok(())
+}
+
+fn p_border<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    parse_border_inner(name.strip_prefix("border").unwrap_or(name), p, out)
 }
 
 impl Overflow {
