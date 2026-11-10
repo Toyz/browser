@@ -2018,10 +2018,17 @@
       if (again) setTimeout(deliverResizes, 16);
     }
   }
-  function layout(flat, vw, vh) {
+  // Elements painted in the tab's latest frame (layoutRects keeps the last
+  // rect of ones that no longer are).
+  const painted = new Set();
+  function layout(flat, vw, vh, gone) {
     const resized = viewport[0] !== vw || viewport[1] !== vh;
     viewport = [vw, vh];
-    for (let i = 0; i + 4 < flat.length; i += 5) layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
+    for (let i = 0; i + 4 < flat.length; i += 5) {
+      layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
+      painted.add(flat[i]);
+    }
+    if (gone) for (const id of gone) painted.delete(id);
     deliverResizes();
     deliverIntersections();
     if (resized) window.dispatchEvent(new Event("resize"));
@@ -2101,9 +2108,13 @@
   // "visible", and infinite feeds loaded page after page in the background.
   const intersectionObservers = new Set();
   const NEAR_ANCESTORS = 4;
+  // Where `el` is painted now: its own box if it has ever had one (not
+  // painted now: nowhere); a box that never got one (a 0x0 lazy <img>)
+  // goes by its nearest painted ancestor.
   function paintedRect(el) {
-    for (let n = el, i = 0; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) {
-      const r = layoutRects.get(n.__id);
+    if (layoutRects.has(el.__id)) return painted.has(el.__id) ? layoutRects.get(el.__id) : undefined;
+    for (let n = el.parentNode, i = 1; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) {
+      const r = painted.has(n.__id) && layoutRects.get(n.__id);
       if (r) return r;
     }
     return undefined;
@@ -2156,6 +2167,7 @@
         const ratio = !inside ? 0 : area > 0 ? ((ax - ix) * (ay - iy)) / area : 1;
         const visible = inside && this.thresholds.some((t) => (t === 0 ? true : ratio >= t));
         if (last === visible) continue;
+        if (visible && N.debugIO && N.debugIO()) console.log("IODBG visible " + target.localName + "." + String(target.className).slice(0, 60) + " r=" + JSON.stringify(r) + " own=" + JSON.stringify(layoutRects.get(target.__id) || null) + " vp=" + viewport + " box=" + JSON.stringify(box));
         this._targets.set(target, visible);
         entries.push(new IntersectionObserverEntry({
           target, isIntersecting: visible, intersectionRatio: ratio, time: N.now(),

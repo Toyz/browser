@@ -617,7 +617,7 @@ fn layout_reaches_scripts() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(host.measured.read().unwrap().contains(&b));
-    host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], viewport: (1024.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1024.0, 700.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(2);
     while !text.contains('|') && std::time::Instant::now() < until {
@@ -657,7 +657,7 @@ fn mouse_events_reach_scripts() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(host.hears_mouse(&[c]) && host.hears_mouse(&[root]));
-    host.send(js::ToJs::Layout { rects: vec![(c, [10.0, 20.0, 300.0, 150.0])], viewport: (1000.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(c, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1000.0, 700.0) });
     host.send(js::ToJs::Mouse { kind: "mousedown", node: c, x: 50.0, y: 60.0, button: 0, buttons: 1, delta: (0.0, 0.0) });
     host.send(js::ToJs::Mouse { kind: "wheel", node: c, x: 50.0, y: 60.0, button: 0, buttons: 0, delta: (0.0, 120.0) });
     let mut text = String::new();
@@ -759,7 +759,7 @@ fn intersection_observer_follows_layout() {
     let (_, host) = js::start(doc, opts);
     let host = host.unwrap();
     // `a` is in view, `b` far below it (even with the margin), `c` never painted.
-    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], viewport: (1024.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], gone: Vec::new(), viewport: (1024.0, 700.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(3);
     // (The settle check before the layout reports everything as out of view.)

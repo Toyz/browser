@@ -76,8 +76,11 @@ pub enum ToJs {
     /// `dblclick` or `wheel`, at viewport coordinates.
     Mouse { kind: &'static str, node: NodeId, x: f32, y: f32, button: i16, buttons: u16, delta: (f32, f32) },
     /// Where the elements scripts measure are (`[x, y, width, height]`,
-    /// relative to the viewport), and the viewport's size.
-    Layout { rects: Vec<(NodeId, [f32; 4])>, viewport: (f32, f32) },
+    /// relative to the viewport), and the viewport's size. `gone`: measured
+    /// elements that stopped being painted (hidden, or scrolled out of the
+    /// rows on screen); their last rect stays for `getBoundingClientRect`,
+    /// but they no longer intersect anything.
+    Layout { rects: Vec<(NodeId, [f32; 4])>, gone: Vec<NodeId>, viewport: (f32, f32) },
     /// Back/forward between history entries of this document (made by
     /// `pushState`): `popstate` with the entry `delta` steps away.
     Traverse { delta: i32 },

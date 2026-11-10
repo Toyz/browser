@@ -629,13 +629,14 @@ impl Runtime {
                 ];
                 self.call_global("__dispatchMouse", &args);
             }
-            ToJs::Layout { rects, viewport } => {
+            ToJs::Layout { rects, gone, viewport } => {
                 let flat: Vec<JsValue> = rects
                     .iter()
                     .flat_map(|(n, r)| [JsValue::from(node_to_number(*n)), r[0].into(), r[1].into(), r[2].into(), r[3].into()])
                     .collect();
                 let flat = JsArray::from_iter(flat, &mut self.cx);
-                self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1)]);
+                let gone = JsArray::from_iter(gone.iter().map(|n| JsValue::from(node_to_number(*n))), &mut self.cx);
+                self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1), gone.into()]);
             }
             ToJs::Focus { node } => {
                 let id = node.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
@@ -1247,6 +1248,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let delay: f64 = std::env::var("FEATHER_EVAL_DELAY").ok().and_then(|d| d.parse().ok()).unwrap_or(5000.0);
         Ok(JsArray::from_iter([JsValue::from(js_string!(src)), JsValue::from(delay)], cx).into())
     }));
+    add("debugIO", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_DEBUG_IO").is_some()))));
     add("trace", 0, Box::new(|_, _, _| Ok(JsValue::from(std::env::var_os("FEATHER_JS_TRACE").is_some()))));
     add("dark", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().dark))));
     add("now", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().started.elapsed().as_secs_f64() * 1000.0))));

@@ -121,6 +121,13 @@ pub struct Tab {
     bounds_frame: Rc<std::cell::Cell<u64>>,
     bounds_seen: Rc<std::cell::RefCell<HashMap<NodeId, u64>>>,
     layout_sent: HashMap<NodeId, [f32; 4]>,
+    /// Measured elements painted in an earlier frame but not the latest,
+    /// for the next `send_layout`.
+    layout_gone: Vec<NodeId>,
+    /// (Debugging) the list's scroll position last frame.
+    debug_scroll_top: std::cell::Cell<Option<(usize, f32, usize)>>,
+    /// Measured elements painted in the last frame scripts were told about.
+    layout_painted: HashSet<NodeId>,
     layout_viewport_sent: (f32, f32),
     layout_scheduled: Rc<std::cell::Cell<bool>>,
     /// A restyle is building; another was asked for meanwhile.
@@ -231,6 +238,9 @@ impl Tab {
             bounds_frame: Rc::default(),
             bounds_seen: Rc::default(),
             layout_sent: HashMap::new(),
+            layout_gone: Vec::new(),
+            debug_scroll_top: Default::default(),
+            layout_painted: HashSet::new(),
             layout_viewport_sent: (0.0, 0.0),
             layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
@@ -518,6 +528,8 @@ impl Tab {
         self.restyle_queued = false;
         self.measured_bounds.borrow_mut().0.clear();
         self.layout_sent.clear();
+        self.layout_gone.clear();
+        self.layout_painted.clear();
         self.layout_viewport_sent = (0.0, 0.0);
         self._scroll_end = None;
         self.hover_styler = None;
@@ -568,6 +580,41 @@ impl Tab {
         self.show(url, true, window, cx);
     }
 
+    /// The frame that just finished: measured elements it didn't paint
+    /// (hidden, or in rows scrolled out of the list) that scripts still
+    /// think are on screen. An IntersectionObserver must hear they're gone:
+    /// a "load more" sentinel kept intersecting from its last rect, and
+    /// YouTube loaded result after result.
+    fn note_unpainted(&mut self, cx: &mut Context<Self>) {
+        if self.page.as_ref().and_then(|p| p.scripts.as_ref()).is_none() {
+            return;
+        }
+        let frame = self.bounds_frame.get();
+        let seen = self.bounds_seen.borrow();
+        let now: HashSet<NodeId> = seen.iter().filter(|(_, f)| **f == frame).map(|(n, _)| *n).collect();
+        drop(seen);
+        if now.is_empty() && self.layout_painted.is_empty() {
+            return;
+        }
+        let gone: Vec<NodeId> = self.layout_painted.difference(&now).copied().collect();
+        // Painted again: the next layout message lists it among the rects
+        // only if it moved, so make sure it does.
+        for n in now.difference(&self.layout_painted) {
+            self.layout_sent.remove(n);
+        }
+        self.layout_painted = now;
+        if gone.is_empty() {
+            return;
+        }
+        self.layout_gone.extend(gone);
+        if !self.layout_scheduled.replace(true) {
+            let tab = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                tab.update(cx, |this, _| this.send_layout()).ok();
+            });
+        }
+    }
+
     /// Tell the page's scripts where the elements they measure were
     /// painted (what changed since last time).
     fn send_layout(&mut self) {
@@ -579,14 +626,15 @@ impl Tab {
                 store.0.iter().filter(|(n, r)| self.layout_sent.get(n) != Some(r)).map(|(n, r)| (*n, *r)).collect();
             (changed, store.1)
         };
-        if rects.is_empty() && viewport == self.layout_viewport_sent {
+        if rects.is_empty() && self.layout_gone.is_empty() && viewport == self.layout_viewport_sent {
             return;
         }
         for (n, r) in &rects {
             self.layout_sent.insert(*n, *r);
         }
         self.layout_viewport_sent = viewport;
-        host.send(js::ToJs::Layout { rects, viewport });
+        let gone = std::mem::take(&mut self.layout_gone);
+        host.send(js::ToJs::Layout { rects, gone, viewport });
     }
 
     /// The page's scripts changed its address (`history.pushState`, or
@@ -1150,7 +1198,9 @@ impl Tab {
                     cx.background_executor().timer(Duration::from_millis(200)).await;
                 }
             };
-            if job.frames > 0 {
+            // `--frames`: what the page does over time, from when it shows
+            // (or, with `--click`, from the click and keys on).
+            let record_frames = async |cx: &mut AsyncWindowContext| {
                 for frame in 0..job.frames {
                     let path = job.frame_path(frame);
                     cx.update(|window, cx| {
@@ -1164,6 +1214,9 @@ impl Tab {
                 }
                 println!("saved {} frames", job.frames);
                 cx.update(|_, cx| cx.quit()).ok();
+            };
+            if job.frames > 0 && job.click.is_none() {
+                record_frames(cx).await;
                 return;
             }
             if job.wait > 0 {
@@ -1252,6 +1305,10 @@ impl Tab {
                         }
                     })
                     .ok();
+                }
+                if job.frames > 0 {
+                    record_frames(cx).await;
+                    return;
                 }
                 // Whatever it did (restyle, navigation) gets time to finish.
                 cx.background_executor().timer(Duration::from_millis(2500)).await;
@@ -1965,6 +2022,14 @@ impl Tab {
 
 impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            let top = self.list_state.logical_scroll_top();
+            let now = (top.item_ix, f32::from(top.offset_in_item), self.list_state.item_count());
+            if self.debug_scroll_top.replace(Some(now)) != Some(now) {
+                eprintln!("scroll: row {} +{:.0}px of {} rows", now.0, now.1, now.2);
+            }
+        }
+        self.note_unpainted(cx);
         self.bounds_frame.set(self.bounds_frame.get() + 1);
         self.animation_frame(window);
         self.apply_row_hint(window);
