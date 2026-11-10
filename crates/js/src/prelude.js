@@ -687,8 +687,18 @@
     contains(other) { for (let n = other; n; n = n.parentNode) if (n === this) return true; return false; }
     appendChild(c) { N.insert(this.__id, c.__id, null); return c; }
     insertBefore(c, ref) { N.insert(this.__id, c.__id, ref ? ref.__id : null); return c; }
-    removeChild(c) { N.remove(c.__id); return c; }
-    replaceChild(n, old) { N.insert(this.__id, n.__id, old.__id); N.remove(old.__id); return old; }
+    // Only a child can be removed or replaced (anything else is an error,
+    // not a removal from wherever it is).
+    removeChild(c) {
+      if (!c || c.parentNode !== this) throw new DOMException("The node to be removed is not a child of this node.", "NotFoundError");
+      N.remove(c.__id);
+      return c;
+    }
+    replaceChild(n, old) {
+      if (!old || old.parentNode !== this) throw new DOMException("The node to be replaced is not a child of this node.", "NotFoundError");
+      N.insert(this.__id, n.__id, old.__id); N.remove(old.__id);
+      return old;
+    }
     cloneNode(deep) { return wrap(N.clone(this.__id, !!deep)); }
     isEqualNode(o) { return o === this; }
     isSameNode(o) { return o === this; }
@@ -2178,9 +2188,7 @@
       if (typeof s.onabort === "function") s.onabort(new Event("abort"));
     }
   }
-  class DOMException extends Error {
-    constructor(message, name) { super(message); this.name = name || "Error"; }
-  }
+  // DOMException is native (dom_exception.rs).
 
   // Requests in flight: id → callback(error, response fields).
   const requests = new Map();
@@ -2397,7 +2405,7 @@
   Object.assign(window, {
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
     fetch, Request, Response, XMLHttpRequest, FormData, TextEncoder, TextDecoder,
-    AbortController, AbortSignal, DOMException,
+    AbortController, AbortSignal,
     __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
     __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },
     __fetchDone(...args) {

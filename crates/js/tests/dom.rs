@@ -875,6 +875,17 @@ fn headers_are_native_and_follow_fetch() {
 }
 
 #[test]
+fn dom_exception_is_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const e = new DOMException("gone", "AbortError");
+        let caught = "";
+        try { document.createElement("div").removeChild(document.body); } catch (x) { caught = x instanceof DOMException ? x.name : "other:" + x; }
+        document.getElementById("o").textContent = [e instanceof Error, e instanceof DOMException, e.name, e.message, e.code, DOMException.ABORT_ERR, String(e), new DOMException().name, caught].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true AbortError gone 20 20 AbortError: gone Error NotFoundError");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

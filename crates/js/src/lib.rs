@@ -25,6 +25,7 @@ mod crypto;
 mod blob;
 mod aria;
 mod headers;
+mod dom_exception;
 mod window_api;
 mod images;
 mod modules;
