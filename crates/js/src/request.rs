@@ -4,7 +4,6 @@
 
 use boa_engine::class::{Class, ClassBuilder};
 use boa_engine::object::FunctionObjectBuilder;
-use boa_engine::object::builtins::JsPromise;
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string};
 use boa_gc::{Finalize, GcRefCell, Trace};
@@ -41,14 +40,6 @@ fn with<R>(this: &JsValue, f: impl FnOnce(&Request) -> R) -> JsResult<R> {
     Ok(f(&r))
 }
 
-/// `new Headers(init)`.
-fn headers(init: &JsValue, cx: &mut Context) -> JsResult<JsObject> {
-    let class = cx.global_object().get(js_string!("Headers"), cx)?;
-    let class = class.as_constructor().ok_or_else(|| JsNativeError::typ().with_message("no Headers"))?;
-    let args: &[JsValue] = if init.is_undefined() { &[] } else { std::slice::from_ref(init) };
-    class.construct(args, None, cx)
-}
-
 /// `init[key]`, when `init` is an object and it's there.
 fn option(init: Option<&JsObject>, key: &str, cx: &mut Context) -> JsResult<Option<JsValue>> {
     let Some(o) = init else { return Ok(None) };
@@ -56,59 +47,46 @@ fn option(init: Option<&JsObject>, key: &str, cx: &mut Context) -> JsResult<Opti
     Ok((!v.is_undefined()).then_some(v))
 }
 
-/// The body read as bytes (it can be read once).
-fn take_body(this: &JsValue, cx: &mut Context) -> JsResult<Vec<u8>> {
-    let body = with(this, |r| {
-        if r.body_used.replace(true) {
-            return Err(JsNativeError::typ().with_message("Body has already been consumed."));
+impl crate::body::HasBody for Request {
+    fn take_body(&self, cx: &mut Context) -> JsResult<Option<Vec<u8>>> {
+        if self.body_used.replace(true) {
+            return Ok(None);
         }
-        Ok(r.body.borrow().clone())
-    })??;
-    if body.is_null_or_undefined() {
-        return Ok(Vec::new());
+        let body = self.body.borrow().clone();
+        if body.is_null_or_undefined() {
+            return Ok(Some(Vec::new()));
+        }
+        Ok(Some(crate::blob::encode(&body, cx)?.0))
     }
-    let encoded = crate::blob::encode(&body, cx)?;
-    Ok(encoded.0)
+    fn body_used(&self) -> bool {
+        self.body_used.get()
+    }
+    fn headers(&self) -> JsObject {
+        self.headers.clone()
+    }
 }
 
-/// A body reader: `make` turns the bytes into what it resolves with.
-fn reader(this: &JsValue, cx: &mut Context, make: fn(Vec<u8>, &JsValue, &mut Context) -> JsResult<JsValue>) -> JsResult<JsValue> {
-    let result = take_body(this, cx).and_then(|bytes| make(bytes, this, cx));
-    Ok(match result {
-        Ok(v) => JsPromise::resolve(v, cx)?.into(),
-        Err(e) => JsPromise::reject(e, cx)?.into(),
-    })
+/// What the network is asked for a `Request`: its method, URL, headers
+/// (the body's content type added), body and options. `None` if `o` isn't
+/// a Request.
+pub(crate) fn parts(o: &JsObject, cx: &mut Context) -> JsResult<Option<crate::cors::ScriptRequest>> {
+    let Some((url, method, headers, body, options)) = o.downcast_ref::<Request>().map(|r| (r.url.clone(), r.method.clone(), r.headers.clone(), r.body.borrow().clone(), r.options.clone())) else {
+        return Ok(None);
+    };
+    let Ok(url) = url::Url::parse(&url) else { return Ok(None) };
+    let mut pairs = crate::body::header_pairs(&headers, cx)?;
+    let body = if body.is_null_or_undefined() {
+        None
+    } else {
+        let (bytes, kind) = crate::blob::encode(&body, cx)?;
+        if let Some(kind) = kind.filter(|_| !pairs.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type"))) {
+            pairs.push(("content-type".into(), kind));
+        }
+        Some(bytes)
+    };
+    let [mode, credentials, ..] = options;
+    Ok(Some(crate::cors::ScriptRequest { method, url, headers: pairs, body, mode, credentials }))
 }
-
-type Method = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
-
-const READERS: &[(&str, Method)] = &[
-    ("text", |this, _, cx| reader(this, cx, |b, _, _| Ok(JsString::from(String::from_utf8_lossy(&b).as_ref()).into()))),
-    ("json", |this, _, cx| {
-        reader(this, cx, |b, _, cx| {
-            let text = JsValue::from(JsString::from(String::from_utf8_lossy(&b).as_ref()));
-            let json = cx.intrinsics().objects().json();
-            let parse = json.get(js_string!("parse"), cx)?;
-            parse.as_callable().expect("JSON.parse").call(&json.clone().into(), &[text], cx)
-        })
-    }),
-    ("arrayBuffer", |this, _, cx| reader(this, cx, |b, _, cx| crate::blob::array_buffer(&b, cx))),
-    ("bytes", |this, _, cx| reader(this, cx, |b, _, cx| crate::blob::uint8_array(&b, cx))),
-    ("blob", |this, _, cx| {
-        reader(this, cx, |b, this, cx| {
-            let kind = with(this, |r| r.headers.clone())?;
-            let get = kind.get(js_string!("get"), cx)?;
-            let kind = get.as_callable().map(|g| g.call(&kind.clone().into(), &[js_string!("content-type").into()], cx)).transpose()?;
-            let kind = kind.filter(|k| !k.is_null()).map(|k| js_value_string(&k, cx)).unwrap_or_default();
-            let class = cx.global_object().get(js_string!("Blob"), cx)?;
-            let class = class.as_constructor().ok_or_else(|| JsNativeError::typ().with_message("no Blob"))?;
-            let parts = boa_engine::object::builtins::JsArray::from_iter([crate::blob::uint8_array(&b, cx)?], cx);
-            let options = JsObject::with_object_proto(cx.intrinsics());
-            options.set(js_string!("type"), JsString::from(kind), false, cx)?;
-            Ok(class.construct(&[parts.into(), options.into()], None, cx)?.into())
-        })
-    }),
-];
 
 fn getter(class: &mut ClassBuilder<'_>, name: &str, f: NativeFunction) {
     let realm = class.context().realm().clone();
@@ -125,16 +103,13 @@ impl Class for Request {
         getter(class, "method", NativeFunction::from_fn_ptr(|this, _, _| Ok(JsString::from(with(this, |r| r.method.clone())?).into())));
         getter(class, "headers", NativeFunction::from_fn_ptr(|this, _, _| Ok(with(this, |r| r.headers.clone())?.into())));
         getter(class, "signal", NativeFunction::from_fn_ptr(|this, _, _| with(this, |r| r.signal.clone())));
-        getter(class, "bodyUsed", NativeFunction::from_fn_ptr(|this, _, _| Ok(with(this, |r| r.body_used.get())?.into())));
         // For `fetch`: the body as given.
         getter(class, "_body", NativeFunction::from_fn_ptr(|this, _, _| with(this, |r| r.body.borrow().clone())));
         for (i, (name, _)) in OPTIONS.iter().enumerate() {
             let f = NativeFunction::from_copy_closure(move |this, _, _| Ok(JsString::from(with(this, |r| r.options[i].clone())?).into()));
             getter(class, name, f);
         }
-        for &(name, f) in READERS {
-            class.method(JsString::from(name), 0, NativeFunction::from_fn_ptr(f));
-        }
+        crate::body::add_to::<Request>(class);
         class.method(js_string!("clone"), 0, NativeFunction::from_fn_ptr(|this, _, cx| {
             let o = this_request(this)?;
             if o.downcast_ref::<Request>().expect("a Request").body_used.get() {
@@ -168,8 +143,8 @@ impl Class for Request {
             None => base.as_ref().map_or_else(|| "GET".to_owned(), |b| b.1.clone()),
         };
         let headers = match option(init.as_ref(), "headers", cx)? {
-            Some(h) => headers(&h, cx)?,
-            None => headers(&base.as_ref().map_or(JsValue::undefined(), |b| b.2.clone().into()), cx)?,
+            Some(h) => crate::body::new_headers(&h, cx)?,
+            None => crate::body::new_headers(&base.as_ref().map_or(JsValue::undefined(), |b| b.2.clone().into()), cx)?,
         };
         let body = match option(init.as_ref(), "body", cx)? {
             Some(b) => b,

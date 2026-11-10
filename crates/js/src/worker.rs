@@ -30,9 +30,21 @@ pub enum WorkerEvent {
     Error(String),
 }
 
-enum ToWorker {
+pub(crate) enum ToWorker {
     Message(Cloned),
+    /// A request the worker made finished (`fetch`, `XMLHttpRequest`).
+    Fetched { id: u32, result: Result<crate::cors::ScriptResponse, String> },
     Terminate,
+}
+
+/// The page's end of a worker's queue: terminates it when the page lets
+/// go (its `Worker` collected, or the page gone).
+struct Control(mpsc::Sender<ToWorker>);
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.0.send(ToWorker::Terminate).ok();
+    }
 }
 
 // ---- the page's side -------------------------------------------------------
@@ -42,7 +54,7 @@ struct Worker {
     #[unsafe_ignore_trace]
     id: u32,
     #[unsafe_ignore_trace]
-    tx: RefCell<Option<mpsc::Sender<ToWorker>>>,
+    tx: RefCell<Option<Control>>,
 }
 
 /// The page's running workers, by id (kept so their messages find them).
@@ -77,7 +89,7 @@ impl Class for Worker {
             let o = this_worker(this)?;
             let data = serialize(&a.first().cloned().unwrap_or_default(), cx)?;
             if let Some(tx) = o.downcast_ref::<Worker>().expect("a Worker").tx.borrow().as_ref() {
-                tx.send(ToWorker::Message(data)).ok();
+                tx.0.send(ToWorker::Message(data)).ok();
             }
             Ok(JsValue::undefined())
         }));
@@ -85,9 +97,8 @@ impl Class for Worker {
             let o = this_worker(this)?;
             let id = {
                 let w = o.downcast_ref::<Worker>().expect("a Worker");
-                if let Some(tx) = w.tx.borrow_mut().take() {
-                    tx.send(ToWorker::Terminate).ok();
-                }
+                // (Dropping it terminates it.)
+                w.tx.borrow_mut().take();
                 w.id
             };
             registry(cx).workers.borrow_mut().remove(&id);
@@ -112,13 +123,14 @@ impl Class for Worker {
         let id = reg.next.get() + 1;
         reg.next.set(id);
         let (tx, rx) = mpsc::channel();
+        let inbox = tx.clone();
         let spawned = std::thread::Builder::new().name(format!("feather-worker-{id}")).stack_size(64 << 20).spawn(move || {
-            run(Setup { id, url, module, fetch_text, out, debug }, rx);
+            run(Setup { id, url, module, fetch_text, out, inbox, debug }, rx);
         });
         if let Err(e) = spawned {
             return Err(JsNativeError::error().with_message(format!("Worker: {e}")).into());
         }
-        Ok(Worker { id, tx: RefCell::new(Some(tx)) })
+        Ok(Worker { id, tx: RefCell::new(Some(Control(tx))) })
     }
 
     fn object_constructor(instance: &JsObject<Worker>, _: &[JsValue], cx: &mut Context) -> JsResult<()> {
@@ -201,6 +213,8 @@ struct Setup {
     module: bool,
     fetch_text: FetchText,
     out: mpsc::Sender<ToJs>,
+    /// The worker's own queue (for its requests' results).
+    inbox: mpsc::Sender<ToWorker>,
     debug: bool,
 }
 
@@ -222,18 +236,28 @@ impl crate::timers::TimerHost for Clock {
     }
 }
 
+/// A request in flight, and who hears how it went.
+pub(crate) enum Pending {
+    Fetch { resolve: boa_engine::object::builtins::JsFunction, reject: boa_engine::object::builtins::JsFunction },
+    Xhr(JsObject),
+}
+
 /// What the worker's natives need (in the context).
-struct Scope {
+pub(crate) struct Scope {
     id: u32,
     out: mpsc::Sender<ToJs>,
     fetch_text: FetchText,
-    debug: bool,
+    pub(crate) inbox: mpsc::Sender<ToWorker>,
+    pub(crate) base: Url,
+    pub(crate) debug: bool,
     closing: Cell<bool>,
     /// `self`'s listeners: (type, function).
     listeners: RefCell<Vec<(String, JsObject)>>,
+    pub(crate) pending: RefCell<HashMap<u32, Pending>>,
+    pub(crate) next_request: Cell<u32>,
 }
 
-fn scope(cx: &Context) -> &Scope {
+pub(crate) fn scope(cx: &Context) -> &Scope {
     cx.get_data::<Scope>().expect("a worker scope")
 }
 
@@ -306,9 +330,13 @@ fn run(setup: Setup, rx: mpsc::Receiver<ToWorker>) {
         id: setup.id,
         out: setup.out.clone(),
         fetch_text: setup.fetch_text.clone(),
+        inbox: setup.inbox.clone(),
+        base: setup.url.clone(),
         debug: setup.debug,
         closing: Cell::new(false),
         listeners: RefCell::new(Vec::new()),
+        pending: RefCell::new(HashMap::new()),
+        next_request: Cell::new(1),
     });
 
     match load(&setup.url, &setup.fetch_text) {
@@ -363,6 +391,12 @@ fn run(setup: Setup, rx: mpsc::Receiver<ToWorker>) {
             ToWorker::Message(data) => {
                 if let Err(e) = dispatch_message(&data, &mut cx) {
                     report(&mut cx, "onmessage", e);
+                }
+                cx.run_jobs().ok();
+            }
+            ToWorker::Fetched { id, result } => {
+                if let Err(e) = crate::worker_net::fetched(id, result, &mut cx) {
+                    report(&mut cx, "request", e);
                 }
                 cx.run_jobs().ok();
             }
@@ -423,6 +457,8 @@ fn install_scope(cx: &mut Context, natives: &JsObject, setup: &Setup, clock: Rc<
     crate::form_data::install(cx);
     crate::abort::install(cx);
     crate::request::install(cx);
+    crate::response::install(cx);
+    crate::worker_net::install(cx);
     cx.insert_data(clock.clone());
     crate::timers::install(natives, clock, cx);
 

@@ -1063,6 +1063,37 @@ fn workers_run_scripts_on_their_own_thread() {
 }
 
 #[test]
+fn workers_fetch_and_xhr() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const code = `
+          const out = [];
+          fetch("data:application/json,%7B%22a%22%3A1%7D").then((r) => { out.push(r.status, r.ok, r instanceof Response); return r.json(); })
+            .then((j) => {
+              out.push(j.a);
+              const x = new XMLHttpRequest();
+              const events = [];
+              x.responseType = "json";
+              x.onreadystatechange = () => events.push(x.readyState);
+              x.addEventListener("load", () => {
+                out.push(x.status, x.response.b, events.join(""));
+                const s = new XMLHttpRequest();
+                s.open("GET", "data:text/plain,sync", false);
+                s.send();
+                out.push(s.responseText);
+                return fetch("https://nowhere.invalid/x").catch((e) => { out.push(e.name); postMessage(out.join(" ")); });
+              });
+              x.open("GET", "data:application/json,%7B%22b%22%3A2%7D");
+              x.send();
+            });
+        `;
+        const w = new Worker(URL.createObjectURL(new Blob([code])));
+        w.onmessage = (e) => { document.getElementById("o").textContent = e.data; };
+        setTimeout(() => {}, 1500);
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "200 true true 1 200 2 1234 sync TypeError");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
