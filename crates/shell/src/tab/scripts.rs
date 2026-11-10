@@ -37,7 +37,7 @@ impl Tab {
                         js::FromJs::Locate(node, reply) => {
                             reply.send(this.locate(node)).ok();
                         }
-                        js::FromJs::ScrollTo { y, smooth, .. } => this.script_scroll(y, smooth, window, cx),
+                        js::FromJs::ScrollTo { y, smooth, .. } => this.script_scroll(y, smooth, cx),
                         js::FromJs::Traverse(delta) => {
                             if delta < 0 {
                                 this.go_back(window, cx)

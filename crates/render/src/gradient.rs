@@ -212,7 +212,10 @@ impl GradientFill {
         let rounded = radii != Corners::default();
         let largest = [radii.top_left, radii.top_right, radii.bottom_right, radii.bottom_left].into_iter().fold(px(0.), Pixels::max);
         let tiles_cover = block.width.min(block.height) >= largest;
-        if rounded && !at_box && !((rx || ry) && tiles_cover) {
+        // ...and only where the box has straight sides between its corners:
+        // in a circle (an avatar's loading shimmer) every edge is curve.
+        let straight_sides = largest * 2.0 < bounds.size.width.min(bounds.size.height) - px(1.);
+        if rounded && !at_box && !((rx || ry) && tiles_cover && straight_sides) {
             let hard = g.repeating || g.stops.windows(2).any(|w| matches!((w[0].pos, w[1].pos), (Some(a), Some(b)) if a == b));
             if let Some(layer) = composed(&image, (sx, sy), (f32::from(block.width), f32::from(block.height)), (rx, ry), (bw, bh), scale, hard, window) {
                 window.paint_image(bounds, bounds, radii, layer, 0, false).ok();

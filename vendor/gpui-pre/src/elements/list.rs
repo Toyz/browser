@@ -71,6 +71,9 @@ struct StateInner {
     scroll_handler: Option<Box<dyn FnMut(&ListScrollEvent, &mut Window, &mut App)>>,
     scrollbar_drag_start_height: Option<Pixels>,
     measuring_behavior: ListMeasuringBehavior,
+    /// Feather: measure every item up to this one in the next layout (see
+    /// [`ListState::measure_through`]).
+    measure_through: Option<usize>,
     item_measurement_ready: Option<Box<dyn Fn(usize, &App) -> bool>>,
     follow_state: FollowState,
 }
@@ -323,6 +326,7 @@ impl ListState {
             reset: false,
             scrollbar_drag_start_height: None,
             measuring_behavior: ListMeasuringBehavior::default(),
+            measure_through: None,
             item_measurement_ready: None,
             follow_state: FollowState::default(),
         })));
@@ -753,14 +757,32 @@ impl ListState {
         Some((top, height))
     }
 
+    /// Feather: measure the items up to `ix` that haven't been, in the next
+    /// layout (so where things below the view are is known, not guessed).
+    pub fn measure_through(&self, ix: usize) {
+        let mut state = self.0.borrow_mut();
+        state.measure_through = Some(state.measure_through.map_or(ix, |m| m.max(ix)));
+    }
+
+    /// Feather: the first item not measured yet, if any.
+    pub fn first_unmeasured(&self) -> Option<usize> {
+        let state = &*self.0.borrow();
+        state.items.iter().position(|item| item.size().is_none())
+    }
+
     /// Feather: the item at `y` in the list's content (heights as in
     /// [`Self::item_extent`]) and how far into it, to scroll there with
     /// [`Self::scroll_to`]; past the end, the last item.
     pub fn offset_for_y(&self, y: Pixels) -> ListOffset {
         let state = &*self.0.borrow();
         let count = state.items.summary().count;
+        if y <= Pixels::ZERO || count == 0 {
+            return ListOffset { item_ix: 0, offset_in_item: Pixels::ZERO };
+        }
+        // The first item reaching past `y` (not past items with no height
+        // yet, which a right bias would skip to the end).
         let mut cursor = state.items.cursor::<ListItemSummary>(());
-        cursor.seek(&Height(y.max(Pixels::ZERO)), Bias::Right);
+        cursor.seek(&Height(y), Bias::Left);
         let (ix, top) = (cursor.start().count, cursor.start().height);
         if ix >= count {
             return ListOffset { item_ix: count.saturating_sub(1), offset_in_item: Pixels::ZERO };
@@ -1063,6 +1085,34 @@ impl StateInner {
             ListMeasuringBehavior::Measure(self.items.summary().unrendered_count == 0);
     }
 
+    /// Feather: measure the unmeasured items up to `limit` (see
+    /// [`ListState::measure_through`]).
+    fn measure_items_through(
+        &mut self,
+        limit: usize,
+        available_width: Pixels,
+        render_item: &mut RenderItemFn,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let space = size(AvailableSpace::Definite(available_width), AvailableSpace::MinContent);
+        let mut items = Vec::with_capacity(self.items.summary().count);
+        let mut changed = false;
+        for (ix, item) in self.items.cursor::<Count>(()).enumerate() {
+            if ix <= limit && item.size().is_none() {
+                let mut element = render_item(ix, window, cx);
+                let measured = element.layout_as_root(space, window, cx);
+                items.push(item.with_measurement(measured, self.is_item_ready(ix, cx)));
+                changed = true;
+            } else {
+                items.push(item.clone());
+            }
+        }
+        if changed {
+            self.items = SumTree::from_iter(items, ());
+        }
+    }
+
     fn layout_items(
         &mut self,
         available_width: Option<Pixels>,
@@ -1312,6 +1362,9 @@ impl StateInner {
                     self.layout_all_items(bounds.size.width, render_item, window, cx);
                 }
                 _ => {}
+            }
+            if let Some(limit) = self.measure_through.take() {
+                self.measure_items_through(limit, bounds.size.width, render_item, window, cx);
             }
 
             let mut layout_response = self.layout_items(

@@ -123,6 +123,45 @@ fn cover_crop(padded: &Arc<RenderImage>, ratio: f32) -> Option<Arc<RenderImage>>
     Some(cropped)
 }
 
+/// The middle of each frame that `object-fit: cover` shows in a box of
+/// aspect `ratio`, with the frames' delays; cached per picture and ratio.
+fn cover_crop_frames(frames: &Arc<RenderImage>, ratio: f32) -> Option<Arc<RenderImage>> {
+    thread_local! {
+        static CROPS: RefCell<HashMap<(usize, u32), Arc<RenderImage>>> = RefCell::default();
+    }
+    let key = (Arc::as_ptr(frames) as usize, (ratio * 1000.0).round() as u32);
+    if let Some(hit) = CROPS.with_borrow(|c| c.get(&key).cloned()) {
+        return Some(hit);
+    }
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for i in 0..frames.frame_count() {
+        let size = frames.size(i);
+        let (w, h) = (size.width.0 as u32, size.height.0 as u32);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let (cw, ch) = if (w as f32 / h as f32) > ratio {
+            (((h as f32) * ratio).round().max(1.0) as u32, h)
+        } else {
+            (w, ((w as f32) / ratio).round().max(1.0) as u32)
+        };
+        let full = image::RgbaImage::from_raw(w, h, frames.as_bytes(i)?.to_vec())?;
+        let cropped = image::imageops::crop_imm(&full, (w - cw.min(w)) / 2, (h - ch.min(h)) / 2, cw.min(w), ch.min(h)).to_image();
+        out.push(image::Frame::from_parts(cropped, 0, 0, frames.delay(i)));
+    }
+    let cropped = Arc::new(RenderImage::new(out));
+    CROPS.with_borrow_mut(|c| {
+        if c.len() > 128 {
+            c.clear();
+        }
+        c.insert(key, cropped.clone());
+    });
+    Some(cropped)
+}
+
 pub fn picture_fitted(
     image: impl Into<ImageSource>,
     padded: &Option<Arc<RenderImage>>,
@@ -144,6 +183,21 @@ pub fn picture_fitted(
     {
         return round(img(cropped)).size_full().object_fit(ObjectFit::Fill).into_any_element();
     }
+    let image: ImageSource = image.into();
+    // The same for pictures decoded here (animations, AVIF): their frames,
+    // cropped.
+    if fit == style::ObjectFit::Cover
+        && corners.iter().any(|c| *c > px(0.))
+        && let (ImageSource::Render(frames), Some(ratio)) = (&image, box_ratio)
+        && let Some(cropped) = cover_crop_frames(frames, ratio)
+    {
+        let source: ImageSource = cropped.into();
+        let picture = round(img(source.clone())).size_full().object_fit(ObjectFit::Fill);
+        return match &source {
+            ImageSource::Render(r) if r.frame_count() > 1 => picture.id(("animation", r.id.0)).into_any_element(),
+            _ => picture.into_any_element(),
+        };
+    }
     let fit = match fit {
         style::ObjectFit::Fill => None,
         style::ObjectFit::Contain => Some(ObjectFit::Contain),
@@ -151,7 +205,6 @@ pub fn picture_fitted(
         style::ObjectFit::None => Some(ObjectFit::None),
         style::ObjectFit::ScaleDown => Some(ObjectFit::ScaleDown),
     };
-    let image: ImageSource = image.into();
     // An animation plays only in an element with state (its frame and
     // clock), which needs an id: the picture's own (the same animation
     // shown twice plays in step).

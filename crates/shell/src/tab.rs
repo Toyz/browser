@@ -702,6 +702,31 @@ impl Tab {
         }
     }
 
+    /// Lay out a few more rows the list hasn't measured yet, between
+    /// frames, until all are: where things below the view are (for scripts
+    /// asking, `scrollTo` targets, the scrollbar) is then known, not
+    /// guessed from an average row, as in a browser.
+    fn measure_ahead(&mut self, window: &mut Window) {
+        if self.page.is_none() || self.scroll_animation.is_some() || self.scrolling_until.is_some_and(|t| t > std::time::Instant::now()) {
+            return;
+        }
+        if let Some(first) = self.list_state.first_unmeasured() {
+            self.list_state.measure_through(first + 12);
+            window.request_animation_frame();
+        }
+    }
+
+    /// The row `node` is in, or its first laid-out descendant's (an element
+    /// without a box of its own).
+    fn row_of(&self, node: NodeId) -> Option<usize> {
+        let page = self.page.as_ref()?;
+        let mut wanted: HashSet<NodeId> = HashSet::from([node]);
+        if let Some(doc) = page.doc.as_ref() {
+            wanted.extend(doc.descendants(node).take(256));
+        }
+        rows_of(&page.layout, &wanted).into_values().min()
+    }
+
     /// Where `node` is for a script asking (viewport rect): where it was
     /// painted, else where its row is.
     pub(super) fn locate(&mut self, node: NodeId) -> Option<[f32; 4]> {
@@ -710,15 +735,7 @@ impl Tab {
         {
             return Some(*r);
         }
-        let page = self.page.as_ref()?;
-        let layout = page.layout.clone();
-        // An element without a box of its own (nothing measured it yet):
-        // where its first laid-out descendant is.
-        let mut wanted: HashSet<NodeId> = HashSet::from([node]);
-        if let Some(doc) = page.doc.as_ref() {
-            wanted.extend(doc.descendants(node).take(256));
-        }
-        let ix = rows_of(&layout, &wanted).into_values().min()?;
+        let ix = self.row_of(node)?;
         let (top, h) = self.list_state.item_extent(ix)?;
         let view = self.list_state.viewport_bounds();
         let scroll = -self.list_state.scroll_px_offset_for_scrollbar().y;
@@ -740,10 +757,10 @@ impl Tab {
 
     /// Scripts scrolled the page (`window.scrollTo`): there at once, or
     /// animated for `behavior: "smooth"`.
-    pub(super) fn script_scroll(&mut self, y: f32, smooth: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn script_scroll(&mut self, y: f32, smooth: bool, cx: &mut Context<Self>) {
         if smooth {
+            // (Its frames are asked for from render.)
             self.scroll_animation = Some((self.scroll_y(), y, std::time::Instant::now()));
-            window.request_animation_frame();
         } else {
             self.scroll_animation = None;
             self.scroll_page_to(y);
@@ -2289,6 +2306,7 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
+        self.measure_ahead(window);
         self.step_scroll_animation(window);
         self.animation_frame(window);
         self.apply_row_hint(window);

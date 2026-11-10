@@ -136,6 +136,9 @@ pub(crate) struct Dom {
     tab: async_channel::Sender<FromJs>,
     /// How far the page is scrolled (`window.scrollX`/`scrollY`), px.
     scroll: (f32, f32),
+    /// The tab has sent a layout: it's showing the page and answers
+    /// `locate` (before that, nobody's reading the questions).
+    laid_out: bool,
     /// Shadow roots by host (and back).
     shadows: HashMap<NodeId, NodeId>,
     hosts: HashMap<NodeId, NodeId>,
@@ -221,6 +224,7 @@ impl Runtime {
             started: Instant::now(),
             tab: updates.clone(),
             scroll: (0.0, 0.0),
+            laid_out: false,
         }));
         let modules = Rc::new(crate::modules::WebModules::new(opts.fetch_text.clone(), dom.borrow().doc.url.clone(), opts.debug));
         let hooks = Rc::new(Hooks::default());
@@ -750,6 +754,7 @@ impl Runtime {
             }
             ToJs::Layout { rects, gone, viewport, scroll } => {
                 let scrolled = std::mem::replace(&mut self.dom.borrow_mut().scroll, scroll) != scroll;
+                self.dom.borrow_mut().laid_out = true;
                 let flat: Vec<JsValue> = rects
                     .iter()
                     .flat_map(|(n, r)| [JsValue::from(node_to_number(*n)), r[0].into(), r[1].into(), r[2].into(), r[3].into()])
@@ -1400,14 +1405,22 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("locate", 1, Box::new(|d, a, cx| {
         let (tab, node) = {
             let dom = d.borrow();
+            if !dom.laid_out {
+                return Ok(JsValue::null());
+            }
             (dom.tab.clone(), arg_node(&dom, a, 0))
         };
         let Some(node) = node else { return Ok(JsValue::null()) };
         let (tx, rx) = std::sync::mpsc::channel();
+        let t = Instant::now();
         if tab.send_blocking(FromJs::Locate(node, tx)).is_err() {
             return Ok(JsValue::null());
         }
-        Ok(match rx.recv_timeout(Duration::from_millis(100)) {
+        let answer = rx.recv_timeout(Duration::from_millis(30));
+        if d.borrow().debug {
+            eprintln!("js: locate {node:?} -> {:?} in {:?}", answer, t.elapsed());
+        }
+        Ok(match answer {
             Ok(Some(r)) => JsArray::from_iter(r.map(JsValue::from), cx).into(),
             _ => JsValue::null(),
         })
