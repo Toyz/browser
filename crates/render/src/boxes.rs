@@ -684,6 +684,9 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         avail: styler.env().width,
         in_flex_row: false,
         in_shrink: false,
+        percent_base: Some(styler.env().height),
+        viewport_sized: false,
+        keep_inline: false,
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
@@ -757,6 +760,17 @@ struct Builder<'a> {
     /// The box being built is in a box sized by its content (inline-level,
     /// floated, positioned, or a flex row's item, with `width: auto`).
     in_shrink: bool,
+    /// What a percentage height of the box being built is of, px, when
+    /// that's known here: the viewport, for the root, and down a chain of
+    /// `height: 100%` boxes (`html, body, #root { height: 100% }`).
+    percent_base: Option<f32>,
+    /// The `html`/`body` box being built had `height: 100%`, dropped (the
+    /// page list is the viewport): its children's percentages are still
+    /// of the viewport.
+    viewport_sized: bool,
+    /// The flex box being built is one we made (a button centering its
+    /// content): its inline content stays one run of text, not items.
+    keep_inline: bool,
 }
 
 /// The content width of a box with `style` in a containing block `avail`
@@ -1620,7 +1634,46 @@ impl Builder<'_> {
         self.next_id
     }
 
+    /// A percentage height down a chain from the viewport (see
+    /// `percent_base`) becomes a minimum: the box is at least that tall,
+    /// as in a browser, and still grows with its content, so the page
+    /// stays a column of rows that can be laid out one at a time (a fixed
+    /// height would make the whole page one box).
     fn build_block(
+        &mut self,
+        id: NodeId,
+        style: Arc<ComputedStyle>,
+        kind: BlockKind,
+        link: Option<&Arc<Url>>,
+        generated: Generated,
+    ) -> Block {
+        let base = self.percent_base.take();
+        let mut style = style;
+        let through = std::mem::take(&mut self.viewport_sized);
+        let mut chain = if id == self.doc.root() || through { base } else { None };
+        if let Some(base) = base.filter(|_| !matches!(style.position, style::Position::Absolute | style::Position::Fixed)) {
+            let of = |l: Length| match l {
+                Length::Percent(p) => Some(base * p / 100.0),
+                _ => None,
+            };
+            let (height, min) = (of(style.height), of(style.min_height));
+            if height.is_some() || min.is_some() {
+                let st = Arc::make_mut(&mut style);
+                let at_least = height.into_iter().chain(min).fold(st.min_height.px_or_zero(), f32::max);
+                st.height = Length::Auto;
+                st.min_height = Length::Px(at_least);
+                if let Some(h) = height {
+                    chain = Some(if st.border_box { (h - st.vertical_edges()).max(0.0) } else { h });
+                }
+            }
+        }
+        self.percent_base = chain;
+        let block = self.build_block_sized(id, style, kind, link, generated);
+        self.percent_base = base;
+        block
+    }
+
+    fn build_block_sized(
         &mut self,
         id: NodeId,
         style: Arc<ComputedStyle>,
@@ -1637,7 +1690,7 @@ impl Builder<'_> {
         };
         let hoist_mark = self.hoisted.len();
         // Flex and grid containers "blockify" their children: each is an item.
-        let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid);
+        let blockify = matches!(kind, BlockKind::Flex | BlockKind::Grid) && !std::mem::take(&mut self.keep_inline);
         let mut generated = generated;
         if let Some((text, st)) = &generated.before {
             c.inline.push_text(text, st, link);
@@ -1806,8 +1859,13 @@ impl Builder<'_> {
         // plain blocks of bands; see `template_grid`.
         // Grids placing items by name, by row, or by both column lines are
         // laid out as real CSS grids (whole: they don't split into rows).
+        // ...and so are grids that align their items in their areas
+        // (`place-items: center`: a login form in the middle of the page).
+        let aligns = |a: Option<style::Align>| a.is_some_and(|a| a != style::Align::Stretch);
         let real = kind == BlockKind::Grid
-            && (needs_real_grid(&children) || (content_sized_grid(&style) && boxes_in(&children, SMALL_GRID) < SMALL_GRID));
+            && (needs_real_grid(&children)
+                || ((content_sized_grid(&style) || aligns(style.justify_items) || aligns(style.align_items))
+                    && boxes_in(&children, SMALL_GRID) < SMALL_GRID));
         let kind = if real {
             Arc::make_mut(&mut style).taffy_grid = true;
             kind
@@ -1994,6 +2052,9 @@ impl Builder<'_> {
             // *viewport*; the page list does both, so drop them here (it keeps
             // the page splittable into rows).
             if matches!(tag, "html" | "body") {
+                // ...but what's inside them sized in percentages of that
+                // height still gets the viewport's (see `percent_base`).
+                self.viewport_sized = matches!(style.height, Length::Percent(p) if p >= 100.0);
                 style.height = Length::Auto;
                 style.min_height = Length::Auto;
                 style.max_height = Length::Auto;
@@ -2119,9 +2180,18 @@ impl Builder<'_> {
                     let block = self.build_block(child, style.clone(), BlockKind::Normal, link, generated);
                     // Nested flows can't host GPUI subtrees (form controls,
                     // block inline-blocks): those make this one a subtree too.
-                    // Pictures, gradients and masks are drawn by a GPUI
-                    // subtree (the line paints only colors and borders).
-                    let decorated = style.background_url.is_some() || style.gradients.is_some() || style.masked || style.mask_url.is_some();
+                    // Pictures, gradients, masks, effects and sizes taken
+                    // from the container (a `w-full` button) are drawn by a
+                    // GPUI subtree: the line paints only colors and borders,
+                    // at the content's size.
+                    let decorated = style.background_url.is_some()
+                        || style.gradients.is_some()
+                        || style.masked
+                        || style.mask_url.is_some()
+                        || style.opacity < 1.0
+                        || style.filter.is_some()
+                        || style.scale != (1.0, 1.0)
+                        || matches!(style.width, Length::Percent(_));
                     let content = match block.children.as_slice() {
                         _ if decorated => None,
                         [] => Some(None),
@@ -2224,6 +2294,9 @@ impl Builder<'_> {
                         (kind, style)
                     };
                     let generated = self.generated(child, &style);
+                    // (A button's text and spans are still one line: "no
+                    // account? <b>register</b>".)
+                    self.keep_inline = tag == "button" && kind == BlockKind::Flex && style.display.is_block_level() && !matches!(style.display, Display::Flex | Display::InlineFlex);
                     let block = self.build_block(child, style, kind, link, generated);
                     c.push(LayoutBox::Block(block));
                 }
@@ -3166,6 +3239,25 @@ impl InlineBuilder {
     }
 
     fn push_text(&mut self, raw: &str, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+        // Small capitals, as browsers make them when the font has none:
+        // capitals at 0.8 of the size for the lowercase letters.
+        if let Some(all) = style.small_caps {
+            let mut plain = style.clone();
+            plain.small_caps = None;
+            let mut small = plain.clone();
+            small.font_size *= 0.8;
+            small.text_transform = TextTransform::Uppercase;
+            let is_small = |c: char| c.is_lowercase() || (all && c.is_uppercase());
+            let mut rest = raw;
+            while let Some(first) = rest.chars().next() {
+                let small_run = is_small(first);
+                // Spaces join the run they're in.
+                let end = rest.find(|c: char| !c.is_whitespace() && is_small(c) != small_run).unwrap_or(rest.len());
+                self.push_text(&rest[..end], if small_run { &small } else { &plain }, link);
+                rest = &rest[end..];
+            }
+            return;
+        }
         if !self.started {
             self.started = true;
             self.after_space = true;

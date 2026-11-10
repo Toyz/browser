@@ -613,9 +613,12 @@ fn break_lines(para: &Paragraph, measured: &[Measured], strut: Extent, wrap: Opt
                 trailing_space = px(0.);
             }
         }
+        // Half a pixel's grace: layout rounds sizes to whole pixels, so a
+        // box sized to its text (a flex item at its max-content width) can
+        // come back a fraction narrower than the text it was measured from.
         if let Some(wrap) = wrap
             && !line.items.is_empty()
-            && x + group_width - trailing_space > wrap
+            && x + group_width - trailing_space > wrap + px(0.5)
         {
             finish(&mut line, &mut lines, x);
             x = px(0.);

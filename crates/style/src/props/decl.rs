@@ -181,6 +181,7 @@ pub enum Decl {
     TextAlign(TextAlign),
     ListStyle(ListStyle),
     TextTransform(TextTransform),
+    SmallCaps(Option<bool>),
     Visible(bool),
     /// `--name: value` (raw text, substituted into `var()` later).
     Custom(Arc<str>, Arc<str>),

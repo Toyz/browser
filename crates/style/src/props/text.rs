@@ -91,6 +91,25 @@ out.push(D::TextTransform(keyword(p, &[
     Ok(())
 }
 
+/// `font-variant` / `font-variant-caps`: only the capitals are drawn
+/// (ligature and numeric variants are what fonts do by default anyway).
+pub(super) fn p_font_variant<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    use Decl as D;
+    let mut caps = None;
+    while !p.is_exhausted() {
+        match p.next()?.clone() {
+            Token::Ident(id) => match id.to_ascii_lowercase().as_str() {
+                "small-caps" | "petite-caps" | "unicase" | "titling-caps" => caps = Some(false),
+                "all-small-caps" | "all-petite-caps" => caps = Some(true),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    out.push(D::SmallCaps(caps));
+    Ok(())
+}
+
 pub(super) fn p_white_space<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     use Decl as D;
 out.push(D::WhiteSpace(keyword(p, &[
@@ -195,6 +214,8 @@ pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("text-decoration", p_text_decoration),
     ("text-decoration-line", p_text_decoration),
     ("text-transform", p_text_transform),
+    ("font-variant", p_font_variant),
+    ("font-variant-caps", p_font_variant),
     ("white-space", p_white_space),
     ("list-style", p_list_style),
     ("list-style-type", p_list_style),

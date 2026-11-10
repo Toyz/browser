@@ -6,9 +6,10 @@ pub(super) fn value_still_has_var(v: &str) -> bool {
     crate::props::contains_var(v)
 }
 
-/// Replace `var(--name, fallback)` references. `None` if a reference can't be
-/// resolved (the declaration is then "invalid at computed-value time").
-pub(super) fn substitute_vars(raw: &str, custom: &CustomProps, depth: usize) -> Option<String> {
+/// Replace `var(--name, fallback)` references, looking names up with `get`.
+/// `None` if a reference can't be resolved (the declaration is then
+/// "invalid at computed-value time").
+fn substitute_with(raw: &str, get: &dyn Fn(&str) -> Option<Arc<str>>, depth: usize) -> Option<String> {
     if depth > 16 {
         return None;
     }
@@ -39,17 +40,19 @@ pub(super) fn substitute_vars(raw: &str, custom: &CustomProps, depth: usize) -> 
         Some(i) => (body[..i].trim(), Some(&body[i + 1..])),
         None => (body.trim(), None),
     };
-    let replacement = match custom.get(name) {
-        Some(value) if !value.trim().is_empty() => substitute_vars(value, custom, depth + 1)?,
-        _ => substitute_vars(fallback?, custom, depth + 1)?,
+    let replacement = match get(name) {
+        Some(value) if !value.trim().is_empty() => substitute_with(&value, get, depth + 1)?,
+        _ => substitute_with(fallback?, get, depth + 1)?,
     };
-    let rest = substitute_vars(&raw[end + 1..], custom, depth + 1)?;
+    let rest = substitute_with(&raw[end + 1..], get, depth + 1)?;
     Some(format!("{}{}{}", &raw[..start], replacement.trim(), rest))
 }
 
 impl Styler {
     pub(super) fn resolve_vars(&self, name: &Arc<str>, raw: &str, custom: &CustomProps) -> Option<Rc<Vec<Decl>>> {
-        let value = substitute_vars(raw, custom, 0)?;
+        // Unset, a registered property is its initial value.
+        let get = |name: &str| custom.get(name).cloned().or_else(|| self.registered.initial.get(name).cloned().flatten());
+        let value = substitute_with(raw, &get, 0)?;
         let key = (name.clone(), value);
         if let Some(hit) = self.var_cache.borrow().get(&key) {
             return Some(hit.clone());

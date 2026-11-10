@@ -446,6 +446,7 @@ impl Styler {
             Decl::TextAlign(v) => s.text_align = *v,
             Decl::ListStyle(v) => s.list_style = *v,
             Decl::TextTransform(v) => s.text_transform = *v,
+            Decl::SmallCaps(v) => s.small_caps = *v,
             Decl::Visible(v) => s.visible = *v,
             Decl::Wide(name, wide) => apply_wide(s, parent, name, *wide),
             Decl::Custom(..) | Decl::Unresolved { .. } => {}

@@ -175,6 +175,9 @@ pub struct ComputedStyle {
     pub white_space: WhiteSpace,
     pub text_align: TextAlign,
     pub text_transform: TextTransform,
+    /// `font-variant: small-caps` (`Some(false)`) or `all-small-caps`
+    /// (`Some(true)`): lowercase (or all) letters as small capitals.
+    pub small_caps: Option<bool>,
     pub list_style: ListStyle,
     pub visible: bool,
     pub cursor: Cursor,
@@ -291,6 +294,7 @@ impl ComputedStyle {
             white_space: WhiteSpace::Normal,
             text_align: TextAlign::Left,
             text_transform: TextTransform::None,
+            small_caps: None,
             list_style: ListStyle::Disc,
             visible: true,
             cursor: Cursor::Auto,
@@ -318,6 +322,7 @@ impl ComputedStyle {
             white_space: parent.white_space,
             text_align: parent.text_align,
             text_transform: parent.text_transform,
+            small_caps: parent.small_caps,
             list_style: parent.list_style,
             visible: parent.visible,
             cursor: parent.cursor,

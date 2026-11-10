@@ -63,6 +63,7 @@ pub struct StyleData {
     state_reaches_others: bool,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
     font_faces: Arc<Vec<FontFace>>,
+    registered: Arc<Registry>,
     /// Custom property maps handed out so far (see `Styler::intern_custom`),
     /// shared by every restyle of the page.
     custom_maps: CustomInterner,
@@ -77,7 +78,17 @@ impl StyleData {
         let mut rules: Vec<StyleRule> = Vec::new();
         let mut font_faces: Vec<FontFace> = Vec::new();
         let mut layers = LayerOrder::default();
+        let mut registry = Registry::default();
         for sheet in sheets {
+            for r in sheet.properties {
+                // The first registration counts.
+                if !registry.initial.contains_key(&r.name) {
+                    if !r.inherits {
+                        registry.reset.push((r.name.clone(), r.initial.clone()));
+                    }
+                    registry.initial.insert(r.name, r.initial);
+                }
+            }
             for name in &sheet.layers {
                 layers.declare(name);
             }
@@ -121,6 +132,7 @@ impl StyleData {
             state_reaches_others,
             keyframes,
             font_faces: Arc::new(font_faces),
+            registered: Arc::new(registry),
             custom_maps: CustomInterner::default(),
         }
     }
@@ -241,6 +253,7 @@ impl StyleData {
             attr_cache: RefCell::default(),
             var_cache: RefCell::default(),
             keyframes: self.keyframes.clone(),
+            registered: self.registered.clone(),
             custom_maps: self.custom_maps.clone(),
         }
     }
@@ -262,7 +275,17 @@ pub struct Styler {
     attr_cache: RefCell<HashMap<String, Rc<ParsedAttr>>>,
     var_cache: RefCell<HashMap<VarKey, Rc<Vec<Decl>>>>,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
+    registered: Arc<Registry>,
     custom_maps: CustomInterner,
+}
+
+/// The page's `@property` registrations.
+#[derive(Debug, Default)]
+pub(crate) struct Registry {
+    /// Each registered property's initial value.
+    pub initial: HashMap<Arc<str>, Option<Arc<str>>>,
+    /// Those that don't inherit: (name, initial value).
+    pub reset: Vec<(Arc<str>, Option<Arc<str>>)>,
 }
 
 impl Styler {
@@ -492,6 +515,19 @@ impl Styler {
 
         // Pass 1: custom properties.
         let mut custom: Option<HashMap<Arc<str>, Arc<str>>> = None;
+        // Registered ones that don't inherit start over at their initial
+        // value (Tailwind's `--tw-*`: a parent's translate isn't its
+        // children's).
+        let inherited_differs = |name: &Arc<str>, initial: &Option<Arc<str>>| style.custom.get(name) != initial.as_ref();
+        if self.registered.reset.iter().any(|(n, i)| inherited_differs(n, i)) {
+            let map = custom.get_or_insert_with(|| (*style.custom).clone());
+            for (name, initial) in &self.registered.reset {
+                match initial {
+                    Some(v) => map.insert(name.clone(), v.clone()),
+                    None => map.remove(name),
+                };
+            }
+        }
         for d in &ordered {
             if let Decl::Custom(name, value) = d {
                 custom
@@ -507,9 +543,17 @@ impl Styler {
         // Pass 3: everything else.
         for font_pass in [true, false] {
             for d in &ordered {
-                if matches!(d, Decl::Custom(..)) || d.is_font_size() != font_pass {
+                // The `font` shorthand (when it's `inherit` or has a
+                // `var()`) is both: its size first, then the rest in order
+                // with everything else (a lower-precedence `font-family`
+                // mustn't win by coming in a later pass).
+                let both = matches!(d, Decl::Unresolved { name, .. } | Decl::Wide(name, _) if &**name == "font");
+                if matches!(d, Decl::Custom(..)) || (d.is_font_size() != font_pass && !both) {
                     continue;
                 }
+                // ...the rest only, the second time: the size stays as the
+                // first pass left it (a later `font-size` won there).
+                let size = style.font_size;
                 match d {
                     Decl::Unresolved { name, raw } => match self.resolve_vars(name, raw, &style.custom) {
                         Some(decls) if !decls.is_empty() => {
@@ -524,6 +568,9 @@ impl Styler {
                         _ => apply_wide(style, parent, name, Wide::Unset),
                     },
                     d => self.apply(style, parent, d),
+                }
+                if both && !font_pass {
+                    style.font_size = size;
                 }
             }
         }

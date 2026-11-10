@@ -132,7 +132,7 @@ impl Palette {
     }
 
     /// The family to draw with: the page's first installed font, else our default for its kind.
-    pub(crate) fn font(&self, names: &style::FontNames, generic: FontFamily) -> SharedString {
+    pub fn font(&self, names: &style::FontNames, generic: FontFamily) -> SharedString {
         self.fonts.resolve(names).unwrap_or_else(|| self.family(generic))
     }
 

@@ -59,6 +59,17 @@ pub struct Stylesheet {
     /// Cascade layer names in the order this sheet first mentions them
     /// (`@layer a, b;` statements and `@layer a { }` blocks).
     pub layers: Vec<Arc<str>>,
+    /// `@property` registrations.
+    pub properties: Vec<Registered>,
+}
+
+/// A custom property registered with `@property`: its `initial-value`
+/// (what `var()` gives when nothing sets it) and whether it inherits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Registered {
+    pub name: Arc<str>,
+    pub initial: Option<Arc<str>>,
+    pub inherits: bool,
 }
 
 /// Parse a stylesheet. Rules inside `@media` keep their conditions (see
@@ -123,6 +134,8 @@ enum AtPrelude {
     Media(Arc<str>),
     Import(String, String),
     Keyframes(Arc<str>),
+    /// `@property --name`.
+    Property(Arc<str>),
     /// `@layer a, b;` (names, in order) or `@layer a { }` (one name; an
     /// anonymous block gets a generated one).
     Layer(Vec<String>),
@@ -169,6 +182,11 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 AtPrelude::Group(true)
             }
             "font-face" => AtPrelude::FontFace,
+            "property" => {
+                let name = consume_rest(input);
+                let name = name.trim();
+                if name.starts_with("--") { AtPrelude::Property(name.into()) } else { AtPrelude::Skip }
+            }
             "keyframes" | "-webkit-keyframes" | "-moz-keyframes" => {
                 let name = match input.next()?.clone() {
                     cssparser::Token::Ident(s) | cssparser::Token::QuotedString(s) => Arc::from(&*s),
@@ -241,6 +259,15 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                         weight: face.weight.unwrap_or((400, 400)),
                         italic: face.italic,
                     });
+                }
+            }
+            AtPrelude::Property(name) => {
+                let mut desc = PropertyParser::default();
+                for _ in RuleBodyParser::new(input, &mut desc) {}
+                // Without `inherits` the rule is invalid; registered,
+                // a property inherits unless it says it doesn't.
+                if let Some(inherits) = desc.inherits {
+                    self.sheet.properties.push(Registered { name, initial: desc.initial, inherits });
                 }
             }
             AtPrelude::Keyframes(name) => {
@@ -563,6 +590,50 @@ impl<'i> QualifiedRuleParser<'i> for FontFaceParser {
 }
 
 impl<'i> RuleBodyItemParser<'i, (), SelectorParseErrorKind> for FontFaceParser {
+    fn parse_declarations(&self) -> bool {
+        true
+    }
+
+    fn parse_qualified(&self) -> bool {
+        false
+    }
+}
+
+/// An `@property` rule's descriptors.
+#[derive(Default)]
+struct PropertyParser {
+    initial: Option<Arc<str>>,
+    inherits: Option<bool>,
+}
+
+impl<'i> DeclarationParser<'i> for PropertyParser {
+    type Declaration = ();
+    type Error = SelectorParseErrorKind;
+
+    fn parse_value(&mut self, name: CowRcStr<'i>, input: &mut Parser<'i>, _start: &ParserState) -> Result<(), ParseError<Self::Error>> {
+        let value = consume_rest(input);
+        match &*name.to_ascii_lowercase() {
+            "initial-value" => self.initial = Some(value.trim().into()),
+            "inherits" => self.inherits = Some(value.trim().eq_ignore_ascii_case("true")),
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+impl<'i> AtRuleParser<'i> for PropertyParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = SelectorParseErrorKind;
+}
+
+impl<'i> QualifiedRuleParser<'i> for PropertyParser {
+    type Prelude = ();
+    type QualifiedRule = ();
+    type Error = SelectorParseErrorKind;
+}
+
+impl<'i> RuleBodyItemParser<'i, (), SelectorParseErrorKind> for PropertyParser {
     fn parse_declarations(&self) -> bool {
         true
     }

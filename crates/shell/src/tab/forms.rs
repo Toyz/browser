@@ -140,18 +140,28 @@ impl Tab {
                         color: placeholder,
                         // The page's text color: the app theme's caret is
                         // light in dark mode, invisible in a white field.
-                        child: Input::new(state)
-                            .appearance(false)
-                            .caret_color(fg)
-                            .px_0()
-                            .disabled(control.disabled)
-                            .text_color(fg)
-                            .text_size(font)
-                            // Full width, its own line's height: centered
-                            // in a taller box, as browsers draw the text of
-                            // a single-line field.
-                            .w_full()
-                            .into_any_element(),
+                        // Full width, its own line's height: centered in a
+                        // taller box, as browsers draw the text of a
+                        // single-line field. (`Styled::h`: `Input::h` sizes
+                        // only multi-line ones, leaving its own 32px.)
+                        child: Styled::h(
+                            Input::new(state)
+                                .appearance(false)
+                                .caret_color(fg)
+                                .px_0()
+                                .py_0()
+                                .disabled(control.disabled)
+                                .text_color(fg)
+                                .text_size(font)
+                                .font_family(self.palette.font(&style.font_names, style.font_family))
+                                .w_full(),
+                            px(match style.line_height {
+                                style::LineHeight::Px(v) => v,
+                                style::LineHeight::Number(n) => n * style.font_size,
+                                style::LineHeight::Normal => style.font_size * 1.25,
+                            }),
+                        )
+                        .into_any_element(),
                     }
                     .into_any_element(),
                     Field::Area(state) => Textarea::new(state)

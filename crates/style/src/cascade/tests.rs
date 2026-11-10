@@ -390,3 +390,40 @@ fn cascade_layers() {
     assert_eq!(color("@layer a { .i { color: green !important } } .i { color: red !important }"), green);
     let _ = red;
 }
+
+#[test]
+fn registered_properties_have_initial_values() {
+    // Tailwind v4: borders are `border-style: var(--tw-border-style)`, with
+    // the default from `@property` (no fallback set anywhere else).
+    let (doc, s) = styled(
+        r#"<div class="p"><p class="b">x</p></div>"#,
+        "@property --tw-border-style { syntax: \"*\"; inherits: false; initial-value: solid }
+         @property --shift { syntax: \"*\"; inherits: false; initial-value: 0px }
+         .b { border-width: 1px; border-style: var(--tw-border-style); margin-left: var(--shift) }
+         .p { --shift: 20px }",
+    );
+    let p = style_of(&doc, &s, "p");
+    assert_eq!(p.border_style.top, BorderStyle::Solid);
+    // Not inherited: the child starts over at the initial value.
+    assert_eq!(p.margin.left, Length::Px(0.0));
+}
+
+#[test]
+fn font_inherit_beats_earlier_rules_but_not_later_sizes() {
+    let (doc, s) = styled(
+        r#"<div class="m"><button class="b x">go</button></div>"#,
+        "button { font-family: serif } .m { font-family: monospace; font-size: 20px }
+         button.b { font: inherit } .x.x.x { font-size: 12px }",
+    );
+    let b = style_of(&doc, &s, "button");
+    assert_eq!(&*b.font_names[0], "monospace");
+    assert_eq!(b.font_size, 12.0);
+}
+
+#[test]
+fn place_items_sets_both_axes_and_small_caps_parse() {
+    let (doc, s) = styled(r#"<div><p>x</p></div>"#, "div { place-items: center } p { font-variant: small-caps }");
+    let d = style_of(&doc, &s, "div");
+    assert_eq!((d.align_items, d.justify_items), (Some(Align::Center), Some(Align::Center)));
+    assert_eq!(style_of(&doc, &s, "p").small_caps, Some(false));
+}

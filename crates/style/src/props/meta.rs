@@ -50,6 +50,7 @@ pub const META: &[Meta] = &[
     prop(&["line-height"], true, |s, src| s.line_height = src.line_height),
     prop(&["text-align"], true, |s, src| s.text_align = src.text_align),
     prop(&["text-transform"], true, |s, src| s.text_transform = src.text_transform),
+    prop(&["font-variant", "font-variant-caps"], true, |s, src| s.small_caps = src.small_caps),
     prop(&["white-space"], true, |s, src| s.white_space = src.white_space),
     prop(&["visibility"], true, |s, src| s.visible = src.visible),
     prop(&["list-style", "list-style-type"], true, |s, src| s.list_style = src.list_style),

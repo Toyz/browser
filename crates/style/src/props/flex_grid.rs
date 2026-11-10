@@ -61,8 +61,11 @@ out.push(D::AlignContent(parse_justify(p)?));
 pub(super) fn p_place_items<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     use Decl as D;
 {
-    out.push(D::AlignItems(parse_align(p)?));
-    let _ = p.try_parse(parse_align);
+    // `place-items: <align> <justify>?`
+    let align = parse_align(p)?;
+    let justify = p.try_parse(parse_align).unwrap_or(align);
+    out.push(D::AlignItems(align));
+    out.push(D::JustifyItems(Some(justify)));
 }
     Ok(())
 }
