@@ -108,6 +108,20 @@ pub struct Block {
     /// A `::before` (1) or `::after` (2) box: its element and which. They
     /// have no node of their own, but animate like elements do.
     pub pseudo: Option<(NodeId, u8)>,
+    /// A float and what follows it (see [`FloatSplit`]).
+    pub float_split: Option<FloatSplit>,
+}
+
+/// A row holding a float and the siblings after it: `[float, column]` (or
+/// `[column, float]` for a right float). The renderer puts as many of the
+/// column's items beside the float as it takes to cover its height (as
+/// measured last frame), and the rest below it at full width, as text
+/// flows past a float's bottom.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FloatSplit {
+    pub right: bool,
+    /// How many items start beside it (before anything's measured).
+    pub initial: u16,
 }
 
 /// A form control (`<input>`, `<textarea>`, `<select>`) as the page built it.
@@ -349,6 +363,7 @@ impl Block {
                     cell: None,
                     heading: false,
                     pseudo: None,
+                    float_split: None,
                 }));
                 row += 1;
             }
@@ -375,6 +390,7 @@ impl Block {
             cell: None,
             heading: false,
             pseudo: None,
+            float_split: None,
         }
     }
 
@@ -753,6 +769,7 @@ pub fn build_plain_text(text: &str) -> LayoutTree {
         cell: None,
         heading: false,
         pseudo: None,
+        float_split: None,
     };
     if let Some(p) = inline.finish(1, style) {
         block.children.push(LayoutBox::Paragraph(Arc::new(p)));
@@ -805,6 +822,79 @@ struct Builder<'a> {
     /// The flex box being built is one we made (a button centering its
     /// content): its inline content stays one run of text, not items.
     keep_inline: bool,
+}
+
+/// A block that's only a wrapper: nothing drawn, no room taken of its own,
+/// a plain block in flow (a float inside it may stick out of it).
+fn plain_wrapper(b: &Block) -> bool {
+    let s = &b.style;
+    b.kind == BlockKind::Normal
+        && b.float_split.is_none()
+        && s.float == Float::None
+        && !s.clear
+        && s.painted_background().is_none()
+        && s.background_image.is_none()
+        && s.gradients.is_none()
+        && !s.has_border()
+        && s.horizontal_edges() == 0.0
+        && s.vertical_edges() == 0.0
+        && [s.margin.top, s.margin.bottom].iter().all(|m| m.px_or_zero() == 0.0)
+        && s.overflow == style::Overflow::Visible
+        && s.position == style::Position::Static
+        && !s.transformed
+        && s.opacity >= 1.0
+        && s.filter.is_none()
+}
+
+/// A dissolved wrapper's anchors (its `id`), on what now comes first.
+fn give_anchors(children: &mut [LayoutBox], anchors: Vec<String>) {
+    if anchors.is_empty() {
+        return;
+    }
+    match children.first_mut() {
+        Some(LayoutBox::Block(b)) => b.anchors.splice(0..0, anchors).for_each(drop),
+        Some(LayoutBox::Paragraph(p)) => Arc::make_mut(p).anchors.splice(0..0, anchors).for_each(drop),
+        _ => {}
+    }
+}
+
+/// Whether `b`'s last child is a float row (its float may reach past it).
+fn ends_in_float_row(b: &Block) -> bool {
+    matches!(b.children.last(), Some(LayoutBox::Block(row)) if row.float_split.is_some())
+}
+
+/// A float row back as the float and the items after it.
+fn undo_float_row(row: Block) -> Vec<LayoutBox> {
+    let Some(split) = row.float_split else { return vec![LayoutBox::Block(row)] };
+    let mut children = row.children;
+    let (float, column) = if split.right {
+        let float = children.pop();
+        (float, children.pop())
+    } else {
+        let column = children.pop();
+        (children.pop(), column)
+    };
+    let mut out = Vec::new();
+    match float {
+        // Floats lined up in a box of our own: the floats.
+        Some(LayoutBox::Block(line))
+            if line.node.is_none() && !line.children.is_empty() && line.children.iter().all(|c| matches!(c, LayoutBox::Block(f) if f.style.float != Float::None)) =>
+        {
+            let mut floats = line.children;
+            // (Right floats were lined up from the right edge.)
+            if split.right {
+                floats.reverse();
+            }
+            out.extend(floats);
+        }
+        other => out.extend(other),
+    }
+    match column {
+        Some(LayoutBox::Block(c)) => out.extend(c.children),
+        Some(other) => out.push(other),
+        None => {}
+    }
+    out
 }
 
 /// The content width of a box with `style` in a containing block `avail`
@@ -1025,13 +1115,39 @@ impl Builder<'_> {
     /// "infobox / thumbnail next to paragraphs" case.
     fn group_floats(&mut self, children: Vec<LayoutBox>, parent: &Arc<ComputedStyle>) -> Vec<LayoutBox> {
         const MAX_BESIDE: usize = 8;
+        const MAX_FOLLOWING: usize = 32;
         let is_float = |b: &LayoutBox| matches!(b, LayoutBox::Block(b) if b.style.float != Float::None);
+        // A float sticks out of a plain wrapper (Wikipedia's `<section>`s:
+        // the infobox and two paragraphs are the lead, and the history
+        // section flows around the rest of it): such a wrapper whose float
+        // row ran out of things beside it gives its children back, the row
+        // undone, to be grouped with what follows it here.
+        let children = if children.iter().any(|c| matches!(c, LayoutBox::Block(b) if plain_wrapper(b) && ends_in_float_row(b))) {
+            let mut flat = Vec::with_capacity(children.len());
+            for child in children {
+                match child {
+                    LayoutBox::Block(mut b) if plain_wrapper(&b) && ends_in_float_row(&b) => {
+                        give_anchors(&mut b.children, std::mem::take(&mut b.anchors));
+                        for c in b.children {
+                            match c {
+                                LayoutBox::Block(row) if row.float_split.is_some() => flat.extend(undo_float_row(row)),
+                                other => flat.push(other),
+                            }
+                        }
+                    }
+                    other => flat.push(other),
+                }
+            }
+            flat
+        } else {
+            children
+        };
         if !children.iter().any(is_float) {
             return children;
         }
         let mut out = Vec::with_capacity(children.len());
-        let mut iter = children.into_iter().peekable();
-        while let Some(child) = iter.next() {
+        let mut iter: std::collections::VecDeque<LayoutBox> = children.into();
+        while let Some(child) = iter.pop_front() {
             let LayoutBox::Block(float) = child else {
                 out.push(child);
                 continue;
@@ -1044,11 +1160,11 @@ impl Builder<'_> {
             // they run out of room (tiles, nav items, thumbnails).
             let side = float.style.float;
             let mut floats = vec![LayoutBox::Block(float)];
-            while let Some(LayoutBox::Block(next)) = iter.peek() {
+            while let Some(LayoutBox::Block(next)) = iter.front() {
                 if next.style.float != side {
                     break;
                 }
-                floats.push(iter.next().unwrap());
+                floats.push(iter.pop_front().unwrap());
             }
             // Floats with nothing in them and no height take no room:
             // what follows doesn't sit beside them. (DuckDuckGo's empty
@@ -1058,17 +1174,53 @@ impl Builder<'_> {
                 out.extend(floats);
                 continue;
             }
+            // What follows, up to a `clear` or another float: as much as
+            // covers the float goes beside it (the renderer measures), the
+            // rest below. Until measured, up to the first heading.
             let mut beside = Vec::new();
-            while let Some(next) = iter.peek() {
-                let stop = match next {
-                    LayoutBox::Block(b) => b.heading || b.style.clear || b.style.float != Float::None,
-                    LayoutBox::Paragraph(_) | LayoutBox::Image(_) => false,
+            let mut initial = None;
+            while let Some(next) = iter.front() {
+                // A later float on the same side (Wikipedia's thumbnails,
+                // `float: right; clear: right`) is an item too: the renderer
+                // stacks it under this one if it comes up beside it, or
+                // flows what follows it around it further down.
+                if matches!(next, LayoutBox::Block(b) if b.style.float == side && !empty_float(next)) && !beside.is_empty() && beside.len() < MAX_FOLLOWING {
+                    beside.push(iter.pop_front().unwrap());
+                    continue;
+                }
+                let (stop, heading) = match next {
+                    LayoutBox::Block(b) => (b.style.clear || b.style.float != Float::None, b.heading),
+                    LayoutBox::Paragraph(_) | LayoutBox::Image(_) => (false, false),
                 };
-                if stop || beside.len() >= MAX_BESIDE {
+                if stop || beside.len() >= MAX_FOLLOWING {
                     break;
                 }
-                beside.push(iter.next().unwrap());
+                // A plain wrapper (the next `<section>`) is its items here,
+                // so the float's bottom can fall between them.
+                if matches!(next, LayoutBox::Block(b) if plain_wrapper(b) && b.children.len() > 1) {
+                    let Some(LayoutBox::Block(mut wrapper)) = iter.pop_front() else { unreachable!() };
+                    give_anchors(&mut wrapper.children, std::mem::take(&mut wrapper.anchors));
+                    // Its own float rows undone too: their floats stack
+                    // under this one, their text joins the rest.
+                    let items: Vec<LayoutBox> = wrapper
+                        .children
+                        .into_iter()
+                        .flat_map(|c| match c {
+                            LayoutBox::Block(row) if row.float_split.is_some() => undo_float_row(row),
+                            other => vec![other],
+                        })
+                        .collect();
+                    for c in items.into_iter().rev() {
+                        iter.push_front(c);
+                    }
+                    continue;
+                }
+                if heading && initial.is_none() {
+                    initial = Some(beside.len());
+                }
+                beside.push(iter.pop_front().unwrap());
             }
+            let initial = initial.unwrap_or(beside.len()).min(MAX_BESIDE).max(1) as u16;
 
             let float_column = if floats.len() == 1 {
                 floats.pop().unwrap()
@@ -1118,7 +1270,9 @@ impl Builder<'_> {
             } else {
                 vec![float_column, text_column]
             };
-            out.push(LayoutBox::Block(self.synthetic_block(row_style, BlockKind::Flex, items)));
+            let mut row = self.synthetic_block(row_style, BlockKind::Flex, items);
+            row.float_split = Some(FloatSplit { right: side == Float::Right, initial });
+            out.push(LayoutBox::Block(row));
         }
         out
     }
@@ -1519,6 +1673,7 @@ impl Builder<'_> {
             cell: None,
             heading: false,
             pseudo: None,
+            float_split: None,
         };
         place(self, block, c);
     }
@@ -1576,6 +1731,7 @@ impl Builder<'_> {
             cell: None,
             heading: false,
             pseudo: None,
+            float_split: None,
         }
     }
 
@@ -1623,6 +1779,7 @@ impl Builder<'_> {
                     cell: None,
                     heading: false,
                     pseudo: None,
+                    float_split: None,
                 };
                 Generated::place(Some(empty), c, link);
             }
@@ -2091,6 +2248,7 @@ impl Builder<'_> {
             cell: None,
             heading,
             pseudo: None,
+            float_split: None,
         }
     }
 
@@ -4245,18 +4403,21 @@ mod tests {
     #[test]
     fn floats_sit_beside_following_content() {
         let tree = layout_css(
-            r#"<div class="box">info</div><p>one</p><p>two</p><h2>next</h2><p>three</p>"#,
-            ".box { float: right; width: 200px }",
+            r#"<div class="box">info</div><p>one</p><p>two</p><h2>next</h2><p>three</p><p class="c">after</p>"#,
+            ".box { float: right; width: 200px } .c { clear: both }",
         );
-        // [row: (one, two) | box], h2, three
+        // [row: (one, two, next, three) | box], after: what follows the
+        // float, up to the clear, is split beside/below it when rendered,
+        // starting with what comes before the first heading.
         let LayoutBox::Block(row) = &tree.rows[0].content else { panic!("{:?}", tree.rows[0].content) };
         assert_eq!(row.kind, BlockKind::Flex);
+        assert_eq!(row.float_split, Some(FloatSplit { right: true, initial: 2 }));
         let LayoutBox::Block(text) = &row.children[0] else { panic!() };
-        assert_eq!(text.children.len(), 2);
+        assert_eq!(text.children.len(), 4);
         let LayoutBox::Block(float) = &row.children[1] else { panic!() };
         assert_eq!(float.style.width, Length::Px(200.0));
         assert_eq!(row.style.border_width.top, 0.0, "anonymous boxes have no borders");
-        assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["next", "three"]);
+        assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["after"]);
     }
 
     #[test]

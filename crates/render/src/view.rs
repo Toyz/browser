@@ -812,6 +812,187 @@ fn render_flow_children_in_order(children: &[LayoutBox], cx: &RenderCx) -> Vec<A
         .collect()
 }
 
+/// An element, laid out as it is, that says where it landed (its bounds
+/// at prepaint): measuring without a box around it.
+struct Measured {
+    inner: AnyElement,
+    report: Box<dyn Fn(Bounds<Pixels>)>,
+}
+
+impl Measured {
+    fn new(inner: AnyElement, report: impl Fn(Bounds<Pixels>) + 'static) -> Self {
+        Measured { inner, report: Box::new(report) }
+    }
+}
+
+impl IntoElement for Measured {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Measured {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        (self.inner.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) {
+        (self.report)(bounds);
+        self.inner.prepaint(window, cx);
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        self.inner.paint(window, cx);
+    }
+}
+
+/// Where each float row split its items last frame (see `FloatSplit`).
+#[derive(Default)]
+struct Split {
+    /// Items beside the float.
+    beside: usize,
+    /// Fewer than this left a gap under the float (never go back below).
+    floor: usize,
+    float_height: f32,
+    column_height: f32,
+    width: f32,
+}
+
+thread_local! {
+    /// By (row, offset into its items): a row's later floats split too.
+    static SPLITS: RefCell<HashMap<(usize, usize), Split>> = RefCell::new(HashMap::new());
+}
+
+/// A float and what follows it (see `FloatSplit`).
+fn float_split_row(block: &Block, split: crate::boxes::FloatSplit, base: Div, cx: &RenderCx) -> Div {
+    let (float_ix, column_ix) = if split.right { (1, 0) } else { (0, 1) };
+    let (Some(float), Some(LayoutBox::Block(column))) = (block.children.get(float_ix), block.children.get(column_ix)) else {
+        return base.flex().flex_row().items_start().children(render_items(&block.children, cx));
+    };
+    base.flex().flex_col().relative().child(float_flow((block.id, 0), split.right, float, &column.children, usize::from(split.initial), cx))
+}
+
+/// `float` and `items`: as many items beside it as cover its height (later
+/// floats on its side among them stacked under it), the rest below at full
+/// width, around the next float there if there is one. Each frame measures
+/// both sides and moves the split (it settles in a frame or two).
+fn float_flow(key: (usize, usize), right: bool, float: &LayoutBox, items: &[LayoutBox], initial: usize, cx: &RenderCx) -> AnyElement {
+    let side = if right { style::Float::Right } else { style::Float::Left };
+    let same_side = move |b: &LayoutBox| matches!(b, LayoutBox::Block(f) if f.style.float == side);
+    let beside = SPLITS.with_borrow_mut(|m| {
+        let s = m.entry(key).or_insert_with(|| Split { beside: initial, floor: 1, ..Default::default() });
+        s.beside.clamp(1.min(items.len()), items.len())
+    });
+    let (next_to, below) = items.split_at(beside);
+    // The float column: the float, and later ones that came up beside it.
+    let floats: Vec<&LayoutBox> = std::iter::once(float).chain(next_to.iter().filter(|b| same_side(b))).collect();
+    let text: Vec<LayoutBox> = next_to.iter().filter(|b| !same_side(b)).cloned().collect();
+    let mut float_els = Vec::new();
+    for f in floats {
+        float_els.extend(render_items(std::slice::from_ref(f), cx));
+    }
+    let float_el = div().flex().flex_col().flex_none().map(|d| if right { d.items_end() } else { d.items_start() }).children(float_els).into_any_element();
+    let float_el = Measured::new(float_el, move |b| {
+        SPLITS.with_borrow_mut(|m| {
+            if let Some(s) = m.get_mut(&key) {
+                s.float_height = f32::from(b.size.height);
+            }
+        })
+    });
+    let column_el = div()
+        .flex()
+        .flex_col()
+        .flex_grow(1.0)
+        .flex_shrink(1.0)
+        .flex_basis(px(0.))
+        .min_w(px(0.))
+        .children(render_flow_children(&text, cx))
+        .into_any_element();
+    let column_el = Measured::new(column_el, move |b| {
+        SPLITS.with_borrow_mut(|m| {
+            if let Some(s) = m.get_mut(&key) {
+                s.column_height = f32::from(b.size.height);
+            }
+        })
+    });
+    let row = div().flex().flex_row().items_start().w_full();
+    let row = if right { row.child(column_el).child(float_el) } else { row.child(float_el).child(column_el) };
+    let total = items.len();
+    // How many of the first k items are text (not floats), for each k.
+    let mut text_counts = Vec::with_capacity(total + 1);
+    text_counts.push(0usize);
+    for b in items {
+        text_counts.push(text_counts.last().copied().unwrap_or(0) + usize::from(!same_side(b)));
+    }
+    let text_items = move |k: usize| text_counts[k.min(total)].max(1);
+    // After both sides are placed: move the split toward covering the float.
+    let decide = canvas(
+        move |bounds, window, _| {
+            let changed = SPLITS.with_borrow_mut(|m| {
+                let Some(s) = m.get_mut(&key) else { return false };
+                let width = f32::from(bounds.size.width);
+                if (width - s.width).abs() > 0.5 {
+                    // A new width: what was too few may be enough now.
+                    s.width = width;
+                    s.floor = 1;
+                }
+                let (f, c, k) = (s.float_height, s.column_height, s.beside.min(total));
+                if f <= 0.0 || k == 0 {
+                    return false;
+                }
+                let average = (c / text_items(k) as f32).max(8.0);
+                let next = if c + 1.0 < f && k < total {
+                    // A gap under the column: more beside.
+                    s.floor = s.floor.max(k + 1);
+                    (k + ((f - c) / average).ceil() as usize).min(total)
+                } else if c - average >= f + 1.0 && k > s.floor {
+                    // Items beside it that start below its bottom: back down.
+                    k.saturating_sub(((c - f) / average).floor() as usize).max(s.floor)
+                } else {
+                    k
+                };
+                if std::env::var_os("FEATHER_DEBUG_FLOATS").is_some() {
+                    eprintln!("float row {key:?}: float {f:.0}px, beside {k}/{total} = {c:.0}px -> {next} (floor {})", s.floor);
+                }
+                let changed = next != s.beside;
+                s.beside = next;
+                changed
+            });
+            if changed {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_0();
+    // Below: up to the next float on this side, then around that one.
+    let next_float = below.iter().position(|b| same_side(b));
+    let (plain, rest) = match next_float {
+        Some(j) => (&below[..j], Some((j, &below[j], &below[j + 1..]))),
+        None => (below, None),
+    };
+    let mut out = div().flex().flex_col().w_full().relative().child(row).children(render_flow_children(plain, cx));
+    if let Some((j, next, after)) = rest {
+        let nested = (key.0, key.1 + beside + j + 1);
+        out = out.child(float_flow(nested, right, next, after, 1, cx));
+    }
+    out.child(decide).into_any_element()
+}
+
 /// Flex/grid items: margins apply as-is.
 fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     children
@@ -1154,6 +1335,7 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
                 )
             })
             .children(render_flow_children(&block.children, cx)),
+        BlockKind::Flex if block.float_split.is_some() => float_split_row(block, block.float_split.expect("checked"), base, cx),
         BlockKind::Flex => {
             let d = base.flex().map(|d| match s.flex_direction {
                 FlexDirection::Row => d.flex_row(),
