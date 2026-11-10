@@ -2000,13 +2000,19 @@ impl Render for Tab {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    // A click in a form field focuses the field (it handled
-                    // the event first); don't take focus back from it.
-                    if !this.focus_handle.contains_focused(window, cx) {
-                        this.focus_handle.focus(window, cx);
-                    }
+                    // A click in a text field focuses the field (it handled the
+                    // event first). Anywhere else, focus leaves the field for
+                    // the page, as in browsers: scripts hear `blur` (YouTube
+                    // closes its suggestions on it).
+                    // (`mousedown` reaches scripts first, as in browsers.)
                     this.mouse_down = true;
                     this.script_mouse("mousedown", event.position, 0, (0.0, 0.0));
+                    if this.forms.clicked_field.take().is_none() {
+                        if this.forms.focused.is_some() {
+                            this.script_focus_lost(window, cx);
+                        }
+                        this.focus_handle.focus(window, cx);
+                    }
                     this.interaction_changed(window, cx);
                 }),
             )

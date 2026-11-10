@@ -454,10 +454,20 @@ pub(crate) fn render_block_box(block: &Block, cx: &RenderCx) -> AnyElement {
     render_block(block, cx, Edges::all(CssLength::ZERO), false)
 }
 
-/// A `position: fixed` box, for the viewport overlay layer.
+/// A `position: fixed` box, for the viewport overlay layer: drawn after
+/// the page's own positioned boxes (a fixed header stays over thumbnails
+/// scrolling under it), with what's inside it drawn in place.
 pub fn render_fixed(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
-    render_box(b, cx, b.margin(), false)
+    let outer = DEFERRED_DEPTH.with(|d| d.replace(d.get() + 1));
+    let el = render_box(b, cx, b.margin(), false);
+    DEFERRED_DEPTH.with(|d| d.set(outer));
+    ClippedDeferred { child: Some(el), priority: FIXED_PRIORITY }.into_any_element()
 }
+
+/// Deferred-draw priorities: positioned boxes in the page, then the fixed
+/// layer over them.
+const POSITIONED_PRIORITY: usize = 1;
+const FIXED_PRIORITY: usize = 2;
 
 pub(crate) fn is_out_of_flow(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed))
@@ -1232,11 +1242,12 @@ fn positioned(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyElem
 }
 
 fn clipped_deferred(child: AnyElement) -> AnyElement {
-    ClippedDeferred { child: Some(child) }.into_any_element()
+    ClippedDeferred { child: Some(child), priority: POSITIONED_PRIORITY }.into_any_element()
 }
 
 struct ClippedDeferred {
     child: Option<AnyElement>,
+    priority: usize,
 }
 
 impl IntoElement for ClippedDeferred {
@@ -1282,7 +1293,7 @@ impl Element for ClippedDeferred {
         let child = self.child.take().expect("child");
         let offset = window.element_offset();
         let mask = window.content_mask();
-        window.defer_draw(child, offset, 1, Some(mask));
+        window.defer_draw(child, offset, self.priority, Some(mask));
     }
 
     fn paint(

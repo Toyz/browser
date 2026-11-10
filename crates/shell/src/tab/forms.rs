@@ -47,6 +47,9 @@ pub struct Forms {
     open_select: Option<NodeId>,
     /// The text field with keyboard focus (`:focus`).
     pub focused: Option<NodeId>,
+    /// A text field got this mouse-down (set by the field, read by the
+    /// page's handler right after).
+    pub clicked_field: Option<NodeId>,
     /// The last control toggled, and when: a click on a checkbox inside a
     /// `<label>` reaches both (the label activates the same box).
     last_toggle: Option<(NodeId, std::time::Instant)>,
@@ -151,7 +154,20 @@ impl Tab {
                         .h_full()
                         .into_any_element(),
                 };
-                div().size_full().flex().items_center().text_color(fg).text_size(font).child(field).into_any_element()
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .text_color(fg)
+                    .text_size(font)
+                    // Seen before the page's own mouse-down handler: this
+                    // click keeps (or takes) focus in a field.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, _| this.forms.clicked_field = Some(node)),
+                    )
+                    .child(field)
+                    .into_any_element()
             }
             ControlKind::Checkbox | ControlKind::Radio => {
                 let radio = matches!(control.kind, ControlKind::Radio);
@@ -326,6 +342,13 @@ impl Tab {
             // focus (a field that had it lets go).
             None => self.focus_handle.focus(window, cx),
         }
+        self.interaction_changed(window, cx);
+    }
+
+    /// A click outside the focused field: it loses focus, and scripts hear.
+    pub(super) fn script_focus_lost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.forms.focused = None;
+        self.tell_scripts_focus();
         self.interaction_changed(window, cx);
     }
 
