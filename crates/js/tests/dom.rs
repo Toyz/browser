@@ -819,6 +819,19 @@ fn blobs_and_bodies_keep_bytes() {
 }
 
 #[test]
+fn array_length_sets_truncate_every_time() {
+    // A cached `arr.length = 0` still deletes the elements (Apollo's
+    // optimism recomputes into the same array).
+    let doc = run(r##"<body><p id="o"></p><script>
+        const e = { value: [] }, out = [];
+        function g(f) { e.value.length = 0; e.value[0] = f(); }
+        for (let i = 0; i < 4; i++) { g(() => i); out.push(e.value.length + ":" + e.value[0]); }
+        document.getElementById("o").textContent = out.join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "1:0 1:1 1:2 1:3");
+}
+
+#[test]
 fn inline_caches_follow_a_reshaped_prototype() {
     // A cached prototype method stays right after the prototype loses an
     // earlier property (its slots are renumbered).

@@ -71,8 +71,15 @@ fn set_by_name(
     }
 
     // Cache the property.
+    //
+    // Feather: not an array's `length`. A cached set writes the slot
+    // directly, and setting an array's length must also delete the elements
+    // past it (ArraySetLength): `arr.length = 0; arr[0] = x` the second
+    // time round left `arr.length` 0 with the element in it, and Apollo's
+    // cache (optimism) threw "unknown value" on Twitch.
     let slot = *context.slot();
-    if succeeded && slot.is_cacheable() {
+    let array_length = object.is_array() && name == PropertyKey::from(js_str!("length"));
+    if succeeded && slot.is_cacheable() && !array_length {
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();

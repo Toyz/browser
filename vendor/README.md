@@ -44,6 +44,11 @@ which broke GitHub's React app). The fix marks every enclosing function scope.
   the cache read whatever moved into the old slot. (DuckDuckGo: after
   polyfills reworked `Array.prototype`, webpack's `arr.splice(i, 1)` called
   `toLocaleString` in an endless loop.)
+- `src/vm/opcode/set/property.rs` (`set_by_name`): sets of an array's
+  `length` aren't cached. A cached set writes the slot directly, skipping
+  ArraySetLength's deletion of the elements past the new length: the second
+  `arr.length = 0; arr[0] = x` left the array "empty" with an element in it
+  (Twitch's Apollo cache threw "unknown value").
 
 ## boa_gc 0.22.0
 
