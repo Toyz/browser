@@ -14,6 +14,7 @@
 
 pub mod cors;
 mod canvas;
+mod cssom;
 mod dom;
 mod images;
 mod modules;

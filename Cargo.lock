@@ -4301,6 +4301,7 @@ dependencies = [
  "async-channel",
  "boa_engine",
  "chrono",
+ "cssparser",
  "html",
  "image",
  "imagesize 0.13.0",

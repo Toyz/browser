@@ -11,6 +11,8 @@ boa_engine = { version = "0.22", features = ["intl_bundled", "annex-b"] }
 page.workspace = true
 html.workspace = true
 style.workspace = true
+# The CSSOM's CSS text (rules, declarations), as the style engine tokenizes it.
+cssparser = "0.38"
 url.workspace = true
 slotmap.workspace = true
 anyhow.workspace = true

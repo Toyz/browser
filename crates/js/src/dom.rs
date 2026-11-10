@@ -901,6 +901,20 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         }
         Ok(JsValue::undefined())
     }));
+    // CSSOM text: a sheet's top-level rules, a block's declarations.
+    add("cssRules", 1, Box::new(|_, a, cx| {
+        let css = arg_string(a, 0, cx)?;
+        let rules: Vec<JsValue> = crate::cssom::rules(&css).iter().map(|r| js_str(r)).collect();
+        Ok(JsArray::from_iter(rules, cx).into())
+    }));
+    add("cssDecls", 1, Box::new(|_, a, cx| {
+        let block = arg_string(a, 0, cx)?;
+        let decls: Vec<JsValue> = crate::cssom::declarations(&block)
+            .into_iter()
+            .map(|(name, value, important)| JsArray::from_iter([js_str(&name), js_str(&value), JsValue::from(important)], cx).into())
+            .collect();
+        Ok(JsArray::from_iter(decls, cx).into())
+    }));
     add("getAttr", 2, Box::new(|d, a, cx| {
         let raw = arg_string(a, 1, cx)?;
         let dom = d.borrow();
@@ -1098,7 +1112,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("log", 2, Box::new(|d, a, cx| {
         let level = arg_string(a, 0, cx)?;
         let text = arg_string(a, 1, cx)?;
-        if d.borrow().debug {
+        if d.borrow().debug || (text.starts_with("IODBG") && std::env::var_os("FEATHER_DEBUG_IO").is_some()) {
             eprintln!("console.{level}: {text}");
         }
         Ok(JsValue::undefined())
@@ -1795,6 +1809,11 @@ fn flatten(dom: &Dom, adopted: Vec<(Option<NodeId>, String)>) -> Document {
             continue;
         }
         trees.light.insert(host, src.children(host).to_vec());
+        if std::env::var_os("FEATHER_DEBUG_SHADOW").is_some() {
+            let tag = |n: NodeId| src.element(n).map(|e| e.name.local.to_string()).unwrap_or_default();
+            let kids: Vec<String> = src.children(root).iter().map(|&c| tag(c)).collect();
+            eprintln!("shadow: <{}> light={} shadow={:?}", tag(host), src.children(host).len(), kids);
+        }
         // Light children by the slot they ask for ("" = the default slot).
         let mut assigned: HashMap<String, Vec<NodeId>> = HashMap::new();
         for &c in src.children(host) {

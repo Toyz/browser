@@ -787,15 +787,9 @@
   // element.style: the inline `style` attribute, read and written as
   // declarations (camelCase properties and setProperty/getPropertyValue).
   const kebab = (p) => p.startsWith("--") ? p : p.replace(/^(webkit|moz|ms)(?=[A-Z])/, "-$1").replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+  // [[name, value (with " !important")], ...], tokenized as CSS (natively).
   function parseDecls(text) {
-    const out = [];
-    for (const part of (text || "").split(";")) {
-      const i = part.indexOf(":");
-      if (i < 0) continue;
-      const name = part.slice(0, i).trim();
-      if (name) out.push([name.startsWith("--") ? name : name.toLowerCase(), part.slice(i + 1).trim()]);
-    }
-    return out;
+    return N.cssDecls(String(text || "")).map(([name, value, important]) => [name, important ? value + " !important" : value]);
   }
   function styleFor(el) {
     const decls = () => parseDecls(el.getAttribute("style"));
@@ -1411,22 +1405,8 @@
   }
 
   // Constructed stylesheets (adoptedStyleSheets): just their text.
-  // Top-level rules of a stylesheet's text (braces nest: @media blocks).
-  function splitRules(text) {
-    const out = [];
-    let depth = 0, start = 0, quote = null;
-    for (let i = 0; i < text.length; i++) {
-      const c = text[i];
-      if (quote) { if (c === "\\") i++; else if (c === quote) quote = null; continue; }
-      if (c === "/" && text[i + 1] === "*") { const end = text.indexOf("*/", i + 2); i = end < 0 ? text.length : end + 1; continue; }
-      if (c === '"' || c === "'") quote = c;
-      else if (c === "{") depth++;
-      else if (c === "}" && depth > 0 && --depth === 0) { out.push(text.slice(start, i + 1).trim()); start = i + 1; }
-      else if (c === ";" && depth === 0) { const r = text.slice(start, i + 1).trim(); if (r.startsWith("@")) out.push(r); start = i + 1; }
-    }
-    // A comment before a rule is part of its text: drop the comment, not the rule.
-    return out.map((r) => r.replace(/^(?:\s*\/\*[\s\S]*?\*\/)+\s*/, "")).filter(Boolean);
-  }
+  // Top-level rules of a stylesheet's text (tokenized natively).
+  const splitRules = (text) => N.cssRules(String(text));
   class CSSRule {
     constructor(text, sheet) {
       this.cssText = text;
@@ -1437,7 +1417,14 @@
       if (this.type === 4) this.conditionText = this.selectorText.slice(6).trim();
       if (this.type === 1) {
         const body = brace > 0 ? text.slice(brace + 1, text.lastIndexOf("}")) : "";
-        this.style = { cssText: body.trim(), getPropertyValue: (n) => { const m = new RegExp("(?:^|;)\\s*" + n + "\\s*:\\s*([^;]*)").exec(body); return m ? m[1].trim() : ""; } };
+        const decls = parseDecls(body);
+        this.style = {
+          cssText: body.trim(),
+          get length() { return decls.length; },
+          item: (i) => (decls[i] ? decls[i][0] : ""),
+          getPropertyValue: (n) => { const d = decls.find(([k]) => k === n); return d ? d[1].replace(/\s*!important$/, "") : ""; },
+          getPropertyPriority: (n) => { const d = decls.find(([k]) => k === n); return d && / !important$/.test(d[1]) ? "important" : ""; },
+        };
       }
     }
   }
@@ -2098,6 +2085,7 @@
         const ratio = !inside ? 0 : area > 0 ? ((ax - ix) * (ay - iy)) / area : 1;
         const visible = inside && this.thresholds.some((t) => (t === 0 ? true : ratio >= t));
         if (last === visible) continue;
+        if (N.debugIO && N.debugIO() && target.localName === "img") console.log("IODBG img " + (visible ? "in" : "out") + " t=" + Math.round(N.now()) + " r=" + JSON.stringify(r) + " root=" + (this.root ? this.root.localName : "vp") + " th=" + JSON.stringify(this.thresholds) + " margin=" + this.rootMargin + " src=" + (target.getAttribute("src") ? "y" : "n"));
         if (visible && N.debugIO && N.debugIO()) console.log("IODBG visible " + target.localName + "." + String(target.className).slice(0, 60) + " r=" + JSON.stringify(r) + " own=" + JSON.stringify(layoutRects.get(target.__id) || null) + " vp=" + viewport + " box=" + JSON.stringify(box));
         this._targets.set(target, visible);
         entries.push(new IntersectionObserverEntry({

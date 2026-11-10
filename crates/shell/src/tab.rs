@@ -92,7 +92,11 @@ pub struct Tab {
     images: ImageStore,
     /// What each image element last showed (see `RenderCx::shown_images`).
     shown_images: Rc<std::cell::RefCell<HashMap<NodeId, Arc<url::Url>>>>,
-    images_pending: usize,
+    /// Images waiting for the loader, most wanted first, and how many it
+    /// has in flight (see `load_images`).
+    image_queue: Rc<std::cell::RefCell<std::collections::VecDeque<Url>>>,
+    images_in_flight: Rc<std::cell::Cell<usize>>,
+    image_loader_running: Rc<std::cell::Cell<bool>>,
     /// Bumped per finished image (invalidates cached inline layouts).
     images_generation: u64,
     /// Bumped when web fonts arrive.
@@ -219,7 +223,9 @@ impl Tab {
             _hover_timer: None,
             images: ImageStore::default(),
             shown_images: Rc::default(),
-            images_pending: 0,
+            image_queue: Rc::default(),
+            images_in_flight: Rc::default(),
+            image_loader_running: Rc::default(),
             images_generation: 0,
             fonts_generation: 0,
             _fonts_tasks: Vec::new(),
@@ -518,6 +524,9 @@ impl Tab {
             self.images
                 .borrow_mut()
                 .retain(|url, state| wanted.contains(url) && matches!(state, ImageState::Ready { .. }));
+            // The last page's images still waiting aren't wanted any more
+            // (ones in flight finish into the cache).
+            self.image_queue.borrow_mut().clear();
         }
         self.shown_images.borrow_mut().clear();
         self.page = Some(page);
@@ -598,12 +607,17 @@ impl Tab {
         }
         let gone: Vec<NodeId> = self.layout_painted.difference(&now).copied().collect();
         // Painted again: the next layout message lists it among the rects
-        // only if it moved, so make sure it does.
+        // only if it moved, so make sure it does, and that there is one (in
+        // the same place as before, nothing else sends one: YouTube's icons
+        // and Shorts, drawn when an IntersectionObserver says they're on
+        // screen, stayed blank until a scroll).
+        let mut appeared = false;
         for n in now.difference(&self.layout_painted) {
             self.layout_sent.remove(n);
+            appeared = true;
         }
         self.layout_painted = now;
-        if gone.is_empty() {
+        if gone.is_empty() && !appeared {
             return;
         }
         self.layout_gone.extend(gone);
@@ -880,35 +894,64 @@ impl Tab {
         }));
     }
 
-    /// Fetch the page's images in the background; each one re-measures the rows
-    /// showing it when it arrives.
+    /// Images queued or being fetched.
+    fn images_pending(&self) -> usize {
+        self.image_queue.borrow().len() + self.images_in_flight.get()
+    }
+
+    /// Queue the page's images that aren't loaded or loading yet, the ones
+    /// on screen (and fixed ones) first, and keep the loader running; each
+    /// image re-measures the rows showing it when it arrives.
+    ///
+    /// One loader runs for the tab: a layout update (pages change their DOM
+    /// all through loading) only adds to its queue. Restarting it per update
+    /// dropped the fetches in flight and started over from the top of the
+    /// document, so images further down (YouTube's Shorts shelf) waited
+    /// until the page went quiet.
     fn load_images(&mut self, cx: &mut Context<Self>) {
         let Some(page) = &self.page else { return };
-        // Everything not already loaded or failed (this replaces any previous
-        // loader task, so in-flight images are queued again too).
-        let jobs: Vec<Url> = {
+        let top = self.list_state.logical_scroll_top().item_ix;
+        let near = top.saturating_sub(4)..top + 40;
+        {
             let mut store = self.images.borrow_mut();
-            let jobs: Vec<Url> = page
+            let mut queue = self.image_queue.borrow_mut();
+            let mut soon: Vec<Url> = Vec::new();
+            let mut later: Vec<Url> = Vec::new();
+            let wanted = page
                 .layout
-                .images
+                .fixed_images
                 .iter()
-                .map(|(url, _)| url)
-                .chain(page.layout.fixed_images.iter())
+                .map(|u| (u, true))
+                .chain(page.layout.images.iter().map(|(u, rows)| (u, rows.iter().any(|r| near.contains(r)))))
                 .take(MAX_IMAGES)
-                .filter(|url| loader::may_load(&page.url, url))
-                .map(|url| (**url).clone())
-                .filter(|url| matches!(store.get(url), None | Some(ImageState::Loading)))
-                .collect();
-            for url in &jobs {
-                store.insert(url.clone(), ImageState::Loading);
+                .filter(|(url, _)| loader::may_load(&page.url, url));
+            for (url, visible) in wanted {
+                match store.get(&**url) {
+                    None => {
+                        store.insert((**url).clone(), ImageState::Loading);
+                        if visible { soon.push((**url).clone()) } else { later.push((**url).clone()) }
+                    }
+                    // Queued already: move up if it's on screen now.
+                    Some(ImageState::Loading) if visible => {
+                        if let Some(at) = queue.iter().position(|q| q == &**url) {
+                            if let Some(q) = queue.remove(at) {
+                                soon.push(q);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
-            jobs
-        };
-        self.images_pending = jobs.len();
-        if jobs.is_empty() {
-            self._image_task = None;
+            for url in soon.into_iter().rev() {
+                queue.push_front(url);
+            }
+            queue.extend(later);
+        }
+        if self.image_loader_running.get() || self.image_queue.borrow().is_empty() {
             return;
         }
+        self.image_loader_running.set(true);
+        let (queue, in_flight_count, running) = (self.image_queue.clone(), self.images_in_flight.clone(), self.image_loader_running.clone());
         self._image_task = Some(cx.spawn(async move |this, cx| {
             let start = |cx: &mut AsyncApp, url: Url| {
                 let task = cx.background_executor().spawn({
@@ -917,15 +960,15 @@ impl Tab {
                 });
                 async move { (url, task.await) }
             };
-            let mut queue = jobs.into_iter();
             let mut in_flight = FuturesUnordered::new();
-            for job in queue.by_ref().take(IMAGE_CONCURRENCY) {
-                in_flight.push(start(cx, job));
-            }
-            while let Some((url, result)) = in_flight.next().await {
-                if let Some(job) = queue.next() {
-                    in_flight.push(start(cx, job));
+            loop {
+                while in_flight.len() < IMAGE_CONCURRENCY {
+                    let Some(url) = queue.borrow_mut().pop_front() else { break };
+                    in_flight_count.set(in_flight_count.get() + 1);
+                    in_flight.push(start(cx, url));
                 }
+                let Some((url, result)) = in_flight.next().await else { break };
+                in_flight_count.set(in_flight_count.get().saturating_sub(1));
                 let updated = this.update(cx, |this, cx| {
                     let debug = std::env::var_os("BROWSER_DEBUG").is_some();
                     let state = match result {
@@ -944,8 +987,10 @@ impl Tab {
                         .and_then(|p| p.layout.images.iter().find(|(u, _)| **u == url))
                         .map(|(_, rows)| rows.clone())
                         .unwrap_or_default();
+                    if debug {
+                        eprintln!("image ready: {} rows={rows:?}", url.as_str().chars().take(70).collect::<String>());
+                    }
                     this.images.borrow_mut().insert(url, state);
-                    this.images_pending = this.images_pending.saturating_sub(1);
                     this.images_generation += 1;
                     for row in rows {
                         this.list_state.remeasure_items(row..row + 1);
@@ -956,6 +1001,7 @@ impl Tab {
                     break;
                 }
             }
+            running.set(false);
         }));
     }
 
@@ -1208,7 +1254,7 @@ impl Tab {
         self._capture_task = Some(cx.spawn_in(window, async move |this, cx| {
             let wait_for_images = async |cx: &mut AsyncWindowContext| {
                 for _ in 0..50 {
-                    let pending = this.update(cx, |this, _| this.images_pending).unwrap_or(0);
+                    let pending = this.update(cx, |this, _| this.images_pending()).unwrap_or(0);
                     if pending == 0 {
                         break;
                     }

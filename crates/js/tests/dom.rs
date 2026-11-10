@@ -1082,3 +1082,16 @@ fn probe_styles() {
     let html_el = doc.children(doc.root()).iter().copied().find(|&n| doc.element(n).is_some()).unwrap();
     walk(&doc, &styler, html_el, &style::ComputedStyle::initial(), &want, "");
 }
+
+#[test]
+fn inline_styles_with_semicolons_in_values() {
+    // `;` inside a string or url() is part of the value: scripts editing
+    // another property keep it whole.
+    let doc = run(r##"<body><div id="d" style='background: url("data:image/svg+xml;utf8,<svg/>") no-repeat; content: ";"'></div><p id="o"></p><script>
+        const d = document.getElementById("d");
+        d.style.color = "red";
+        d.style.setProperty("width", "10px", "important");
+        document.getElementById("o").textContent = [d.style.background, d.style.content, d.style.color, d.style.length, d.style.getPropertyValue("width")].join(" | ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), r#"url("data:image/svg+xml;utf8,<svg/>") no-repeat | ";" | red | 4 | 10px"#);
+}
