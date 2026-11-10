@@ -324,10 +324,25 @@ impl Number {
             let locales = args.get_or_undefined(0).clone();
             let options = args.get_or_undefined(1).clone();
 
-            // 2. Let numberFormat be ? Construct(%Intl.NumberFormat%, « locales, options »).
-            let number_format = NumberFormat::new(&locales, &options, context)?;
             let mut x = Decimal::try_from_f64(x, FloatPrecision::RoundTrip)
                 .map_err(|err| JsNativeError::range().with_message(err.to_string()))?;
+
+            // Feather: with no locales or options (the usual call), the
+            // default format is made once per context. Making one per call
+            // (locale resolution, ICU data lookups) cost DuckDuckGo's
+            // results script seconds over a few thousand calls.
+            struct DefaultNumberFormat(NumberFormat);
+            if locales.is_undefined() && options.is_undefined() {
+                if !context.has_data::<DefaultNumberFormat>() {
+                    let number_format = NumberFormat::new(&locales, &options, context)?;
+                    context.insert_data(DefaultNumberFormat(number_format));
+                }
+                let number_format = &context.get_data::<DefaultNumberFormat>().expect("inserted").0;
+                return Ok(js_string!(number_format.format(&mut x).write_to_string()).into());
+            }
+
+            // 2. Let numberFormat be ? Construct(%Intl.NumberFormat%, « locales, options »).
+            let number_format = NumberFormat::new(&locales, &options, context)?;
 
             // 3. Return FormatNumeric(numberFormat, ! ToIntlMathematicalValue(x)).
             Ok(js_string!(number_format.format(&mut x).write_to_string()).into())

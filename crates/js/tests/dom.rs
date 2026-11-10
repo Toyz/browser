@@ -819,6 +819,21 @@ fn blobs_and_bodies_keep_bytes() {
 }
 
 #[test]
+fn inline_caches_follow_a_reshaped_prototype() {
+    // A cached prototype method stays right after the prototype loses an
+    // earlier property (its slots are renumbered).
+    let doc = run(r##"<body><p id="o"></p><script>
+        const get = (a) => a.splice;
+        const arr = [1, 2];
+        get(arr); get(arr);
+        delete Array.prototype.concat;
+        const after = get(arr);
+        document.getElementById("o").textContent = [after === Array.prototype.splice, after.name, (() => { const n = [8792]; n.splice(0, 1); return n.length; })()].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true splice 0");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

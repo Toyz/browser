@@ -7,7 +7,7 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot},
+    object::shape::{Shape, WeakShape, slot::{Slot, SlotAttributes}},
 };
 
 #[cfg(test)]
@@ -22,6 +22,19 @@ pub(crate) struct CacheEntry {
     pub(crate) shape: WeakShape,
     #[unsafe_ignore_trace]
     pub(crate) slot: Slot,
+    /// Feather: for a property found on the prototype, the prototype's
+    /// shape when it was cached. A prototype that loses a property gets a
+    /// new shape with its slots renumbered, while the receiver's shape (the
+    /// cache key) stays: without this check the cache read whatever moved
+    /// into the old slot (DuckDuckGo's `arr.splice(i, 1)` called
+    /// `toLocaleString`, forever, once polyfills had reshaped
+    /// `Array.prototype`).
+    pub(crate) prototype: Option<WeakShape>,
+}
+
+/// The shape of `shape`'s prototype, if it has one.
+fn prototype_shape(shape: &Shape) -> Option<Shape> {
+    shape.prototype().map(|p| p.borrow().shape().clone())
 }
 
 /// An inline cache entry for a property access.
@@ -74,11 +87,21 @@ impl InlineCache {
         let mut entries = self.entries.borrow_mut();
         let entries = entries.get_or_insert_with(Box::default);
 
+        let prototype = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+            match prototype_shape(shape) {
+                Some(p) => Some(WeakShape::from(&p)),
+                None => return,
+            }
+        } else {
+            None
+        };
+
         // Add a new entry if there's space.
         if entries
             .try_push(CacheEntry {
                 shape: shape.into(),
                 slot,
+                prototype,
             })
             .is_err()
         {
@@ -105,7 +128,20 @@ impl InlineCache {
         while i < entries.len() {
             if let Some(upgraded) = entries[i].shape.upgrade() {
                 if upgraded.to_addr_usize() == shape_addr {
-                    result = Some((upgraded, entries[i].slot));
+                    // A prototype hit holds only while the prototype's
+                    // layout is the one cached.
+                    let current = match &entries[i].prototype {
+                        None => true,
+                        Some(cached) => match (cached.upgrade(), prototype_shape(&upgraded)) {
+                            (Some(cached), Some(now)) => cached.to_addr_usize() == now.to_addr_usize(),
+                            _ => false,
+                        },
+                    };
+                    if current {
+                        result = Some((upgraded, entries[i].slot));
+                    } else {
+                        entries.swap_remove(i);
+                    }
                     break;
                 }
                 i += 1;

@@ -33,12 +33,24 @@ use tap::TapOptional;
 ///
 /// [spec]: https://tc39.es/ecma402/#sec-defaultlocale
 pub(crate) fn default_locale(canonicalizer: &LocaleCanonicalizer) -> Locale {
-    sys_locale::get_locale()
-        .and_then(|loc| loc.parse::<Locale>().ok())
-        .tap_some_mut(|loc| {
-            canonicalizer.canonicalize(loc);
+    // Feather: asked once per thread. The system's answer is an OS call
+    // (CFLocaleCopyPreferredLanguages on macOS) and every
+    // `Number.prototype.toLocaleString` makes a NumberFormat that asks:
+    // DuckDuckGo's results script spent seconds in it.
+    thread_local! {
+        static DEFAULT: std::cell::OnceCell<Locale> = const { std::cell::OnceCell::new() };
+    }
+    DEFAULT.with(|d| {
+        d.get_or_init(|| {
+            sys_locale::get_locale()
+                .and_then(|loc| loc.parse::<Locale>().ok())
+                .tap_some_mut(|loc| {
+                    canonicalizer.canonicalize(loc);
+                })
+                .unwrap_or(Locale::UNKNOWN)
         })
-        .unwrap_or(Locale::UNKNOWN)
+        .clone()
+    })
 }
 
 /// Gets the `Locale` struct from a `JsValue`.

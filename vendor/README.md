@@ -29,6 +29,21 @@ which broke GitHub's React app). The fix marks every enclosing function scope.
   when the first one is cached (`Option<Box<ArrayVec<..>>>`), not inline.
   Every property access in every compiled function has a cache, and most of
   a large bundle never runs: inline, they were 84 MB of YouTube's heap.
+- `src/builtins/intl/locale/utils.rs` (`default_locale`): the system locale
+  is asked for once per thread. Each `Number.prototype.toLocaleString`
+  makes a NumberFormat that asked the OS (`CFLocaleCopyPreferredLanguages`)
+  again; DuckDuckGo's results script looped on it for seconds and the page
+  stayed blank.
+- `src/builtins/number/mod.rs` (`to_locale_string`): with no locales or
+  options, the default NumberFormat is made once per context (host data)
+  rather than per call.
+- `src/vm/inline_cache/mod.rs`: an entry for a property found on the
+  prototype also records the prototype's shape, and only hits while it's
+  unchanged. A prototype that loses a property is reshaped with its slots
+  renumbered, but the cache is keyed by the receiver's shape, which stays:
+  the cache read whatever moved into the old slot. (DuckDuckGo: after
+  polyfills reworked `Array.prototype`, webpack's `arr.splice(i, 1)` called
+  `toLocaleString` in an endless loop.)
 
 ## boa_gc 0.22.0
 
