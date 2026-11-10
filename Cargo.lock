@@ -4299,6 +4299,7 @@ dependencies = [
  "boa_gc",
  "chrono",
  "cssparser",
+ "encoding_rs",
  "html",
  "image",
  "imagesize 0.13.0",

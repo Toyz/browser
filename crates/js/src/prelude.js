@@ -2360,7 +2360,8 @@
         window.dispatchEvent(ev);
       }, 0);
     },
-    atob: (s) => base64Decode(String(s)), btoa: (s) => base64Encode(String(s)),
+    atob: (s) => { const r = N.atob(String(s)); if (r === null) throw new DOMException("The string to be decoded is not correctly encoded.", "InvalidCharacterError"); return r; },
+    btoa: (s) => { const r = N.btoa(String(s)); if (r === null) throw new DOMException("The string to be encoded contains characters outside of the Latin1 range.", "InvalidCharacterError"); return r; },
     reportError,
     isSecureContext: true,
     customElements, ShadowRoot, CSSStyleSheet,
@@ -2464,27 +2465,6 @@
     Object.defineProperty(window, name, { configurable: true, get: () => viewport[i], set() {} });
   }
 
-  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  function base64Encode(s) {
-    let out = "";
-    for (let i = 0; i < s.length; i += 3) {
-      const a = s.charCodeAt(i), b = s.charCodeAt(i + 1), c = s.charCodeAt(i + 2);
-      out += B64[a >> 2] + B64[((a & 3) << 4) | (b >> 4 || 0)] + (isNaN(b) ? "=" : B64[((b & 15) << 2) | (c >> 6 || 0)]) + (isNaN(c) ? "=" : B64[c & 63]);
-    }
-    return out;
-  }
-  function base64Decode(s) {
-    s = s.replace(/[^A-Za-z0-9+/]/g, "");
-    let out = "";
-    for (let i = 0; i < s.length; i += 4) {
-      const n = (B64.indexOf(s[i]) << 18) | (B64.indexOf(s[i + 1]) << 12) | ((B64.indexOf(s[i + 2]) & 63) << 6) | (B64.indexOf(s[i + 3]) & 63);
-      out += String.fromCharCode((n >> 16) & 255);
-      if (s[i + 2] !== undefined) out += String.fromCharCode((n >> 8) & 255);
-      if (s[i + 3] !== undefined) out += String.fromCharCode(n & 255);
-    }
-    return out;
-  }
-
   // ---- network -----------------------------------------------------------
 
   class Headers {
@@ -2508,67 +2488,7 @@
   }
 
   // UTF-8 both ways (Boa has no TextEncoder).
-  class TextEncoder {
-    get encoding() { return "utf-8"; }
-    encode(s) {
-      s = String(s === undefined ? "" : s);
-      const out = [];
-      for (const ch of s) {
-        let c = ch.codePointAt(0);
-        if (c < 0x80) out.push(c);
-        else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 63));
-        else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-        else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
-      }
-      return new Uint8Array(out);
-    }
-  }
-  class TextDecoder {
-    constructor(label, opts) { this.encoding = label || "utf-8"; this.fatal = !!(opts && opts.fatal); this._pending = null; }
-    // `{stream: true}`: a character split across chunks waits for the rest.
-    decode(buf, opts) {
-      let b = !buf ? new Uint8Array(0) : buf instanceof Uint8Array ? buf : ArrayBuffer.isView(buf) ? new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength) : new Uint8Array(buf);
-      if (this._pending && this._pending.length) {
-        const joined = new Uint8Array(this._pending.length + b.length);
-        joined.set(this._pending);
-        joined.set(b, this._pending.length);
-        b = joined;
-      }
-      let end = b.length;
-      if (opts && opts.stream) {
-        let i = end - 1, back = 0;
-        while (i >= 0 && back < 3 && (b[i] & 0xc0) === 0x80) { i--; back++; }
-        if (i >= 0) {
-          const c = b[i];
-          const need = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : c >= 0xc0 ? 2 : 1;
-          if (need > end - i) end = i;
-        }
-      }
-      this._pending = end < b.length ? b.slice(end) : null;
-      // UTF-8, with U+FFFD for anything malformed (as the spec has it).
-      let out = "";
-      const parts = [];
-      const cont = (j) => j < end && (b[j] & 0xc0) === 0x80;
-      for (let i = 0; i < end;) {
-        const c = b[i];
-        let cp = 0xfffd, len = 1;
-        if (c < 0x80) cp = c;
-        else if (c >= 0xc2 && c < 0xe0 && cont(i + 1)) { cp = ((c & 31) << 6) | (b[i + 1] & 63); len = 2; }
-        else if (c >= 0xe0 && c < 0xf0 && cont(i + 1) && cont(i + 2)) {
-          const v = ((c & 15) << 12) | ((b[i + 1] & 63) << 6) | (b[i + 2] & 63);
-          if (v >= 0x800 && (v < 0xd800 || v > 0xdfff)) { cp = v; len = 3; }
-        } else if (c >= 0xf0 && c < 0xf5 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
-          const v = ((c & 7) << 18) | ((b[i + 1] & 63) << 12) | ((b[i + 2] & 63) << 6) | (b[i + 3] & 63);
-          if (v >= 0x10000 && v <= 0x10ffff) { cp = v; len = 4; }
-        }
-        out += String.fromCodePoint(cp);
-        i += len;
-        if (out.length > 8192) { parts.push(out); out = ""; }
-      }
-      parts.push(out);
-      return parts.join("");
-    }
-  }
+  // TextEncoder and TextDecoder are native classes (encoding.rs).
 
   // Streams: enough for reading bodies chunk by chunk (NDJSON, SSE-ish
   // protocols over fetch) and piping through text decoding.

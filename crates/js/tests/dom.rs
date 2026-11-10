@@ -1217,3 +1217,18 @@ fn url_follows_the_standard() {
         "https://example.com/p/x/y?a=1&b=2#h | https://example.com | example.com | /p/x/y | ?a=1&b=2&c=3+4 | 9 | 1 | https://other.test:8080/p/x/y?z=9 | false |  | a=1&b=x+y | q=1,q=2,r= | true"
     );
 }
+
+#[test]
+fn text_codecs_and_base64_are_standard() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const out = [];
+        out.push(new TextDecoder("windows-1252").decode(new Uint8Array([0x93, 0x68, 0x69, 0x94])));
+        const d = new TextDecoder(), bytes = new TextEncoder().encode("é€");
+        out.push(d.decode(bytes.subarray(0, 3), { stream: true }) + "|" + d.decode(bytes.subarray(3)));
+        out.push(new TextDecoder("latin1").encoding, btoa("hiÿ"), atob(" aGk= "));
+        try { btoa("€"); } catch (e) { out.push(e.name); }
+        try { new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array([0xff])); } catch (e) { out.push(e instanceof TypeError); }
+        document.getElementById("o").textContent = out.join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "\u{201c}hi\u{201d} é|€ windows-1252 aGn/ hi InvalidCharacterError true");
+}

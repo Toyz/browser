@@ -226,6 +226,9 @@ impl Runtime {
         declarative_shadow_roots(&mut dom.borrow_mut());
         install_natives(&mut cx, &dom);
         crate::web_url::register(&mut cx);
+        if let Some(native) = cx.global_object().get(js_string!("__native"), &mut cx).ok().and_then(|n| n.as_object()) {
+            crate::encoding::register(&mut cx, &native);
+        }
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
