@@ -132,8 +132,10 @@ pub fn parse_input(input: &str) -> Result<Url> {
     }
 }
 
-/// Largest subresource (image) we'll download.
-const MAX_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest subresource (image) we'll download. Browsers have no limit;
+/// this only stops a runaway response. Sites' hero photos can be big: NASA's
+/// homepage serves a 2x one over 16 MB.
+const MAX_RESOURCE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One shared agent so connections (and TLS sessions) are reused across a
 /// page's many subresource requests.
