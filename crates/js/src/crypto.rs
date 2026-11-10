@@ -71,6 +71,9 @@ struct CryptoKey {
     bytes: Vec<u8>,
     #[unsafe_ignore_trace]
     ed25519: bool,
+    /// An AES-GCM key (128 or 256 bits).
+    #[unsafe_ignore_trace]
+    aes: bool,
     /// For HMAC: the hash (`SHA256`...).
     #[unsafe_ignore_trace]
     hash: String,
@@ -103,6 +106,47 @@ fn key(data: CryptoKey, kind: &str, algorithm: JsObject, usages: Vec<String>, cx
     o.set(js_string!("extractable"), extractable, false, cx)?;
     o.set(js_string!("usages"), usages, false, cx)?;
     Ok(o.into())
+}
+
+fn aes_algorithm(bits: usize, cx: &mut Context) -> JsObject {
+    ObjectInitializer::new(cx)
+        .property(js_string!("name"), js_string!("AES-GCM"), Attribute::all())
+        .property(js_string!("length"), bits, Attribute::all())
+        .build()
+}
+
+/// The AES-GCM algorithm for a key of `len` bytes (ring has 128 and 256).
+fn aes_alg(len: usize) -> Option<&'static ring::aead::Algorithm> {
+    match len {
+        16 => Some(&ring::aead::AES_128_GCM),
+        32 => Some(&ring::aead::AES_256_GCM),
+        _ => None,
+    }
+}
+
+/// AES-GCM encryption (`seal`) or decryption of `data` with the
+/// algorithm parameters `params` ({ iv, additionalData?, tagLength? }).
+fn aes_gcm(params: &JsValue, key: &[u8], mut data: Vec<u8>, seal: bool, cx: &mut Context) -> JsResult<JsValue> {
+    let o = params.as_object().ok_or_else(|| JsNativeError::typ().with_message("AES-GCM needs its parameters"))?;
+    let iv = bytes_of(&o.get(js_string!("iv"), cx)?, cx)?;
+    let aad = o.get(js_string!("additionalData"), cx)?;
+    let aad = if aad.is_undefined() { Vec::new() } else { bytes_of(&aad, cx)? };
+    let tag = o.get(js_string!("tagLength"), cx)?;
+    if !tag.is_undefined() && tag.to_number(cx)? != 128.0 {
+        return Err(not_supported("AES-GCM tags other than 128 bits", cx));
+    }
+    let alg = aes_alg(key.len()).ok_or_else(|| not_supported("AES-192", cx))?;
+    let nonce = ring::aead::Nonce::try_assume_unique_for_key(&iv).map_err(|_| not_supported("AES-GCM IVs other than 96 bits", cx))?;
+    let key = ring::aead::LessSafeKey::new(ring::aead::UnboundKey::new(alg, key).map_err(|_| JsNativeError::typ().with_message("bad AES key"))?);
+    let aad = ring::aead::Aad::from(aad);
+    if seal {
+        key.seal_in_place_append_tag(nonce, aad, &mut data).map_err(|_| dom_error("OperationError", "encryption failed", cx))?;
+        buffer(&data, cx)
+    } else {
+        let plain = key.open_in_place(nonce, aad, &mut data).map_err(|_| dom_error("OperationError", "decryption failed", cx))?;
+        let plain = plain.to_vec();
+        buffer(&plain, cx)
+    }
 }
 
 fn ed25519_algorithm(cx: &mut Context) -> JsObject {
@@ -165,8 +209,8 @@ const SUBTLE: &[(&str, usize, Method)] = &[
                 let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| failed())?;
                 let public = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| failed())?.public_key().as_ref().to_vec();
                 let pick = |u: &str| usages.iter().filter(|x| *x == u).cloned().collect::<Vec<_>>();
-                let private = CryptoKey { bytes: pkcs8.as_ref().to_vec(), ed25519: true, hash: String::new(), extractable, private: true };
-                let public = CryptoKey { bytes: public, ed25519: true, hash: String::new(), extractable: true, private: false };
+                let private = CryptoKey { bytes: pkcs8.as_ref().to_vec(), ed25519: true, aes: false, hash: String::new(), extractable, private: true };
+                let public = CryptoKey { bytes: public, ed25519: true, aes: false, hash: String::new(), extractable: true, private: false };
                 let alg = ed25519_algorithm(cx);
                 let private = key(private, "private", alg.clone(), pick("sign"), cx)?;
                 let public = key(public, "public", alg, pick("verify"), cx)?;
@@ -185,9 +229,18 @@ const SUBTLE: &[(&str, usize, Method)] = &[
                 } else {
                     length.to_index(cx)? as usize
                 };
-                let data = CryptoKey { bytes: random(length / 8), ed25519: false, hash: hash.clone(), extractable, private: false };
+                let data = CryptoKey { bytes: random(length / 8), ed25519: false, aes: false, hash: hash.clone(), extractable, private: false };
                 let algorithm = hmac_algorithm(&hash, length, cx);
                 key(data, "secret", algorithm, usages, cx)
+            }
+            "AES-GCM" => {
+                let o = alg.as_object().ok_or_else(|| JsNativeError::typ().with_message("AES-GCM needs its length"))?;
+                let bits = o.get(js_string!("length"), cx)?.to_index(cx)? as usize;
+                if aes_alg(bits / 8).is_none() || bits % 8 != 0 {
+                    return Err(not_supported(&format!("AES-GCM {bits}-bit keys"), cx));
+                }
+                let algorithm = aes_algorithm(bits, cx);
+                key(CryptoKey { bytes: random(bits / 8), ed25519: false, aes: true, hash: String::new(), extractable, private: false }, "secret", algorithm, usages, cx)
             }
             _ => Err(not_supported(&name, cx)),
         }
@@ -210,18 +263,25 @@ const SUBTLE: &[(&str, usize, Method)] = &[
                 };
                 let length = raw.len() * 8;
                 let algorithm = hmac_algorithm(&hash, length, cx);
-                key(CryptoKey { bytes: raw, ed25519: false, hash, extractable, private: false }, "secret", algorithm, usages, cx)
+                key(CryptoKey { bytes: raw, ed25519: false, aes: false, hash, extractable, private: false }, "secret", algorithm, usages, cx)
+            }
+            ("AES-GCM", "raw") => {
+                if aes_alg(raw.len()).is_none() {
+                    return Err(not_supported(&format!("AES-GCM {}-bit keys", raw.len() * 8), cx));
+                }
+                let algorithm = aes_algorithm(raw.len() * 8, cx);
+                key(CryptoKey { bytes: raw, ed25519: false, aes: true, hash: String::new(), extractable, private: false }, "secret", algorithm, usages, cx)
             }
             ("ED25519", "raw" | "spki") => {
                 // SPKI: the key is the last 32 bytes.
                 let bytes = if format == "spki" { raw[raw.len().saturating_sub(32)..].to_vec() } else { raw };
                 let algorithm = ed25519_algorithm(cx);
-                key(CryptoKey { bytes, ed25519: true, hash: String::new(), extractable: true, private: false }, "public", algorithm, usages, cx)
+                key(CryptoKey { bytes, ed25519: true, aes: false, hash: String::new(), extractable: true, private: false }, "public", algorithm, usages, cx)
             }
             ("ED25519", "pkcs8") => {
                 ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&raw).map_err(|_| JsNativeError::typ().with_message("invalid Ed25519 private key"))?;
                 let algorithm = ed25519_algorithm(cx);
-                key(CryptoKey { bytes: raw, ed25519: true, hash: String::new(), extractable, private: true }, "private", algorithm, usages, cx)
+                key(CryptoKey { bytes: raw, ed25519: true, aes: false, hash: String::new(), extractable, private: true }, "private", algorithm, usages, cx)
             }
             _ => Err(not_supported(&format!("{name} {format} keys"), cx)),
         }
@@ -267,13 +327,25 @@ const SUBTLE: &[(&str, usize, Method)] = &[
         };
         Ok(ok.into())
     }),
-    ("encrypt", 3, |_, cx| Err(not_supported("encrypt", cx))),
-    ("decrypt", 3, |_, cx| Err(not_supported("decrypt", cx))),
+    ("encrypt", 3, |a, cx| crypt(a, true, cx)),
+    ("decrypt", 3, |a, cx| crypt(a, false, cx)),
     ("deriveKey", 5, |_, cx| Err(not_supported("deriveKey", cx))),
     ("deriveBits", 3, |_, cx| Err(not_supported("deriveBits", cx))),
     ("wrapKey", 4, |_, cx| Err(not_supported("wrapKey", cx))),
     ("unwrapKey", 7, |_, cx| Err(not_supported("unwrapKey", cx))),
 ];
+
+/// `encrypt` / `decrypt` (`seal`): AES-GCM.
+fn crypt(a: &[JsValue], seal: bool, cx: &mut Context) -> JsResult<JsValue> {
+    let params = arg(a, 0);
+    let name = alg_name(&params, cx)?;
+    let (bytes, aes) = with_key(&arg(a, 1), |k| (k.bytes.clone(), k.aes))?;
+    if name != "AES-GCM" || !aes {
+        return Err(not_supported(&format!("{name} {}", if seal { "encryption" } else { "decryption" }), cx));
+    }
+    let data = bytes_of(&arg(a, 2), cx)?;
+    aes_gcm(&params, &bytes, data, seal, cx)
+}
 
 /// `getRandomValues(view)`: filled with random bytes, in place.
 fn get_random_values(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {

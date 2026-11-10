@@ -412,6 +412,26 @@ fn subtle_crypto() {
 }
 
 #[test]
+fn aes_gcm_encrypts_and_decrypts() {
+    // The GCM spec's test case 2: zero key and IV, sixteen zero bytes.
+    let doc = run(r##"<body><p id="o"></p><script>
+        (async () => {
+          const hex = (b) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+          const key = await crypto.subtle.importKey("raw", new Uint8Array(16), "AES-GCM", true, ["encrypt", "decrypt"]);
+          const iv = new Uint8Array(12);
+          const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new Uint8Array(16));
+          const opened = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, sealed);
+          const gen = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+          let tampered = "";
+          const bad = new Uint8Array(sealed).slice(); bad[0] ^= 1;
+          try { await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, bad); } catch (e) { tampered = e.name; }
+          document.getElementById("o").textContent = [hex(sealed), opened.byteLength, key.algorithm.name, key.algorithm.length, gen.algorithm.length, tampered].join(" ");
+        })();
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf 16 AES-GCM 128 256 OperationError");
+}
+
+#[test]
 fn prelude_loads_completely() {
     // The last things the prelude defines exist (a prelude that throws
     // halfway leaves pages half a DOM).
