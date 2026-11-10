@@ -185,6 +185,15 @@ fn dump(url: &url::Url, max_rows: usize) -> anyhow::Result<()> {
             println!("fixed {tag} bg={:?} opacity={} visible={} inset={:?} w={:?} h={:?}", bl.style.painted_background(), bl.style.opacity, bl.style.visible, bl.style.inset, bl.style.width, bl.style.height);
         }
     }
+    // IMAGES=1: the images the tab will load (row images, then fixed ones).
+    if std::env::var("IMAGES").is_ok() {
+        for (url, rows) in &layout.images {
+            println!("image rows={rows:?} {url}");
+        }
+        for url in &layout.fixed_images {
+            println!("image fixed {url}");
+        }
+    }
     if std::env::var("TREE").is_ok() {
         for row in layout.rows.iter().filter(|r| count(&r.content) > 50) {
             tree(&row.content, 0, 8);

@@ -3213,6 +3213,26 @@ fn flatten(root: Block, keep: &HashSet<NodeId>) -> LayoutTree {
     };
     f.visit_block_contents(root, 0., 0.);
     f.tree.space_after = f.pending_space;
+    // Images in rows' positioned boxes (a split container's absolutely
+    // placed children) load with their row too: they were skipped, so
+    // badgedirectory's profile picture never loaded.
+    for row_ix in 0..f.tree.rows.len() {
+        let mut images = Vec::new();
+        for b in &f.tree.rows[row_ix].absolutes {
+            collect_images(b, &mut images);
+        }
+        for url in images {
+            match f.tree.images.iter_mut().find(|(u, _)| *u == url) {
+                Some((_, rows)) => {
+                    if !rows.contains(&row_ix) {
+                        rows.push(row_ix);
+                        rows.sort_unstable();
+                    }
+                }
+                None => f.tree.images.push((url, vec![row_ix])),
+            }
+        }
+    }
     for anchor in f.pending_anchors {
         let last = f.tree.rows.len().saturating_sub(1);
         f.tree.anchors.push((anchor, last));
