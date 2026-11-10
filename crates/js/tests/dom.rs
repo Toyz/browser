@@ -1274,3 +1274,25 @@ fn window_scrolling_goes_to_the_tab_and_back() {
     }
     assert_eq!(text, "scrolled 1200");
 }
+
+#[test]
+fn location_navigator_and_console_are_native() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        console.log("x", { a: 1 }, document.body, new Error("e"));
+        console.group(); console.groupEnd(); console.table([]);
+        document.getElementById("o").textContent = [
+          location.href, location.protocol, location.host, location.pathname, location.search, location.hash, location.origin,
+          String(location), navigator.language, navigator.languages.join("+"), typeof navigator.sendBeacon, navigator.onLine,
+        ].join(" ");
+        </script></body>"##,
+        Url::parse("https://example.com:8080/a/b?q=1#top").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, _host) = js::start(doc, opts);
+    assert_eq!(
+        text_of(&doc, "o"),
+        "https://example.com:8080/a/b?q=1#top https: example.com:8080 /a/b ?q=1 #top https://example.com:8080 https://example.com:8080/a/b?q=1#top en-US en-US+en function true"
+    );
+}

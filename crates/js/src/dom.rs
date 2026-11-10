@@ -163,7 +163,7 @@ pub(crate) struct Dom {
     sockets: HashMap<u32, mpsc::Sender<crate::websocket::Outgoing>>,
 }
 
-type Shared = Rc<RefCell<Dom>>;
+pub(crate) type Shared = Rc<RefCell<Dom>>;
 /// A native function's body.
 type NativeBody = Box<dyn Fn(&Shared, &[JsValue], &mut Context) -> JsResult<JsValue>>;
 
@@ -955,6 +955,24 @@ fn arg_node(dom: &Dom, args: &[JsValue], i: usize) -> Option<NodeId> {
     dom.doc.get(id).map(|_| id)
 }
 
+/// A value as a string (`String(v)`; "" where that throws).
+pub(crate) fn js_value_string(v: &JsValue, cx: &mut Context) -> String {
+    v.to_string(cx).map(|s| s.to_std_string_escaped()).unwrap_or_default()
+}
+
+/// Are scripts' console messages printed (debugging)?
+pub(crate) fn debug_logs(d: &Shared) -> bool {
+    d.borrow().debug
+}
+
+/// Go to `href` (resolved against the document), at the next flush.
+pub(crate) fn navigate_to(d: &Shared, href: &str) {
+    let mut dom = d.borrow_mut();
+    if let Some(url) = dom.doc.resolve_url(href) {
+        dom.navigate = Some(url);
+    }
+}
+
 fn arg_string(args: &[JsValue], i: usize, cx: &mut Context) -> JsResult<String> {
     Ok(args.get_or_undefined(i).to_string(cx)?.to_std_string_escaped())
 }
@@ -1258,11 +1276,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsValue::undefined())
     }));
     add("navigate", 1, Box::new(|d, a, cx| {
-        let href = arg_string(a, 0, cx)?;
-        let mut dom = d.borrow_mut();
-        if let Some(url) = dom.doc.resolve_url(&href) {
-            dom.navigate = Some(url);
-        }
+        navigate_to(d, &arg_string(a, 0, cx)?);
         Ok(JsValue::undefined())
     }));
     // setUrl(href, mode): the document's address becomes `href` (same
@@ -1805,6 +1819,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let proto = cx.intrinsics().constructors().object().prototype();
         Ok(JsObject::from_proto_and_data(Some(proto), boa_engine::builtins::is_html_dda::IsHTMLDDA).into())
     }));
+    crate::window_api::install(&obj, dom, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 

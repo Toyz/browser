@@ -1850,30 +1850,16 @@
   // A small URL implementation (enough for the common uses).
   // URL and URLSearchParams are native classes (web_url.rs).
 
-  const location = {
-    get href() { return N.url(); },
-    set href(v) { N.navigate(String(v)); },
-    assign(v) { N.navigate(String(v)); },
-    replace(v) { N.navigate(String(v)); },
-    reload() { N.navigate(N.url()); },
-    toString() { return N.url(); },
+  // console, navigator and location are native (window_api.rs).
+  const location = N.location;
+  // A `location.hash` change: a new entry in this document, then hashchange.
+  globalThis.__hashNavigate = (href) => {
+    const from = N.url();
+    history.pushState(null, "", href);
+    const hc = new Event("hashchange");
+    hc.oldURL = from; hc.newURL = href;
+    window.dispatchEvent(hc);
   };
-  for (const k of ["protocol", "host", "hostname", "port", "pathname", "search", "hash", "origin"]) {
-    Object.defineProperty(location, k, {
-      get() { return new URL(N.url())[k]; },
-      set(v) {
-        const u = new URL(N.url());
-        u[k] = v;
-        if (k !== "hash") return N.navigate(u.href);
-        // A new entry in this document, then hashchange.
-        const from = N.url();
-        history.pushState(null, "", u.href);
-        const hc = new Event("hashchange");
-        hc.oldURL = from; hc.newURL = u.href;
-        window.dispatchEvent(hc);
-      },
-    });
-  }
 
   // Session history for this document: pushState entries live here (with
   // their state); the tab keeps the list of URLs and asks us to traverse.
@@ -2242,30 +2228,7 @@
   };
   const getSelection = () => selection;
 
-  const consoleImpl = {};
-  const fmt = (args) => args.map((a) => {
-    if (typeof a === "string") return a;
-    if (a instanceof Error) return String(a) + (a.stack ? "\n" + a.stack : "");
-    if (isNode(a)) return "<" + (a.localName || a.nodeName) + ">";
-    try { return JSON.stringify(a); } catch (_) { return String(a); }
-  }).join(" ");
-  for (const level of ["log", "info", "warn", "debug"]) consoleImpl[level] = (...a) => N.log(level, fmt(a));
-  // Where an error was reported from, too: pages often log bare stacks.
-  for (const level of ["error", "trace"]) consoleImpl[level] = (...a) => {
-    let where = "";
-    try { where = "\n  (logged " + String(new Error().stack).split("\n").slice(1, 4).join(" <- ").replace(/\s+/g, " ") + ")"; } catch (_) {}
-    N.log(level, "[" + a.map((x) => typeof x).join(",") + "] " + fmt(a) + where);
-  };
-  for (const name of ["group", "groupCollapsed", "groupEnd", "time", "timeEnd", "count", "assert", "table", "dir"]) consoleImpl[name] = () => {};
-
-  const navigatorImpl = {
-    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Feather/0.1 Safari/537.36",
-    language: "en-US", languages: ["en-US", "en"], platform: "MacIntel", vendor: "", onLine: true,
-    cookieEnabled: true, hardwareConcurrency: 8, maxTouchPoints: 0, webdriver: false,
-    sendBeacon(url, data) { fetch(url, { method: "POST", body: data, mode: "no-cors", credentials: "include" }).catch(() => {}); return true; },
-    clipboard: { writeText: () => Promise.resolve(), readText: () => Promise.resolve("") },
-    serviceWorker: undefined,
-  };
+  const consoleImpl = N.console, navigatorImpl = N.navigator;
 
   // Where the page is scrolled, as the tab last said (getters: assigning
   // them would copy one value).

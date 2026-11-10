@@ -19,6 +19,7 @@ mod encoding;
 mod web_url;
 mod cssom;
 mod dom;
+mod window_api;
 mod images;
 mod modules;
 pub mod storage;
