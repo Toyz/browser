@@ -667,6 +667,12 @@ pub(crate) fn current_stacking() -> (usize, u32) {
     STACKING.with(|s| s.get())
 }
 
+/// A box the tab pins over the page (`position: sticky`, scrolled past):
+/// drawn as it is in its place.
+pub fn render_pinned(b: &LayoutBox, cx: &RenderCx) -> AnyElement {
+    render_box(b, cx, Edges::all(CssLength::ZERO), false)
+}
+
 /// A `position: fixed` box, for the viewport overlay layer: drawn after
 /// the page's own positioned boxes (a fixed header stays over thumbnails
 /// scrolling under it), with what's inside it drawn in place.

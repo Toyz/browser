@@ -198,6 +198,8 @@ impl Block {
             && s.opacity >= 1.0
             && s.position != style::Position::Absolute
             && s.position != style::Position::Fixed
+            // The tab pins a sticky box whole.
+            && s.position != style::Position::Sticky
     }
 
     /// A grid or a flex column that can be cut between its rows of items:
@@ -619,6 +621,17 @@ pub struct WrapperEdge {
     pub below: f32,
 }
 
+/// A `position: sticky` box: drawn in its place, and pinned `top` px
+/// from the top of the view while the page is scrolled past that place,
+/// until the end of `container` (its parent) comes up.
+#[derive(Debug, Clone)]
+pub struct StickyBox {
+    pub node: NodeId,
+    pub container: NodeId,
+    pub top: f32,
+    pub content: Arc<LayoutBox>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct LayoutTree {
     pub rows: Vec<Row>,
@@ -635,6 +648,9 @@ pub struct LayoutTree {
     pub fixed: Vec<LayoutBox>,
     /// Images inside fixed boxes.
     pub fixed_images: Vec<Arc<Url>>,
+    /// `position: sticky` boxes (with a `top`), for the tab to pin while
+    /// their place is scrolled past.
+    pub sticky: Vec<StickyBox>,
 }
 
 impl LayoutTree {
@@ -684,6 +700,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         avail: styler.env().width,
         in_flex_row: false,
         in_shrink: false,
+        sticky: Vec::new(),
         percent_base: Some(styler.env().height),
         viewport_sized: false,
         keep_inline: false,
@@ -698,6 +715,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         collect_images(b, &mut tree.fixed_images);
     }
     tree.fixed = fixed;
+    tree.sticky = std::mem::take(&mut builder.sticky);
     tree
 }
 
@@ -760,6 +778,8 @@ struct Builder<'a> {
     /// The box being built is in a box sized by its content (inline-level,
     /// floated, positioned, or a flex row's item, with `width: auto`).
     in_shrink: bool,
+    /// `position: sticky` boxes found so far.
+    sticky: Vec<StickyBox>,
     /// What a percentage height of the box being built is of, px, when
     /// that's known here: the viewport, for the root, and down a chain of
     /// `height: 100%` boxes (`html, body, #root { height: 100% }`).
@@ -2303,6 +2323,11 @@ impl Builder<'_> {
                     // account? <b>register</b>".)
                     self.keep_inline = tag == "button" && kind == BlockKind::Flex && style.display.is_block_level() && !matches!(style.display, Display::Flex | Display::InlineFlex);
                     let block = self.build_block(child, style, kind, link, generated);
+                    if block.style.position == style::Position::Sticky
+                        && let Length::Px(top) = block.style.inset.top
+                    {
+                        self.sticky.push(StickyBox { node: child, container: id, top, content: Arc::new(LayoutBox::Block(block.clone())) });
+                    }
                     c.push(LayoutBox::Block(block));
                 }
             }
@@ -3782,6 +3807,23 @@ mod tests {
 
     fn layout(html_src: &str) -> LayoutTree {
         layout_css(html_src, "")
+    }
+
+    #[test]
+    fn sticky_boxes_are_kept_whole_for_the_tab_to_pin() {
+        let tree = layout_css(
+            "<section><nav class=s><a>a</a><a>b</a><a>c</a><a>d</a></nav><p>1</p><p>2</p><p>3</p><p>4</p></section>",
+            ".s { position: sticky; top: 12px }",
+        );
+        assert_eq!(tree.sticky.len(), 1);
+        let s = &tree.sticky[0];
+        assert_eq!(s.top, 12.0);
+        assert_ne!(s.container, s.node);
+        // Kept whole: one box of its own somewhere in the rows.
+        fn has(b: &LayoutBox, n: NodeId) -> bool {
+            matches!(b, LayoutBox::Block(b) if b.node == Some(n) || b.children.iter().any(|c| has(c, n)))
+        }
+        assert!(tree.rows.iter().any(|r| has(&r.content, s.node)));
     }
 
     fn paragraph(row: &Row) -> &Paragraph {

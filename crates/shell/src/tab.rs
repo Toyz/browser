@@ -148,6 +148,9 @@ pub struct Tab {
     layout_viewport_sent: (f32, f32),
     /// The scroll position the page's scripts were last told.
     layout_scroll_sent: (f32, f32),
+    /// The rows each sticky box and container spans, for the layout (by
+    /// address) they were found in.
+    sticky_rows: std::cell::RefCell<(usize, HashMap<NodeId, (usize, usize)>)>,
     /// A smooth scroll in progress: (from, to, started), px of the page.
     scroll_animation: Option<(f32, f32, std::time::Instant)>,
     layout_scheduled: Rc<std::cell::Cell<bool>>,
@@ -272,6 +275,7 @@ impl Tab {
             layout_viewport_sent: (0.0, 0.0),
             layout_scroll_sent: (0.0, 0.0),
             scroll_animation: None,
+            sticky_rows: Default::default(),
             layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
             hover_inline: None,
@@ -700,6 +704,77 @@ impl Tab {
                 tab.update(cx, |this, _| this.send_layout()).ok();
             });
         }
+    }
+
+    /// Where `node`'s rows are in the page (x, y, width, height), from the
+    /// rows' extents and indents: the first row it's in to the last.
+    fn row_place(&self, node: NodeId) -> Option<[f32; 4]> {
+        let layout = &self.page.as_ref()?.layout;
+        let key = Arc::as_ptr(layout) as usize;
+        let mut cache = self.sticky_rows.borrow_mut();
+        if cache.0 != key {
+            *cache = (key, HashMap::new());
+        }
+        let (first, last) = *match cache.1.entry(node) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => e.insert(row_range(layout, node)?),
+        };
+        drop(cache);
+        let (top, _) = self.list_state.item_extent(first)?;
+        let (last_top, last_h) = self.list_state.item_extent(last)?;
+        let row = &layout.rows[first];
+        // Each container's margin, border and padding (and offset) on the
+        // way in, then the row's own.
+        let side = |w: &render::boxes::Wrapper, left: bool| {
+            let st = &w.style;
+            let (m, p, b, i) = if left {
+                (st.margin.left, st.padding.left, st.border_width.left, w.indent_left)
+            } else {
+                (st.margin.right, st.padding.right, st.border_width.right, w.indent_right)
+            };
+            m.px_or_zero() + p.px_or_zero() + b + i
+        };
+        let left: f32 = row.wrappers.iter().map(|w| side(w, true)).sum::<f32>() + row.indent_left;
+        let right: f32 = row.wrappers.iter().map(|w| side(w, false)).sum::<f32>() + row.indent_right;
+        let view = self.list_state.viewport_bounds();
+        let x = f32::from(view.origin.x) + left;
+        Some([x, f32::from(top), (f32::from(view.size.width) - left - right).max(0.0), f32::from(last_top + last_h - top)])
+    }
+
+    /// The sticky boxes scrolled past their place, pinned: `top` px from
+    /// the top of the view, pushed up by the end of their container.
+    fn pinned_sticky(&self, rcx: &RenderCx) -> Vec<AnyElement> {
+        let Some(page) = self.page.as_ref() else { return Vec::new() };
+        let scroll = self.scroll_y();
+        if std::env::var_os("FEATHER_DEBUG_STICKY").is_some() {
+            for s in &page.layout.sticky {
+                eprintln!("sticky {:?} in {:?} top {} place {:?} container {:?} scroll {scroll}", s.node, s.container, s.top, self.row_place(s.node), self.row_place(s.container));
+            }
+        }
+        let list_top = f32::from(self.list_state.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
+        page.layout
+            .sticky
+            .iter()
+            .filter_map(|s| {
+                // Where its rows are (a sticky box isn't split, so it's
+                // a row, or in one), and its container's.
+                let [x, y, w, h] = self.row_place(s.node)?;
+                if scroll + s.top <= y {
+                    return None;
+                }
+                let bottom = self.row_place(s.container).map_or(f32::INFINITY, |c| c[1] + c[3]);
+                let at = s.top.min(bottom - scroll - h);
+                (at + h > 0.0).then(|| {
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(list_top + at))
+                        .w(px(w))
+                        .child(render::view::render_pinned(&s.content, rcx))
+                        .into_any_element()
+                })
+            })
+            .collect()
     }
 
     /// Lay out a few more rows the list hasn't measured yet, between
@@ -1931,6 +2006,7 @@ impl Tab {
         let layout = self.animations.display.clone().unwrap_or_else(|| page.layout.clone());
         let rcx = self.render_cx(cx);
         let rcx_fixed = rcx.clone();
+        let rcx_sticky = rcx.clone();
         let last = layout.rows.len().saturating_sub(1);
         let _ = palette;
         div()
@@ -1948,6 +2024,7 @@ impl Tab {
             )
             .vertical_scrollbar(&self.list_state)
             // `position: fixed` boxes, pinned over the viewport.
+            .children(self.pinned_sticky(&rcx_sticky))
             .when(!page.layout.fixed.is_empty(), |d| {
                 d.child(
                     div()
@@ -2466,49 +2543,71 @@ impl Render for Tab {
 /// The row each of `wanted` is in (the first, for a container split
 /// across rows).
 fn rows_of(layout: &render::LayoutTree, wanted: &HashSet<NodeId>) -> HashMap<NodeId, usize> {
-    use render::boxes::{Block, InlineObject, LayoutBox};
-    type Found = HashMap<NodeId, usize>;
-    fn note(n: Option<NodeId>, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
-        if let Some(n) = n.filter(|n| wanted.contains(n)) {
-            out.entry(n).or_insert(ix);
-        }
-    }
-    fn block(b: &Block, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
-        note(b.node, ix, wanted, out);
-        for c in &b.children {
-            walk(c, ix, wanted, out);
-        }
-    }
-    fn walk(b: &LayoutBox, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
-        match b {
-            LayoutBox::Block(b) => block(b, ix, wanted, out),
-            LayoutBox::Image(i) => note(i.node, ix, wanted, out),
-            LayoutBox::Paragraph(p) => {
-                for span in p.spans.iter() {
-                    note(span.style.node, ix, wanted, out);
-                }
-                for o in &p.objects {
-                    match o {
-                        InlineObject::Image(i) => note(i.node, ix, wanted, out),
-                        InlineObject::Block(a) => note(a.node, ix, wanted, out),
-                        InlineObject::BlockBox(b) => block(b, ix, wanted, out),
-                    }
-                }
-            }
-        }
-    }
     let mut out = HashMap::new();
     if wanted.is_empty() {
         return out;
     }
     for (ix, row) in layout.rows.iter().enumerate() {
-        for w in row.wrappers.iter() {
-            note(w.node, ix, wanted, &mut out);
-        }
-        walk(&row.content, ix, wanted, &mut out);
-        for a in &row.absolutes {
-            walk(a, ix, wanted, &mut out);
-        }
+        nodes_in_row(row, wanted, &mut |n| {
+            out.entry(n).or_insert(ix);
+        });
     }
     out
+}
+
+/// The first and last rows `node` is in (its own, or the rows of a
+/// container split across several).
+fn row_range(layout: &render::LayoutTree, node: NodeId) -> Option<(usize, usize)> {
+    let wanted = HashSet::from([node]);
+    let mut range: Option<(usize, usize)> = None;
+    for (ix, row) in layout.rows.iter().enumerate() {
+        let mut here = false;
+        nodes_in_row(row, &wanted, &mut |_| here = true);
+        if here {
+            range = Some(range.map_or((ix, ix), |(a, _)| (a, ix)));
+        }
+    }
+    range
+}
+
+/// Calls `found` for each of `wanted` that has a box in `row` (or is one
+/// of the containers it's split from).
+fn nodes_in_row(row: &render::boxes::Row, wanted: &HashSet<NodeId>, found: &mut dyn FnMut(NodeId)) {
+    use render::boxes::{Block, InlineObject, LayoutBox};
+    fn note(n: Option<NodeId>, wanted: &HashSet<NodeId>, found: &mut dyn FnMut(NodeId)) {
+        if let Some(n) = n.filter(|n| wanted.contains(n)) {
+            found(n);
+        }
+    }
+    fn block(b: &Block, wanted: &HashSet<NodeId>, found: &mut dyn FnMut(NodeId)) {
+        note(b.node, wanted, found);
+        for c in &b.children {
+            walk(c, wanted, found);
+        }
+    }
+    fn walk(b: &LayoutBox, wanted: &HashSet<NodeId>, found: &mut dyn FnMut(NodeId)) {
+        match b {
+            LayoutBox::Block(b) => block(b, wanted, found),
+            LayoutBox::Image(i) => note(i.node, wanted, found),
+            LayoutBox::Paragraph(p) => {
+                for span in p.spans.iter() {
+                    note(span.style.node, wanted, found);
+                }
+                for o in &p.objects {
+                    match o {
+                        InlineObject::Image(i) => note(i.node, wanted, found),
+                        InlineObject::Block(a) => note(a.node, wanted, found),
+                        InlineObject::BlockBox(b) => block(b, wanted, found),
+                    }
+                }
+            }
+        }
+    }
+    for w in row.wrappers.iter() {
+        note(w.node, wanted, found);
+    }
+    walk(&row.content, wanted, found);
+    for a in &row.absolutes {
+        walk(a, wanted, found);
+    }
 }
