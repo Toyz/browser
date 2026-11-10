@@ -751,12 +751,22 @@ fn place(
                                 .child(
                                     crate::view::transform::image(image, cx)
                                         .unwrap_or_else(|| {
+                                            // Its own `border-radius` (GitHub's inline avatars
+                                            // are 50% circles), else a rounded frame's.
+                                            let bounds = Bounds::new(point(px(0.), px(0.)), size(w, h));
+                                            let own = image.style.border_radius.map(|l| {
+                                                let r = match l {
+                                                    style::Length::Percent(p) => w.min(h) * (p / 100.0),
+                                                    other => px(other.px_or_zero()),
+                                                };
+                                                clamp_radius(r, bounds)
+                                            });
                                             let corners = crate::view::clipped_corners(
                                                 &image.style,
                                                 Some(f32::from(w - l - r)),
                                                 Some(f32::from(h - t - b)),
                                                 cx.round_clip,
-                                                [px(0.); 4],
+                                                own,
                                             );
                                             let ratio = f32::from(w - l - r) / f32::from(h - t - b).max(1.0);
                                             crate::images::picture_fitted(picture, padded, *width, *height, corners, image.style.object_fit, Some(ratio))
