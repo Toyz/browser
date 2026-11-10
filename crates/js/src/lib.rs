@@ -34,6 +34,7 @@ mod request;
 mod body;
 mod streams;
 mod wasm;
+mod media_element;
 mod response;
 mod worker_net;
 pub mod worker;
@@ -117,6 +118,9 @@ pub enum ToJs {
     Image { id: u32, size: Option<(u32, u32)> },
     /// One of the page's workers posted a message (or failed).
     Worker { id: u32, event: worker::WorkerEvent },
+    /// News from a `<video>` / `<audio>`'s player (of its `generation`th
+    /// load).
+    Media { node: NodeId, generation: u32, event: media::Event },
     Shutdown,
 }
 

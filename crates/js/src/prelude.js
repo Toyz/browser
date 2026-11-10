@@ -1208,11 +1208,6 @@
   // with nothing it can play (there's no playback yet). Players read and
   // listen to all of it; a missing `textTracks` threw in the Guardian's,
   // and took the rest of its page's effects down with it.
-  class TimeRanges {
-    get length() { return 0; }
-    start() { throw new DOMException("Index out of range", "IndexSizeError"); }
-    end() { throw new DOMException("Index out of range", "IndexSizeError"); }
-  }
   class TextTrack extends EventTarget {
     constructor(kind = "", label = "", language = "") {
       super();
@@ -1237,12 +1232,10 @@
       this.dispatchEvent(ev);
     }
   }
+  // State, playback and the rest: native (media_element.rs).
   class HTMLMediaElement extends HTMLElement {
     _media() {
-      return this.__media || (this.__media = {
-        textTracks: new MediaTrackList(), audioTracks: new MediaTrackList(), videoTracks: new MediaTrackList(),
-        currentTime: 0, volume: 1, muted: null, playbackRate: 1, defaultPlaybackRate: 1,
-      });
+      return this.__media || (this.__media = { textTracks: new MediaTrackList(), audioTracks: new MediaTrackList(), videoTracks: new MediaTrackList() });
     }
     get textTracks() { return this._media().textTracks; }
     get audioTracks() { return this._media().audioTracks; }
@@ -1252,39 +1245,8 @@
       this._media().textTracks._add(t);
       return t;
     }
-    get buffered() { return new TimeRanges(); }
-    get played() { return new TimeRanges(); }
-    get seekable() { return new TimeRanges(); }
-    get currentSrc() { return ""; }
-    get currentTime() { return this._media().currentTime; }
-    set currentTime(v) { this._media().currentTime = Number(v) || 0; }
-    get duration() { return NaN; }
-    get paused() { return true; }
-    get ended() { return false; }
-    get seeking() { return false; }
-    get error() { return null; }
-    get readyState() { return 0; }
-    get networkState() { return this.getAttribute("src") || this.querySelector("source") ? 3 : 0; }
-    get volume() { return this._media().volume; }
-    set volume(v) {
-      v = Number(v);
-      if (!(v >= 0 && v <= 1)) throw new DOMException("Volume out of range", "IndexSizeError");
-      this._media().volume = v;
-      this.dispatchEvent(new Event("volumechange"));
-    }
-    get muted() { const m = this._media().muted; return m === null ? this.hasAttribute("muted") : m; }
-    set muted(v) { this._media().muted = !!v; this.dispatchEvent(new Event("volumechange")); }
-    get playbackRate() { return this._media().playbackRate; }
-    set playbackRate(v) { this._media().playbackRate = Number(v); this.dispatchEvent(new Event("ratechange")); }
-    get defaultPlaybackRate() { return this._media().defaultPlaybackRate; }
-    set defaultPlaybackRate(v) { this._media().defaultPlaybackRate = Number(v); }
     get srcObject() { return this._media().srcObject || null; }
     set srcObject(v) { this._media().srcObject = v; }
-    play() { return Promise.reject(new DOMException("The element has no supported sources.", "NotSupportedError")); }
-    pause() {}
-    load() {}
-    fastSeek(t) { this.currentTime = t; }
-    canPlayType() { return ""; }
     captureStream() { throw new DOMException("Not supported", "NotSupportedError"); }
     setMediaKeys() { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
     get mediaKeys() { return null; }
@@ -1296,9 +1258,6 @@
     ["controls", "controls", "bool"], ["defaultMuted", "muted", "bool"], ["crossOrigin", "crossorigin"],
   ]);
   class HTMLVideoElement extends HTMLMediaElement {
-    get videoWidth() { return 0; }
-    get videoHeight() { return 0; }
-    getVideoPlaybackQuality() { return { creationTime: N.now(), droppedVideoFrames: 0, totalVideoFrames: 0, corruptedVideoFrames: 0 }; }
     requestVideoFrameCallback() { return 0; }
     cancelVideoFrameCallback() {}
     requestPictureInPicture() { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
@@ -1846,7 +1805,7 @@
     CDATASection, ProcessingInstruction, DocumentType, Attr,
     HTMLAnchorElement, HTMLImageElement, Image, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
     HTMLTextAreaElement, HTMLSelectElement, HTMLOptionElement, HTMLButtonElement, HTMLFormElement,
-    HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement, HTMLAudioElement, TextTrack, TimeRanges,
+    HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement, HTMLAudioElement, TextTrack,
     HTMLIFrameElement, HTMLDivElement, HTMLSpanElement, SVGElement, SVGSVGElement, SVGPathElement, SVGGElement,
     HTMLParagraphElement, HTMLHeadingElement, HTMLUListElement, HTMLOListElement, HTMLLIElement, HTMLTableElement,
     HTMLTableRowElement, HTMLTableCellElement, HTMLLabelElement, HTMLPictureElement, HTMLSourceElement, HTMLSlotElement,

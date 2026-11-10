@@ -28,6 +28,8 @@ async-channel = "2"
 # Image sizes for `new Image()` loads.
 imagesize = "0.13"
 avif.workspace = true
+# <video> / <audio>: demuxing, decoding, sound out.
+media.workspace = true
 # <canvas> 2D: drawing, and decoding what drawImage draws.
 tiny-skia = "0.11"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

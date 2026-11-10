@@ -1793,6 +1793,44 @@ impl Builder<'_> {
         }
     }
 
+    fn build_video(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, c: &mut Container, link: Option<&Arc<Url>>) {
+        let image = self.video_box(node, element, style.clone(), link);
+        if style.display.is_block_level() || style.float != Float::None {
+            self.flush(c);
+            c.push(LayoutBox::Image(image));
+        } else {
+            c.inline.push_object(InlineObject::Image(image), &style, link);
+        }
+    }
+
+    fn video_box(&mut self, node: NodeId, element: &page::ElementData, style: Arc<ComputedStyle>, link: Option<&Arc<Url>>) -> ImageBox {
+        let frame = element.attr("src").filter(|s| s.starts_with("feather-canvas:")).and_then(|s| Url::parse(s).ok());
+        let poster = || element.attr("poster").and_then(|p| self.base_url.join(p.trim()).ok());
+        let attr = |name| element.attr(name).and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok());
+        let (w, h) = (attr("width"), attr("height"));
+        let src = frame.or_else(poster);
+        // No picture yet: 300x150, as browsers default.
+        let (w, h) = match (&src, w, h) {
+            (None, None, None) => (Some(300.0), Some(150.0)),
+            (None, Some(w), None) => (Some(w), Some(w / 2.0)),
+            (None, None, Some(h)) => (Some(h * 2.0), Some(h)),
+            _ => (w, h),
+        };
+        ImageBox {
+            id: self.next_id(),
+            node: Some(node),
+            style,
+            src: Arc::new(src.unwrap_or_else(|| Url::parse("feather-canvas:none").expect("a URL"))),
+            density: 1.0,
+            attr_width: w,
+            attr_height: h,
+            alt: None,
+            link: link.cloned(),
+            anchors: Vec::new(),
+            mono: None,
+        }
+    }
+
     /// An inline `<svg>`: serialized back to markup (with `currentColor`
     /// resolved) and drawn as an image from a `data:` URL.
     fn build_svg(
@@ -2447,7 +2485,7 @@ impl Builder<'_> {
                     let mut block = self.build_block(child, style.clone(), kind, link, generated);
                     // An absolute `<img>` (a card's background photo): the
                     // positioned box, with the picture filling it.
-                    if tag == "img" {
+                    if tag == "img" || tag == "video" {
                         let mut st = (*style).clone();
                         st.position = style::Position::Static;
                         st.inset = style::Edges::all(Length::Auto);
@@ -2460,7 +2498,8 @@ impl Builder<'_> {
                             st.height = Length::Percent(100.0);
                         }
                         st.display = Display::Block;
-                        if let Some(image) = self.image_box(child, element, Arc::new(st), link) {
+                        let image = if tag == "video" { Some(self.video_box(child, element, Arc::new(st), link)) } else { self.image_box(child, element, Arc::new(st), link) };
+                        if let Some(image) = image {
                             block.children.push(LayoutBox::Image(image));
                         }
                     }
@@ -2480,6 +2519,12 @@ impl Builder<'_> {
                 if element.attr("src").is_some() {
                     self.build_image(child, element, style, c, link);
                 }
+                continue;
+            }
+            // A video: its current picture (a `canvas_url` the script
+            // thread set as `src`), else its poster, else an empty box.
+            if tag == "video" {
+                self.build_video(child, element, style, c, link);
                 continue;
             }
             if tag == "svg" && !element.is_html() {

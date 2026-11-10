@@ -26,6 +26,7 @@ html = { path = "crates/html" }
 style = { path = "crates/style" }
 render = { path = "crates/render" }
 js = { path = "crates/js" }
+media = { path = "crates/media" }
 avif = { path = "crates/avif" }
 
 [profile.dev.package."*"]

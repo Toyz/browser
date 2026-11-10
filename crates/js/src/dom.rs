@@ -221,6 +221,14 @@ pub(crate) struct Dom {
     navigate: Option<Url>,
     /// `<canvas>` bitmaps (2D contexts' drawing, replayed).
     canvases: HashMap<NodeId, crate::canvas::Canvas>,
+    /// Media elements whose source (or `loop`) changed, or that came into
+    /// the document, since the last task ended (see `media_element::tick`).
+    pub(crate) media_dirty: Vec<(NodeId, crate::media_element::Change)>,
+    /// `<video>`s showing pictures (painted from `canvas_url`).
+    pub(crate) media_frames: HashSet<NodeId>,
+    /// The user has interacted with the page (clicked, typed): sound may
+    /// play.
+    pub(crate) activated: bool,
     /// `pushState` / `replaceState` since the last flush: (url, replace).
     url_changes: Vec<(Url, bool)>,
     /// `history.go(n)` asked of the tab.
@@ -339,6 +347,9 @@ impl Runtime {
             url_changes: Vec::new(),
             traverse: None,
             canvases: HashMap::new(),
+            media_dirty: Vec::new(),
+            media_frames: HashSet::new(),
+            activated: false,
             submit: None,
             values: HashMap::new(),
             debug: opts.debug,
@@ -378,6 +389,7 @@ impl Runtime {
         }
         crate::abort::link(&mut cx);
         crate::worker::link(&mut cx);
+        crate::media_element::link(canvas_out.clone(), updates.clone(), &mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
@@ -688,6 +700,7 @@ impl Runtime {
         if let Some(url) = navigate {
             self.updates.send_blocking(FromJs::Navigate(url)).ok();
         }
+        crate::media_element::tick(&mut self.cx);
         self.flush_canvases();
         let submit = self.dom.borrow_mut().submit.take();
         if let Some(form) = submit {
@@ -807,6 +820,7 @@ impl Runtime {
         match msg {
             ToJs::Shutdown => {}
             ToJs::Click { node, reply } => {
+                self.dom.borrow_mut().activated = true;
                 let t = Instant::now();
                 let prevented = self.call_global("__dispatchClick", &[JsValue::from(node_to_number(node))]);
                 if self.opts.debug {
@@ -829,12 +843,16 @@ impl Runtime {
                 self.call_global("__sseEvent", &[JsValue::from(id), js_str(kind), js_str(&event), js_str(&data), js_str(&last_id)]);
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
+            ToJs::Media { node, generation, event } => crate::media_element::deliver(node, generation, event, &mut self.cx),
             ToJs::Worker { id, event } => {
                 if let Err(e) = crate::worker::deliver(id, event, &mut self.cx) {
                     self.log_error("worker message", e);
                 }
             }
             ToJs::Key { kind, key, code, target, modifiers } => {
+                if kind == "keydown" {
+                    self.dom.borrow_mut().activated = true;
+                }
                 let target = target.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
                 let args = [
                     js_str(kind),
@@ -1232,8 +1250,12 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::undefined()) };
         if let Some(e) = dom.doc.element_mut(n) {
             let name = attr_name(e, raw);
+            let media = media_change(e, &name);
             set_attr(e, &name, value);
             dom.changed_at(n);
+            if let Some(change) = media {
+                dom.media_dirty.push((n, change));
+            }
         }
         Ok(JsValue::undefined())
     }));
@@ -1246,7 +1268,11 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             let before = e.attrs.len();
             e.attrs.retain(|at| &*at.name.local != name.as_str());
             if e.attrs.len() != before {
+                let media = media_change(e, &name);
                 dom.changed_at(n);
+                if let Some(change) = media {
+                    dom.media_dirty.push((n, change));
+                }
             }
         }
         Ok(JsValue::undefined())
@@ -1943,6 +1969,15 @@ fn set_attr(e: &mut ElementData, name: &str, value: String) {
 }
 
 /// Scripts that just got connected to the document run after this task.
+/// What setting attribute `name` on `e` changes for a media element.
+fn media_change(e: &ElementData, name: &str) -> Option<crate::media_element::Change> {
+    use crate::media_element::Change;
+    if !matches!(name, "src" | "loop") || !e.is_html() || !matches!(&**e.local_name(), "video" | "audio") {
+        return None;
+    }
+    Some(if name == "src" { Change::Src } else { Change::Loop })
+}
+
 fn queue_scripts(dom: &mut Dom, id: NodeId) {
     // Connected?
     let mut p = Some(id);
@@ -1960,12 +1995,23 @@ fn queue_scripts(dom: &mut Dom, id: NodeId) {
         }
         return;
     }
-    let found: Vec<NodeId> = dom
-        .doc
-        .descendants(id)
-        .filter(|&n| dom.doc.element(n).is_some_and(|e| &**e.local_name() == "script" && runnable(e)))
-        .filter(|n| !dom.ran.contains(n))
-        .collect();
+    // Scripts to run, and media elements to load (one walk).
+    let mut found: Vec<NodeId> = Vec::new();
+    let mut media: Vec<(NodeId, crate::media_element::Change)> = Vec::new();
+    for n in dom.doc.descendants(id) {
+        let Some(e) = dom.doc.element(n) else { continue };
+        match &**e.local_name() {
+            "script" if runnable(e) && !dom.ran.contains(&n) => found.push(n),
+            "video" | "audio" if e.is_html() => media.push((n, crate::media_element::Change::Inserted)),
+            "source" if n == id => {
+                if let Some(p) = dom.doc.parent(n).filter(|&p| dom.doc.element(p).is_some_and(|e| e.is_html() && matches!(&**e.local_name(), "video" | "audio"))) {
+                    media.push((p, crate::media_element::Change::Source));
+                }
+            }
+            _ => {}
+        }
+    }
+    dom.media_dirty.extend(media);
     if dom.debug && !found.is_empty() {
         eprintln!("js: queued {} inserted script(s)", found.len());
     }
@@ -2235,7 +2281,7 @@ fn forget_canvases(dom: &mut Dom, drawn: &HashSet<NodeId>) {
 }
 
 /// Call a global function the prelude defines (`undefined` if it throws).
-fn call_global(d: &Shared, name: &str, args: &[JsValue], cx: &mut Context) -> JsValue {
+pub(crate) fn call_global(d: &Shared, name: &str, args: &[JsValue], cx: &mut Context) -> JsValue {
     let global = cx.global_object();
     let f = global.get(JsString::from(name), cx).ok().and_then(|f| f.as_callable());
     let Some(f) = f else { return JsValue::undefined() };
@@ -2310,8 +2356,9 @@ pub(crate) fn snapshot(d: &Shared, cx: &mut Context) -> Document {
     dom.touched.clear();
     dom.touched_all = false;
     let mut doc = flatten(&dom, adopted);
-    // Canvases show their pixels, sent alongside (`CanvasFrame`).
-    for &node in dom.canvases.keys() {
+    // Canvases (and playing videos) show their pixels, sent alongside
+    // (`CanvasFrame`).
+    for &node in dom.canvases.keys().chain(&dom.media_frames) {
         if let Some(e) = doc.element_mut(node) {
             set_attr(e, "src", canvas_url(node));
         }

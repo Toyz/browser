@@ -24,8 +24,13 @@ slot {
 }
 
 /* Replaced content we can't render yet. */
-math, video, audio, iframe, object, embed, picture > source {
+math, audio, iframe, object, embed, picture > source {
   display: none;
+}
+
+/* Pictures letterboxed in the element's box. */
+video {
+  object-fit: contain;
 }
 
 /* Form controls (the shell draws native widgets inside these boxes). */

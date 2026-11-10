@@ -1565,16 +1565,21 @@ fn inline_styles_with_semicolons_in_values() {
 
 #[test]
 fn media_elements_have_their_api() {
-    let doc = run(r##"<body><video id="v" src="a.mp4" muted></video><p id="o"></p><script>
+    let doc = run(r##"<body><video id="v" muted></video><audio id="a" src="data:audio/mpeg;base64,"></audio><p id="o"></p><script>
         const v = document.getElementById("v");
         const added = [];
         v.textTracks.addEventListener("addtrack", (e) => added.push(e.track.kind));
         v.addTextTrack("captions", "English", "en");
         const out = [v instanceof HTMLVideoElement, v instanceof HTMLMediaElement, v.textTracks.length, v.textTracks[0].kind, added.join(),
-          v.paused, v.readyState, isNaN(v.duration), v.muted, v.buffered.length, v.videoWidth];
-        v.play().catch((e) => { out.push(e.name); document.getElementById("o").textContent = out.join(" "); });
+          v.paused, v.readyState, isNaN(v.duration), v.muted, v.buffered.length, v.videoWidth, v.canPlayType("video/mp4; codecs=avc1.4d401e"),
+          v.canPlayType("video/webm; codecs=vp9") === "", MediaError.MEDIA_ERR_DECODE];
+        // Nothing to play; and sound before the user did anything.
+        v.play().catch((e) => {
+          out.push(e.name);
+          document.getElementById("a").play().catch((e) => { out.push(e.name); document.getElementById("o").textContent = out.join(" "); });
+        });
     </script></body>"##);
-    assert_eq!(text_of(&doc, "o"), "true true 1 captions captions true 0 true true 0 0 NotSupportedError");
+    assert_eq!(text_of(&doc, "o"), "true true 1 captions captions true 0 true true 0 0 probably true 3 NotSupportedError NotAllowedError");
 }
 
 #[test]

@@ -173,6 +173,8 @@ fn present(
     let mut show_next = true;
     let mut seek_to: Option<f64> = None;
     let mut stalled = false;
+    // `Playing` waits for the picture being decoded.
+    let mut announce = false;
     let mut last_tick = Instant::now();
     let mut last_shown = 0.0;
     // Without a sound device: how far the (dropped) sound has been decoded.
@@ -216,7 +218,12 @@ fn present(
                     if let Some(s) = &sound {
                         s.set_paused(false);
                     }
-                    events(Event::Playing);
+                    // (After the first picture, if it's still coming.)
+                    if show_next {
+                        announce = true;
+                    } else {
+                        events(Event::Playing);
+                    }
                 }
                 Command::Pause if playing => {
                     clock.base = now(&clock, &sound);
@@ -324,6 +331,9 @@ fn present(
                         events(Event::Seeked(t));
                     }
                     None => events(Event::Ready),
+                }
+                if std::mem::take(&mut announce) && playing {
+                    events(Event::Playing);
                 }
                 if playing && sound.is_none() {
                     clock.since = Some(Instant::now());
