@@ -396,12 +396,18 @@ fn subtle_crypto() {
           const key = await crypto.subtle.importKey("raw", new TextEncoder().encode("key"), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
           const mac = hex(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("The quick brown fox jumps over the lazy dog")));
           const r = crypto.getRandomValues(new Uint8Array(8));
-          document.getElementById("o").textContent = [sha, ok, bad, raw.byteLength, sig.byteLength, mac, r.length, crypto.randomUUID().length].join(" ");
+          const hk = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-512" }, true, ["sign", "verify"]);
+          const hsig = await crypto.subtle.sign("HMAC", hk, msg);
+          const hok = await crypto.subtle.verify("HMAC", hk, hsig, msg);
+          let rejected = "";
+          try { await crypto.subtle.encrypt({ name: "AES-GCM" }, key, msg); } catch (e) { rejected = e.name; }
+          document.getElementById("o").textContent = [sha, ok, bad, raw.byteLength, sig.byteLength, mac, r.length, crypto.randomUUID().length,
+            key instanceof CryptoKey, key.type, key.algorithm.hash.name, hk.algorithm.length, hsig.byteLength, hok, rejected].join(" ");
         })();
     </script></body>"##);
     assert_eq!(
         text_of(&doc, "o"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad true false 32 64 f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8 8 36"
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad true false 32 64 f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8 8 36 true secret SHA-256 1024 64 true NotSupportedError"
     );
 }
 

@@ -21,6 +21,7 @@ mod cssom;
 mod dom;
 mod timers;
 mod web_storage;
+mod crypto;
 mod window_api;
 mod images;
 mod modules;

@@ -1763,62 +1763,6 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         net::set_script_cookie(&url, &text);
         Ok(JsValue::undefined())
     }));
-    // ---- crypto (bytes travel as latin1 strings) ----
-    add("randomBytes", 1, Box::new(|_, a, _| {
-        use ring::rand::SecureRandom;
-        let n = a.get_or_undefined(0).as_number().unwrap_or(0.0).clamp(0.0, 65536.0) as usize;
-        let mut buf = vec![0u8; n];
-        ring::rand::SystemRandom::new().fill(&mut buf).ok();
-        Ok(js_str(&latin1(&buf)))
-    }));
-    add("digest", 2, Box::new(|_, a, cx| {
-        let alg = arg_string(a, 0, cx)?.to_ascii_uppercase().replace('-', "");
-        let data = bytes_arg(a, 1, cx)?;
-        let alg = match alg.as_str() {
-            "SHA1" => &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
-            "SHA256" => &ring::digest::SHA256,
-            "SHA384" => &ring::digest::SHA384,
-            "SHA512" => &ring::digest::SHA512,
-            _ => return Err(boa_engine::JsNativeError::typ().with_message(format!("unsupported digest {alg}")).into()),
-        };
-        Ok(js_str(&latin1(ring::digest::digest(alg, &data).as_ref())))
-    }));
-    // hmac(hash, key, data) → signature
-    add("hmac", 3, Box::new(|_, a, cx| {
-        let alg = match arg_string(a, 0, cx)?.to_ascii_uppercase().replace('-', "").as_str() {
-            "SHA1" => ring::hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
-            "SHA384" => ring::hmac::HMAC_SHA384,
-            "SHA512" => ring::hmac::HMAC_SHA512,
-            _ => ring::hmac::HMAC_SHA256,
-        };
-        let key = ring::hmac::Key::new(alg, &bytes_arg(a, 1, cx)?);
-        Ok(js_str(&latin1(ring::hmac::sign(&key, &bytes_arg(a, 2, cx)?).as_ref())))
-    }));
-    // ed25519Generate() → [pkcs8, public key]
-    add("ed25519Generate", 0, Box::new(|_, _, cx| {
-        use ring::signature::KeyPair;
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| boa_engine::JsNativeError::error().with_message("key generation failed"))?;
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| boa_engine::JsNativeError::error().with_message("bad key"))?;
-        Ok(JsArray::from_iter([js_str(&latin1(pkcs8.as_ref())), js_str(&latin1(pair.public_key().as_ref()))], cx).into())
-    }));
-    // ed25519Public(pkcs8) → public key
-    add("ed25519Public", 1, Box::new(|_, a, cx| {
-        use ring::signature::KeyPair;
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes_arg(a, 0, cx)?)
-            .map_err(|_| boa_engine::JsNativeError::typ().with_message("invalid Ed25519 private key"))?;
-        Ok(js_str(&latin1(pair.public_key().as_ref())))
-    }));
-    add("ed25519Sign", 2, Box::new(|_, a, cx| {
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8_maybe_unchecked(&bytes_arg(a, 0, cx)?)
-            .map_err(|_| boa_engine::JsNativeError::typ().with_message("invalid Ed25519 private key"))?;
-        Ok(js_str(&latin1(pair.sign(&bytes_arg(a, 1, cx)?).as_ref())))
-    }));
-    // ed25519Verify(public key, data, signature) → bool
-    add("ed25519Verify", 3, Box::new(|_, a, cx| {
-        let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, bytes_arg(a, 0, cx)?);
-        Ok(JsValue::from(key.verify(&bytes_arg(a, 1, cx)?, &bytes_arg(a, 2, cx)?).is_ok()))
-    }));
     // The same, blocking (synchronous XMLHttpRequest): the response arguments.
     add("fetchSync", 7, Box::new(|d, a, cx| {
         let id = a.get_or_undefined(0).as_number().unwrap_or(0.0) as u32;
@@ -1844,6 +1788,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     cx.insert_data(PageDom(dom.clone()));
     observers::install(cx);
     context2d::install(&obj, cx);
+    crate::crypto::install(cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
@@ -2156,11 +2101,6 @@ fn canvas_image(base: &Url, src: &str) -> Option<Arc<tiny_skia::Pixmap>> {
 
 fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
-}
-
-/// A latin1-string argument as bytes.
-fn bytes_arg(a: &[JsValue], i: usize, cx: &mut Context) -> JsResult<Vec<u8>> {
-    Ok(arg_string(a, i, cx)?.chars().map(|c| c as u32 as u8).collect())
 }
 
 /// Attribute names are case-insensitive on HTML elements only (`viewBox`
