@@ -284,6 +284,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
+        crate::abort::link(&mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
@@ -1816,6 +1817,8 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::dom_exception::install(cx);
     crate::dom_geometry::install(cx);
     crate::structured_clone::install(cx);
+    crate::form_data::install(cx);
+    crate::abort::install(cx);
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);

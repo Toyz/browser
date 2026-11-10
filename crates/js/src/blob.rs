@@ -53,6 +53,11 @@ pub(crate) fn uint8_array(bytes: &[u8], cx: &mut Context) -> JsResult<JsValue> {
 }
 
 /// A blob's bytes and type (`File`s are blobs too).
+/// Whether `o` is a `File`.
+pub(crate) fn is_file(o: &JsObject) -> bool {
+    o.downcast_ref::<File>().is_some()
+}
+
 pub(crate) fn blob_of(o: &JsObject) -> Option<(Arc<[u8]>, String)> {
     if let Some(b) = o.downcast_ref::<Blob>() {
         return Some((b.bytes.clone(), b.kind.clone()));
@@ -256,30 +261,26 @@ fn encode_body(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue
         (array_buffer(&bytes, cx)?, None)
     } else if is_a(&body, "URLSearchParams", cx)? {
         text(js_value_string(&body, cx), "application/x-www-form-urlencoded;charset=UTF-8")
-    } else if is_a(&body, "FormData", cx)? {
+    } else if let Some(entries) = body.as_object().as_ref().and_then(crate::form_data::entries_of) {
+        use crate::form_data::Value;
         let boundary = boundary();
         let mut out = Vec::new();
-        let list = body.as_object().expect("an object").get(js_string!("_list"), cx)?;
-        if let Some(list) = list.as_object().and_then(|o| JsArray::from_object(o).ok()) {
-            for i in 0..list.length(cx)? {
-                let Some(entry) = list.get(i, cx)?.as_object() else { continue };
-                let name = js_value_string(&entry.get(0, cx)?, cx);
-                let value = entry.get(1, cx)?;
-                out.extend(format!("--{boundary}\r\n").bytes());
-                match value.as_object().as_ref().and_then(|o| Some((blob_of(o)?, o.downcast_ref::<File>().map(|f| f.name.clone())))) {
-                    Some(((bytes, kind), file)) => {
-                        let file = file.unwrap_or_else(|| "blob".to_owned());
-                        let kind = if kind.is_empty() { "application/octet-stream".to_owned() } else { kind };
-                        out.extend(format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{file}\"\r\nContent-Type: {kind}\r\n\r\n").bytes());
-                        out.extend_from_slice(&bytes);
-                    }
-                    None => {
-                        out.extend(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes());
-                        out.extend(js_value_string(&value, cx).bytes());
-                    }
+        for (name, value) in entries {
+            out.extend(format!("--{boundary}\r\n").bytes());
+            match &value {
+                Value::File(o) => {
+                    let (bytes, kind) = blob_of(o).unwrap_or_default();
+                    let file = o.downcast_ref::<File>().map_or_else(|| "blob".to_owned(), |f| f.name.clone());
+                    let kind = if kind.is_empty() { "application/octet-stream".to_owned() } else { kind };
+                    out.extend(format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{file}\"\r\nContent-Type: {kind}\r\n\r\n").bytes());
+                    out.extend_from_slice(&bytes);
                 }
-                out.extend(b"\r\n");
+                Value::Text(text) => {
+                    out.extend(format!("Content-Disposition: form-data; name=\"{name}\"\r\n\r\n").bytes());
+                    out.extend(text.bytes());
+                }
             }
+            out.extend(b"\r\n");
         }
         out.extend(format!("--{boundary}--\r\n").bytes());
         (array_buffer(&out, cx)?, Some(format!("multipart/form-data; boundary={boundary}")))

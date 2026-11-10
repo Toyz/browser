@@ -2050,33 +2050,6 @@
 
   // Blob and File are native (blob.rs), holding bytes.
 
-  class FormData {
-    constructor(form) {
-      this._list = [];
-      if (form && form.__id !== undefined) {
-        for (const el of form.querySelectorAll("input, select, textarea")) {
-          const name = el.getAttribute("name");
-          if (!name || el.hasAttribute("disabled")) continue;
-          const type = (el.getAttribute("type") || "").toLowerCase();
-          if ((type === "checkbox" || type === "radio") && !el.checked) continue;
-          if (type === "submit" || type === "button" || type === "reset" || type === "file" || type === "image") continue;
-          this._list.push([name, type === "checkbox" && !el.hasAttribute("value") ? "on" : String(el.value)]);
-        }
-      }
-    }
-    append(k, v) { this._list.push([String(k), v instanceof Blob ? v : String(v)]); }
-    set(k, v) { this.delete(k); this.append(k, v); }
-    get(k) { const e = this._list.find(([a]) => a === k); return e ? e[1] : null; }
-    getAll(k) { return this._list.filter(([a]) => a === k).map(([, v]) => v); }
-    has(k) { return this._list.some(([a]) => a === k); }
-    delete(k) { this._list = this._list.filter(([a]) => a !== k); }
-    forEach(fn, self) { for (const [k, v] of this._list) fn.call(self, v, k, this); }
-    keys() { return this._list.map(([k]) => k)[Symbol.iterator](); }
-    values() { return this._list.map(([, v]) => v)[Symbol.iterator](); }
-    entries() { return this._list.map((e) => e.slice())[Symbol.iterator](); }
-    [Symbol.iterator]() { return this.entries(); }
-  }
-
   // Bodies are bytes: `N.encodeBody` makes a body ([string | ArrayBuffer,
   // content type]) from what scripts pass (blob.rs); responses keep
   // theirs as a Uint8Array.
@@ -2171,23 +2144,6 @@
     static redirect(url, status) { return new Response(null, { status: status || 302, headers: { location: url } }); }
   }
 
-  class AbortSignal extends EventTarget {
-    constructor() { super(); this.aborted = false; this.reason = undefined; this.onabort = null; }
-    throwIfAborted() { if (this.aborted) throw this.reason; }
-    static timeout(ms) { const c = new AbortController(); setTimeout(() => c.abort(new DOMException("The operation timed out.", "TimeoutError")), ms); return c.signal; }
-    static abort(reason) { const c = new AbortController(); c.abort(reason); return c.signal; }
-  }
-  class AbortController {
-    constructor() { this.signal = new AbortSignal(); }
-    abort(reason) {
-      const s = this.signal;
-      if (s.aborted) return;
-      s.aborted = true;
-      s.reason = reason === undefined ? new DOMException("signal is aborted without reason", "AbortError") : reason;
-      s.dispatchEvent(new Event("abort"));
-      if (typeof s.onabort === "function") s.onabort(new Event("abort"));
-    }
-  }
   // DOMException is native (dom_exception.rs).
 
   // Requests in flight: id → callback(error, response fields).
@@ -2404,8 +2360,8 @@
 
   Object.assign(window, {
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
-    fetch, Request, Response, XMLHttpRequest, FormData, TextEncoder, TextDecoder,
-    AbortController, AbortSignal,
+    fetch, Request, Response, XMLHttpRequest, TextEncoder, TextDecoder,
+
     __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
     __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },
     __fetchDone(...args) {

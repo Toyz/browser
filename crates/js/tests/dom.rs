@@ -961,6 +961,49 @@ fn structured_clone_is_native() {
 }
 
 #[test]
+fn form_data_is_native() {
+    let doc = run(r##"<body><form id="f"><input name="q" value="cats"><input type="checkbox" name="c" checked><input type="checkbox" name="off"><input name="d" disabled value="x"><button name="b">go</button></form><p id="o"></p><script>
+        try {
+        const f = new FormData(document.getElementById("f"));
+        f.append("q", "dogs"); f.append("n", "1"); f.set("q", "birds");
+        f.append("file", new Blob(["hi"], { type: "text/plain" }), "a.txt");
+        const file = f.get("file");
+        const req = new Response(f);
+        document.getElementById("o").textContent = [
+          [...f.keys()].join(","), f.getAll("q").join("+"), f.get("c"), f.has("off"), file instanceof File, file.name, file.size,
+          String(f.get("missing")), req.headers.get("content-type").startsWith("multipart/form-data; boundary="), f instanceof FormData,
+        ].join(" ");
+        req.text().then((t) => { document.getElementById("o").textContent += " " + (t.includes('name="file"; filename="a.txt"') && t.includes("\r\n\r\nbirds\r\n")); });
+        } catch (e) { document.getElementById("o").textContent = "ERR " + e; }
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "q,c,n,file birds on false true a.txt 2 null true true true");
+}
+
+#[test]
+fn abort_is_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        try {
+        const c = new AbortController(), s = c.signal, seen = [];
+        s.addEventListener("abort", (e) => seen.push("listener:" + e.type));
+        s.onabort = () => seen.push("onabort");
+        const before = s.aborted;
+        c.abort(); c.abort("again");
+        let thrown = ""; try { s.throwIfAborted(); } catch (e) { thrown = e.name; }
+        const pre = AbortSignal.abort("why"), any = AbortSignal.any([new AbortController().signal, pre]);
+        const c2 = new AbortController(), follower = AbortSignal.any([c2.signal]); c2.abort("later");
+        document.getElementById("o").textContent = [
+          before, s.aborted, s.reason.name, seen.join(","), thrown, s instanceof EventTarget, c.signal === s,
+          pre.reason, any.aborted, any.reason, follower.reason, AbortSignal.timeout(10) instanceof AbortSignal,
+        ].join(" ");
+        const c3 = new AbortController();
+        fetch("https://example.com/never", { signal: c3.signal }).catch((e) => { document.getElementById("o").textContent += " fetch:" + e; });
+        c3.abort("stop");
+        } catch (e) { document.getElementById("o").textContent = "ERR " + e; }
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "false true AbortError listener:abort,onabort AbortError true true why true why later true fetch:stop");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
