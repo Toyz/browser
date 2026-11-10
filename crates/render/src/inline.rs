@@ -276,8 +276,10 @@ fn extent_for(style: &InlineStyle, ascent: Pixels, descent: Pixels) -> Extent {
     }
 }
 
-/// An inline image's natural size, CSS px.
-fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
+/// An inline image's size, CSS px: from CSS, its attributes, its picture.
+/// `avail`: the line width, for percentage widths (`None`: not known yet;
+/// they count as `auto`).
+fn image_size(image: &ImageBox, cx: &RenderCx, avail: Option<f32>) -> (f32, f32) {
     let s = &image.style;
     let intrinsic = match crate::view::shown_image(image, cx) {
         Some(ImageState::Ready { width, height, .. }) => Some((width / image.density, height / image.density)),
@@ -291,10 +293,15 @@ fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
         style::Length::Px(v) => Some(v),
         _ => None,
     };
-    let (cw, ch) = (css(s.width), css(s.height));
+    let horizontal = |s: &style::ComputedStyle| s.padding.left.px_or_zero() + s.padding.right.px_or_zero() + s.border_width.left + s.border_width.right;
+    let of_avail = |l: style::Length| match (l, avail) {
+        (style::Length::Percent(p), Some(a)) => Some((a * p / 100.0 - if s.border_box { horizontal(s) } else { 0.0 }).max(0.0)),
+        _ => None,
+    };
+    let (cw, ch) = (css(s.width).or(of_avail(s.width)), css(s.height));
     let w = cw.or(image.attr_width).or(intrinsic.map(|(w, _)| w));
     let h = ch.or(image.attr_height).or(intrinsic.map(|(_, h)| h));
-    match (w, h, ratio) {
+    let (w, h) = match (w, h, ratio) {
         // Only one dimension set in CSS: the other follows the aspect ratio.
         (Some(w), Some(_), Some(r)) if cw.is_some() && ch.is_none() => (w, w / r),
         (Some(_), Some(h), Some(r)) if ch.is_some() && cw.is_none() => (h * r, h),
@@ -302,6 +309,12 @@ fn image_size(image: &ImageBox, cx: &RenderCx) -> (f32, f32) {
         (Some(w), None, Some(r)) => (w, w / r),
         (None, Some(h), Some(r)) => (h * r, h),
         _ => (0.0, 0.0),
+    };
+    // `max-width: 100%` (against the line): scaled down, keeping the ratio
+    // unless the height was set too.
+    match css(s.max_width).or(of_avail(s.max_width)) {
+        Some(max) if w > max => (max, if ch.is_some() || w <= 0.0 { h } else { h * max / w }),
+        _ => (w, h),
     }
 }
 
@@ -384,16 +397,7 @@ impl FlowState {
             let shift = px(style.baseline_shift);
             let m = match piece.kind {
                 PieceKind::Object(i) => match &para.objects[i as usize] {
-                    InlineObject::Image(image) => {
-                        let (w, h) = image_size(image, cx);
-                        // Padding and borders around the picture.
-                        let (t, r, b, l) = edges(&image.style);
-                        let (ml, mr) = atomic_margins(&image.style);
-                        let (w, h) = (px(w) + l + r, px(h) + t + b);
-                        let extent = object_extent(image.style.vertical_align, h, self.strut, block.font_size, shift);
-                        // The line holds the margin box (icons with `mr-2`).
-                        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.), margin_top: px(0.) }
-                    }
+                    InlineObject::Image(image) => self.measure_image(image, shift, block.font_size, None, cx),
                     InlineObject::Block(atomic) => self.measure_atomic(i, atomic, shift, None, cx, window),
                     InlineObject::BlockBox(block) => {
                         let s = &block.style;
@@ -452,6 +456,19 @@ impl FlowState {
 
     /// An inline-block: shrink-to-fit (or its CSS size) around a nested flow,
     /// sitting on the baseline of its first line.
+    /// An image's place on the line (`avail`: the line width, for
+    /// percentage sizes).
+    fn measure_image(&self, image: &ImageBox, shift: Pixels, font_size: f32, avail: Option<Pixels>, cx: &RenderCx) -> Measured {
+        let (w, h) = image_size(image, cx, avail.map(f32::from));
+        // Padding and borders around the picture.
+        let (t, r, b, l) = edges(&image.style);
+        let (ml, mr) = atomic_margins(&image.style);
+        let (w, h) = (px(w) + l + r, px(h) + t + b);
+        let extent = object_extent(image.style.vertical_align, h, self.strut, font_size, shift);
+        // The line holds the margin box (icons with `mr-2`).
+        Measured { width: w + ml + mr, extent, ascent: h, descent: px(0.), margin_top: px(0.) }
+    }
+
     /// `available`: the line width it must fit in (`None`: unconstrained).
     fn measure_atomic(
         &mut self,
@@ -548,14 +565,21 @@ impl FlowState {
         // Inline-blocks without a CSS width shrink to fit the line width.
         if wrap.is_some() {
             let mut adjusted: Option<Vec<Measured>> = None;
+            let font_size = InlineStyle::of(&para.style, false).font_size;
             for (ix, piece) in para.pieces.iter().enumerate() {
                 let PieceKind::Object(oi) = piece.kind else { continue };
-                let InlineObject::Block(atomic) = &para.objects[oi as usize] else { continue };
-                if !atomic.style.width.is_auto() {
-                    continue;
-                }
                 let shift = px(para.spans[piece.span as usize].style.baseline_shift);
-                let m = self.measure_atomic(oi, atomic, shift, wrap, cx, window);
+                let m = match &para.objects[oi as usize] {
+                    InlineObject::Block(atomic) if atomic.style.width.is_auto() => self.measure_atomic(oi, atomic, shift, wrap, cx, window),
+                    // Percentage widths (`width: 100%`, `max-width: 100%`)
+                    // are of the line.
+                    InlineObject::Image(image)
+                        if matches!(image.style.width, style::Length::Percent(_)) || matches!(image.style.max_width, style::Length::Percent(_)) =>
+                    {
+                        self.measure_image(image, shift, font_size, wrap, cx)
+                    }
+                    _ => continue,
+                };
                 adjusted.get_or_insert_with(|| measured.to_vec())[ix] = m;
             }
             if let Some(adjusted) = adjusted {
