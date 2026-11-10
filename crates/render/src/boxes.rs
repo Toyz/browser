@@ -707,6 +707,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         positioned: 0,
         opacity: 1.0,
         fixed: Vec::new(),
+        in_fixed: 0,
         hoisted: Vec::new(),
         avail: styler.env().width,
         in_flex_row: false,
@@ -771,6 +772,9 @@ struct Builder<'a> {
     positioned: usize,
     /// `position: fixed` boxes, rendered over the viewport.
     fixed: Vec<LayoutBox>,
+    /// How many fixed boxes that are stacking contexts the box being built
+    /// is inside.
+    in_fixed: u32,
     /// Absolute boxes on their way up to their containing block (the nearest
     /// positioned ancestor): GPUI places absolute children against their
     /// parent, so they have to be that box's children.
@@ -2242,11 +2246,24 @@ impl Builder<'_> {
                 s.position = style::Position::Static;
                 s.inset = Edges::all(Length::Auto);
             }
+            // A fixed box inside a fixed one that's a stacking context (a
+            // modal's backdrop, with its z-index) stays in it, placed as an
+            // absolute one (the backdrop is the whole viewport): lifted out
+            // on its own it painted under the backdrop it's in, and CNN's
+            // consent dialog was a dimmed page with nothing on it. (A fixed
+            // box that isn't one, like a page wrapper fixed to stop it
+            // scrolling under a modal, keeps its fixed boxes their own.)
+            if style.position == style::Position::Fixed && self.in_fixed > 0 {
+                Arc::make_mut(&mut style).position = style::Position::Absolute;
+            }
             match style.position {
                 style::Position::Fixed => {
                     let kind = block_kind_for(style.display);
                     let generated = self.generated(child, &style);
+                    let context = u32::from(style.z_index.is_some() || style.opacity < 1.0 || style.transformed);
+                    self.in_fixed += context;
                     let block = self.build_block(child, style, kind, link, generated);
+                    self.in_fixed -= context;
                     self.fixed.push(LayoutBox::Block(block));
                     continue;
                 }
@@ -3962,6 +3979,23 @@ mod tests {
 
     fn layout(html_src: &str) -> LayoutTree {
         layout_css(html_src, "")
+    }
+
+    #[test]
+    fn fixed_boxes_in_a_fixed_stacking_context_stay_in_it() {
+        // A modal: its dialog (fixed) inside the backdrop (fixed, z-index)
+        // stays the backdrop's; a page wrapper fixed with no z-index keeps
+        // fixed boxes inside it their own.
+        let tree = layout_css(
+            r#"<div class="wrap"><div class="backdrop"><div class="dialog">agree</div></div></div>"#,
+            ".wrap { position: fixed } .backdrop { position: fixed; inset: 0; z-index: 999 } .dialog { position: fixed; top: 10px; left: 10px }",
+        );
+        let fixed: Vec<&LayoutBox> = tree.pinned.iter().filter(|p| p.is_fixed()).map(|p| &p.content).collect();
+        // The wrapper and the backdrop, not the dialog.
+        assert_eq!(fixed.len(), 2, "{fixed:?}");
+        let LayoutBox::Block(backdrop) = fixed.iter().copied().find(|b| matches!(b, LayoutBox::Block(b) if b.style.z_index == Some(999))).expect("the backdrop") else { panic!() };
+        let LayoutBox::Block(dialog) = &backdrop.children[0] else { panic!() };
+        assert_eq!(dialog.style.position, style::Position::Absolute);
     }
 
     #[test]
