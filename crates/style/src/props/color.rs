@@ -39,8 +39,58 @@ pub(crate) fn parse_color<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
     }) {
         return Ok(c);
     }
+    if let Ok(c) = p.try_parse(parse_color_mix) {
+        return Ok(c);
+    }
     let c = cssparser_color::Color::parse(p)?;
     Ok(convert_color(c))
+}
+
+/// `color-mix(in <space>, <color> [<p>%]?, <color> [<p>%]?)`: mixed with
+/// premultiplied alpha, in sRGB (close to the requested space for the
+/// "this color at 20%" mixes stylesheets use it for).
+fn parse_color_mix<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
+    p.expect_function_matching("color-mix")?;
+    p.parse_nested_block(|p| {
+        p.expect_ident_matching("in")?;
+        // The space, and a hue interpolation method (`shorter hue`).
+        p.expect_ident()?;
+        while p.try_parse(|p| p.expect_comma()).is_err() {
+            p.next()?;
+        }
+        let part = |p: &mut Parser<'i>| -> PResult<'i, (Color, Option<f32>)> {
+            let pct = |p: &mut Parser<'i>| p.try_parse(|p| p.expect_percentage()).ok();
+            let before = pct(p);
+            let color = parse_color(p)?;
+            Ok((color, before.or_else(|| pct(p))))
+        };
+        let (a, pa) = part(p)?;
+        p.expect_comma()?;
+        let (b, pb) = part(p)?;
+        let (Color::Rgba(a) | Color::LightDark(a, _), Color::Rgba(b) | Color::LightDark(b, _)) = (a, b) else {
+            return err(p);
+        };
+        // Percentages: one implies the other; both scale to 100%, and a
+        // sum under it lowers the alpha.
+        let (pa, pb) = match (pa, pb) {
+            (None, None) => (0.5, 0.5),
+            (Some(x), None) => (x, 1.0 - x),
+            (None, Some(y)) => (1.0 - y, y),
+            (Some(x), Some(y)) => (x, y),
+        };
+        let sum = pa + pb;
+        if sum <= 0.0 {
+            return err(p);
+        }
+        let (wa, wb) = (pa / sum, pb / sum);
+        let ch = |v: u32, shift: u32| ((v >> shift) & 0xff) as f32 / 255.0;
+        let (aa, ab) = (ch(a, 0), ch(b, 0));
+        let alpha = aa * wa + ab * wb;
+        let mix = |shift: u32| {
+            if alpha <= 0.0 { 0.0 } else { (ch(a, shift) * aa * wa + ch(b, shift) * ab * wb) / alpha }
+        };
+        Ok(pack(mix(24), mix(16), mix(8), alpha * sum.min(1.0)))
+    })
 }
 
 pub(crate) fn system_color(name: &str) -> Option<Color> {

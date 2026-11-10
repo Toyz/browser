@@ -114,3 +114,20 @@ mod tests {
         assert!(!supports("unknown-func(x)"));
     }
 }
+
+#[cfg(test)]
+mod color_mix {
+    #[test]
+    fn tailwind_color_mix_probe() {
+        assert!(super::supports("(color:color-mix(in lab,red,red))"));
+        assert!(super::supports("(color: color-mix(in oklab, red 20%, transparent))"));
+    }
+
+    #[test]
+    fn mixes() {
+        let c = crate::props::parse_color_str("color-mix(in oklab, #ff0000 20%, transparent)").unwrap();
+        assert_eq!(c, 0xff000033);
+        let c = crate::props::parse_color_str("color-mix(in srgb, white, black)").unwrap();
+        assert_eq!(c, 0x808080ff);
+    }
+}
