@@ -197,12 +197,54 @@ impl BufferObject {
     }
 }
 
+/// Feather: bytes an `ArrayBuffer` views without owning them (a
+/// WebAssembly memory's), kept alive by `keep`. The owner guarantees the
+/// pointer stays valid for `len` bytes while `keep` lives.
+#[derive(Clone)]
+pub struct ExternalBytes {
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
+    /// Holds the bytes' owner alive.
+    _keep: std::rc::Rc<dyn std::any::Any>,
+}
+
+impl std::fmt::Debug for ExternalBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalBytes").field("len", &self.len).finish_non_exhaustive()
+    }
+}
+
+impl ExternalBytes {
+    /// # Safety
+    ///
+    /// `ptr` must be valid for reads and writes of `len` bytes for as long as
+    /// `keep` (or any clone of the buffer holding it) is alive.
+    pub unsafe fn new(ptr: std::ptr::NonNull<u8>, len: usize, keep: std::rc::Rc<dyn std::any::Any>) -> Self {
+        Self { ptr, len, _keep: keep }
+    }
+
+    fn slice(&self) -> &[u8] {
+        // SAFETY: see `new`.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn slice_mut(&mut self) -> &mut [u8] {
+        // SAFETY: see `new`.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+}
+
 /// The internal representation of an `ArrayBuffer` object.
 #[derive(Debug, Clone, Trace, Finalize, JsData)]
 pub struct ArrayBuffer {
     /// The `[[ArrayBufferData]]` internal slot.
     #[unsafe_ignore_trace]
     data: Option<AlignedVec<u8>>,
+
+    /// Feather: or bytes it doesn't own (see [`ExternalBytes`]).
+    #[unsafe_ignore_trace]
+    external: Option<ExternalBytes>,
 
     /// The `[[ArrayBufferMaxByteLength]]` internal slot.
     max_byte_len: Option<u64>,
@@ -215,21 +257,41 @@ impl ArrayBuffer {
     pub(crate) fn from_data(data: AlignedVec<u8>, detach_key: JsValue) -> Self {
         Self {
             data: Some(data),
+            external: None,
+            max_byte_len: None,
+            detach_key,
+        }
+    }
+
+    /// Feather: a fixed-length buffer over bytes it doesn't own.
+    pub(crate) fn from_external(bytes: ExternalBytes, detach_key: JsValue) -> Self {
+        Self {
+            data: None,
+            external: Some(bytes),
             max_byte_len: None,
             detach_key,
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.data.as_ref().map_or(0, AlignedVec::len)
+        match &self.external {
+            Some(e) => e.len,
+            None => self.data.as_ref().map_or(0, AlignedVec::len),
+        }
     }
 
     pub(crate) fn bytes(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+        match &self.external {
+            Some(e) => Some(e.slice()),
+            None => self.data.as_deref(),
+        }
     }
 
     pub(crate) fn bytes_mut(&mut self) -> Option<&mut [u8]> {
-        self.data.as_deref_mut()
+        match &mut self.external {
+            Some(e) => Some(e.slice_mut()),
+            None => self.data.as_deref_mut(),
+        }
     }
 
     pub(crate) fn vec_mut(&mut self) -> Option<&mut AlignedVec<u8>> {
@@ -244,7 +306,7 @@ impl ArrayBuffer {
     /// Gets the inner bytes of the buffer without accessing the current atomic length.
     #[track_caller]
     pub(crate) fn bytes_with_len(&self, len: usize) -> Option<&[u8]> {
-        if let Some(s) = self.data.as_deref() {
+        if let Some(s) = self.bytes() {
             Some(&s[..len])
         } else {
             None
@@ -254,7 +316,7 @@ impl ArrayBuffer {
     /// Gets the mutable inner bytes of the buffer without accessing the current atomic length.
     #[track_caller]
     pub(crate) fn bytes_with_len_mut(&mut self, len: usize) -> Option<&mut [u8]> {
-        if let Some(s) = self.data.as_deref_mut() {
+        if let Some(s) = self.bytes_mut() {
             Some(&mut s[..len])
         } else {
             None
@@ -264,7 +326,7 @@ impl ArrayBuffer {
     /// Gets the underlying vector for this buffer.
     #[must_use]
     pub fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+        self.bytes()
     }
 
     /// Resizes the buffer to the new size, clamped to the maximum byte length if present.
@@ -306,6 +368,7 @@ impl ArrayBuffer {
                 .into());
         }
 
+        self.external = None;
         Ok(self.data.take())
     }
 
@@ -318,7 +381,7 @@ impl ArrayBuffer {
     pub(crate) const fn is_detached(&self) -> bool {
         // 1. If arrayBuffer.[[ArrayBufferData]] is null, return true.
         // 2. Return false.
-        self.data.is_none()
+        self.data.is_none() && self.external.is_none()
     }
 
     pub(crate) fn is_fixed_len(&self) -> bool {
@@ -852,6 +915,7 @@ impl ArrayBuffer {
             prototype,
             ArrayBuffer {
                 data: Some(bytes),
+                external: None,
                 max_byte_len: new_max_len,
                 detach_key: JsValue::undefined(),
             },
@@ -905,6 +969,7 @@ impl ArrayBuffer {
                 // 6. Set obj.[[ArrayBufferData]] to block.
                 // 7. Set obj.[[ArrayBufferByteLength]] to byteLength.
                 data: Some(block),
+                external: None,
                 // 8. If allocatingResizableBuffer is true, then
                 //    c. Set obj.[[ArrayBufferMaxByteLength]] to maxByteLength.
                 max_byte_len,

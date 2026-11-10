@@ -143,6 +143,18 @@ impl JsArrayBuffer {
         self
     }
 
+    /// Feather: a fixed-length `ArrayBuffer` over bytes it doesn't own (a
+    /// WebAssembly memory's), detachable only with `detach_key`.
+    pub fn external(bytes: crate::builtins::array_buffer::ExternalBytes, detach_key: JsValue, context: &mut Context) -> Self {
+        let proto = context.intrinsics().constructors().array_buffer().prototype();
+        let obj = JsObject::from_proto_and_data_with_shared_shape(
+            context.root_shape(),
+            proto,
+            ArrayBuffer::from_external(bytes, detach_key),
+        );
+        Self { inner: obj }
+    }
+
     /// Create a [`JsArrayBuffer`] from a [`JsObject`], if the object is not an array buffer throw a `TypeError`.
     ///
     /// This does not clone the fields of the array buffer, it only does a shallow clone of the object.

@@ -18,6 +18,9 @@ encoding_rs = "0.8"
 # The CSSOM's CSS text (rules, declarations), as the style engine tokenizes it.
 cssparser = "0.38"
 url.workspace = true
+# WebAssembly: compiled to native code (Cranelift); memories never move
+# (reserved up front), so JS ArrayBuffers can point into them.
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
 slotmap.workspace = true
 anyhow.workspace = true
 net.workspace = true

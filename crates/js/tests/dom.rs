@@ -1145,6 +1145,36 @@ fn intl_currency_and_percent() {
 }
 
 #[test]
+fn webassembly_runs_and_shares_memory() {
+    let doc = run(&format!(r##"<body><p id="o"></p><script>
+        try {{
+        const bytes = new Uint8Array([0,97,115,109,1,0,0,0,1,25,5,96,1,127,1,127,96,2,127,127,1,127,96,2,127,127,0,96,1,126,1,126,96,0,0,2,13,1,3,101,110,118,5,116,119,105,99,101,0,0,3,7,6,1,0,2,0,3,4,4,4,1,112,0,2,5,4,1,1,1,4,6,6,1,127,1,65,7,11,7,62,9,3,109,101,109,2,0,1,103,3,0,3,116,98,108,1,0,3,97,100,100,0,1,9,99,97,108,108,84,119,105,99,101,0,2,4,112,111,107,101,0,3,4,112,101,101,107,0,4,3,98,105,103,0,5,4,98,111,111,109,0,6,9,7,1,0,65,0,11,1,1,10,46,6,7,0,32,0,32,1,106,11,6,0,32,0,16,0,11,9,0,32,0,32,1,58,0,0,11,7,0,32,0,45,0,0,11,7,0,32,0,66,1,124,11,3,0,0,11]);
+        let inst;
+        const imports = {{ env: {{ twice: (x) => inst.exports.add(x, x) }} }};
+        const module = new WebAssembly.Module(bytes);
+        inst = new WebAssembly.Instance(module, imports);
+        const e = inst.exports, out = [];
+        out.push(e.add(2, 3), e.callTwice(21), WebAssembly.validate(bytes), WebAssembly.validate(new Uint8Array([1, 2])));
+        e.poke(10, 200);
+        let view = new Uint8Array(e.mem.buffer);
+        out.push(view[10], view.length);
+        view[11] = 77; out.push(e.peek(11));
+        const old = e.mem.buffer; out.push(e.mem.grow(1), old.byteLength, e.mem.buffer.byteLength, new Uint8Array(e.mem.buffer)[10]);
+        out.push(e.tbl.length, e.tbl.get(0)(4, 5), e.g.value); e.g.value = 9; out.push(e.g.value, e.big(41n));
+        try {{ e.boom(); }} catch (x) {{ out.push(x instanceof WebAssembly.RuntimeError, x instanceof Error); }}
+        try {{ new WebAssembly.Instance(module, {{ env: {{}} }}); }} catch (x) {{ out.push(x.name); }}
+        out.push(WebAssembly.Module.exports(module).map((x) => x.name + ":" + x.kind).join("/"));
+        WebAssembly.instantiate(bytes, imports).then((r) => {{
+          out.push(r.instance.exports.add(1, 1), r.module instanceof WebAssembly.Module);
+          document.getElementById("o").textContent = out.join(" ");
+        }});
+        }} catch (x) {{ document.getElementById("o").textContent = "ERR " + x + " " + x.stack; }}
+        setTimeout(() => {{}}, 100);
+    </script></body>"##));
+    assert_eq!(text_of(&doc, "o"), "5 42 true false 200 65536 77 1 0 131072 200 2 9 7 9 42 true true LinkError mem:memory/g:global/tbl:table/add:function/callTwice:function/poke:function/peek:function/big:function/boom:function 2 true");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

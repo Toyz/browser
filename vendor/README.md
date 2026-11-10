@@ -45,6 +45,12 @@ build them directly wrap the node in `Box::new` (or go through `From`).
 
 ## boa_engine 0.22.0
 
+- `src/builtins/array_buffer/mod.rs`, `src/object/builtins/jsarraybuffer.rs`:
+  an `ArrayBuffer` can view bytes it doesn't own (`ExternalBytes`,
+  `JsArrayBuffer::external`): a WebAssembly memory's `buffer` is the
+  memory itself, not a copy. Such buffers are fixed-length, detachable
+  only with their detach key (when the memory grows), and can't be
+  transferred or resized.
 - `src/builtins/intl/number_format/`: `style: "currency"` threw
   "unimplemented" (so did creating such a formatter: GitHub's pull request
   list failed to load), and `style: "percent"` printed the bare number.

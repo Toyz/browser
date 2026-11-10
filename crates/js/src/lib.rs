@@ -33,6 +33,7 @@ mod abort;
 mod request;
 mod body;
 mod streams;
+mod wasm;
 mod response;
 mod worker_net;
 pub mod worker;
