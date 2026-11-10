@@ -44,6 +44,17 @@ behavior are checked for exact equivalence (see "parser parity" below).
 
 ## Stage 2: layout
 
+Done so far, inside the current renderer:
+- App shells split into rows: a flex container whose one in-flow item fills
+  it (a column's stretched child, a row's growing or 100%-wide one; empty
+  siblings ignored) is laid out like a block, so it splits; auto-height
+  clipping boxes split too. YouTube's results went from 2 rows (nothing
+  virtualized, nothing to anchor the scroll to) to ~100; a scripted scroll
+  recording renders ~4x faster with fewer, smaller jumps.
+- The view is kept on the row with the same element across rebuilds.
+- Known cost: `LayoutTree::reuse_unchanged` deep-compares every row
+  (~160ms for YouTube's ~100 rows); it needs a cheap per-row change check.
+
 GPUI's layout (taffy underneath) supports only part of CSS: grids are N
 equal columns, there are no floats, absolute boxes position against their
 parent. `render/boxes.rs` works around each gap (template grids rebuilt as

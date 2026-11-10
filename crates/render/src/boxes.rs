@@ -178,7 +178,8 @@ impl Block {
             && s.height.is_auto()
             && min_height_ok
             && s.max_height.is_auto()
-            && s.overflow == Overflow::Visible
+            // Clipping a box as tall as its content cuts nothing off.
+            && (s.overflow == Overflow::Visible || (s.height.is_auto() && s.max_height.is_auto() && s.painted_background().is_none()))
             && s.opacity >= 1.0
             && s.position != style::Position::Absolute
             && s.position != style::Position::Fixed
@@ -191,7 +192,62 @@ impl Block {
     #[allow(clippy::result_large_err)]
     fn into_stack(mut self) -> Result<Block, Block> {
         let s = self.style.clone();
-        if !self.sliceable_box() || self.children.len() < 2 {
+        if !self.sliceable_box() || self.children.is_empty() {
+            return Err(self);
+        }
+        // One item filling the container (a flex column's stretched child,
+        // a flex row's growing one): laid out just as a block around it.
+        // App shells nest these (YouTube's page is a dozen deep), and left
+        // whole, the page was one row: nothing virtualized, nothing to keep
+        // the scroll position on.
+        // Empty boxes (an app's unused sidebar slot) take no room in a row.
+        let empty = |c: &LayoutBox| {
+            matches!(c, LayoutBox::Block(b) if b.children.is_empty()
+                && b.style.painted_background().is_none()
+                && !b.style.has_border()
+                && b.style.horizontal_edges() == 0.0
+                && b.style.vertical_edges() == 0.0
+                && matches!(b.style.width, Length::Auto | Length::Px(0.0))
+                && matches!(b.style.height, Length::Auto | Length::Px(0.0))
+                && b.style.min_width.is_auto()
+                && b.style.min_height.is_auto())
+        };
+        let in_flow: Vec<&LayoutBox> = self.children.iter().filter(|c| !crate::view::is_out_of_flow(c) && !empty(c)).collect();
+        if let [only] = in_flow[..]
+            && self.kind == BlockKind::Flex
+            && !s.flex_wrap
+        {
+            let fills = match (s.flex_direction, only) {
+                (FlexDirection::Column, LayoutBox::Block(b)) => {
+                    matches!(s.justify_content, None | Some(Justify::Start))
+                        && matches!(s.align_items, None | Some(Align::Stretch))
+                        && matches!(b.style.align_self, None | Some(Align::Stretch))
+                        && b.style.width.is_auto()
+                }
+                // Growing to the row's width (capped by its max-width, as a
+                // block's would be), or 100% wide already.
+                (FlexDirection::Row, LayoutBox::Block(b)) => {
+                    (b.style.flex_grow > 0.0 || matches!(b.style.width, Length::Percent(p) if p >= 99.0))
+                        && !matches!(b.style.margin.left, Length::Auto)
+                        && !matches!(b.style.margin.right, Length::Auto)
+                }
+                _ => false,
+            };
+            if fills {
+                self.kind = BlockKind::Normal;
+                // (The empty boxes are dropped: in a block they'd stack.)
+                self.children.retain(|c| crate::view::is_out_of_flow(c) || !empty(c));
+                if let Some(LayoutBox::Block(b)) = self.children.iter_mut().find(|c| !crate::view::is_out_of_flow(c)) {
+                    // No longer stretched or grown by the flex layout: a block
+                    // fills the width by itself.
+                    let st = Arc::make_mut(&mut b.style);
+                    st.flex_grow = 0.0;
+                    st.flex_basis = Length::Auto;
+                }
+                return Ok(self);
+            }
+        }
+        if self.children.len() < 2 {
             return Err(self);
         }
         let columns = match self.kind {
