@@ -134,7 +134,7 @@ impl VisitWith for FunctionDeclaration {
 impl From<FunctionDeclaration> for Declaration {
     #[inline]
     fn from(f: FunctionDeclaration) -> Self {
-        Self::FunctionDeclaration(f)
+        Self::FunctionDeclaration(Box::new(f))
     }
 }
 
@@ -311,7 +311,7 @@ impl ToIndentedString for FunctionExpression {
 impl From<FunctionExpression> for Expression {
     #[inline]
     fn from(expr: FunctionExpression) -> Self {
-        Self::FunctionExpression(expr)
+        Self::FunctionExpression(Box::new(expr))
     }
 }
 

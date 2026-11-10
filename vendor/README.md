@@ -5,7 +5,22 @@ workspace `Cargo.toml`. Changes are marked `Feather:` in the source.
 
 ## boa_ast 0.22.0
 
-Two changes, both in `src/scope.rs`.
+Three changes.
+
+**Large node variants are boxed** (`src/expression/mod.rs`,
+`src/statement/mod.rs`, `src/declaration/mod.rs`). Every `Expression` was as
+big as its biggest variant (a function expression, 192 bytes), every
+`Statement` as big as a `try` (464) and every `Declaration` as big as a
+function declaration (168), so the common small nodes (identifiers, calls,
+member accesses) each paid for the rare large ones. The function and
+tagged-template expressions, the `try`/`for-in`/`for-of`/`switch` statements
+and the function declarations are now `Box`ed: `Expression` is 56 bytes,
+`Statement` 80 and `Declaration` 24. YouTube's 10 MB app bundle parses to a
+189 MB tree instead of 436 MB (and ~20% faster), and the page's peak memory
+drops from ~1490 MB to ~1253 MB. Measure with
+`cargo run --release -p js --example compile_mem -- --sizes` (or a script).
+
+The other two are in `src/scope.rs`.
 
 **Name lookups are indexed.** Every scope kept its bindings in a list that
 was scanned for each name looked up or declared. Closure-compiled bundles
@@ -23,8 +38,15 @@ too, so the method's binding was never kept and the inner arrow saw the wrong
 `this` (and `this.#private` threw "Private element does not exist on object",
 which broke GitHub's React app). The fix marks every enclosing function scope.
 
+## boa_parser 0.22.0
+
+Vendored only to follow the boxed `boa_ast` variants above: the places that
+build them directly wrap the node in `Box::new` (or go through `From`).
+
 ## boa_engine 0.22.0
 
+- `src/bytecompiler/expression/mod.rs`: compiles the boxed function
+  expressions (`&**function`).
 - `src/vm/inline_cache/mod.rs`: an inline cache's entries are allocated
   when the first one is cached (`Option<Box<ArrayVec<..>>>`), not inline.
   Every property access in every compiled function has a cache, and most of

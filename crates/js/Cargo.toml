@@ -38,3 +38,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # <script type="importmap"> (already in the tree through boa).
 serde_json = "1"
 
+
+[dev-dependencies]
+boa_ast = "0.22"

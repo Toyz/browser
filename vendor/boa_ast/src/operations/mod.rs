@@ -887,11 +887,11 @@ impl<'ast> Visitor<'ast> for VarDeclaredNamesVisitor<'_> {
             Statement::DoWhileLoop(node) => self.visit(node),
             Statement::WhileLoop(node) => self.visit(node),
             Statement::ForLoop(node) => self.visit(node),
-            Statement::ForInLoop(node) => self.visit(node),
-            Statement::ForOfLoop(node) => self.visit(node),
-            Statement::Switch(node) => self.visit(node),
+            Statement::ForInLoop(node) => self.visit(&**node),
+            Statement::ForOfLoop(node) => self.visit(&**node),
+            Statement::Switch(node) => self.visit(&**node),
             Statement::Labelled(node) => self.visit(node),
-            Statement::Try(node) => self.visit(node),
+            Statement::Try(node) => self.visit(&**node),
             Statement::With(node) => self.visit(node),
         }
     }
@@ -2086,11 +2086,11 @@ impl<'ast> Visitor<'ast> for VarScopedDeclarationsVisitor<'_> {
             Statement::DoWhileLoop(s) => self.visit(s),
             Statement::WhileLoop(s) => self.visit(s),
             Statement::ForLoop(s) => self.visit(s),
-            Statement::ForInLoop(s) => self.visit(s),
-            Statement::ForOfLoop(s) => self.visit(s),
-            Statement::Switch(s) => self.visit(s),
+            Statement::ForInLoop(s) => self.visit(&**s),
+            Statement::ForOfLoop(s) => self.visit(&**s),
+            Statement::Switch(s) => self.visit(&**s),
             Statement::Labelled(s) => self.visit(s),
-            Statement::Try(s) => self.visit(s),
+            Statement::Try(s) => self.visit(&**s),
             Statement::With(s) => self.visit(s),
             Statement::Empty
             | Statement::Debugger
@@ -2253,19 +2253,19 @@ impl<'ast> Visitor<'ast> for TopLevelVarScopedDeclarationsVisitor<'_> {
                 match d.as_ref() {
                     Declaration::FunctionDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::FunctionDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::FunctionDeclaration((**f).clone()));
                     }
                     Declaration::GeneratorDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::GeneratorDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::GeneratorDeclaration((**f).clone()));
                     }
                     Declaration::AsyncFunctionDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::AsyncFunctionDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::AsyncFunctionDeclaration((**f).clone()));
                     }
                     Declaration::AsyncGeneratorDeclaration(f) => {
                         self.0
-                            .push(VarScopedDeclaration::AsyncGeneratorDeclaration(f.clone()));
+                            .push(VarScopedDeclaration::AsyncGeneratorDeclaration((**f).clone()));
                     }
                     _ => {}
                 }
@@ -2343,11 +2343,11 @@ impl<'ast> Visitor<'ast> for AnnexBFunctionDeclarationNamesVisitor<'_> {
             Statement::DoWhileLoop(node) => self.visit(node),
             Statement::WhileLoop(node) => self.visit(node),
             Statement::ForLoop(node) => self.visit(node),
-            Statement::ForInLoop(node) => self.visit(node),
-            Statement::ForOfLoop(node) => self.visit(node),
-            Statement::Switch(node) => self.visit(node),
+            Statement::ForInLoop(node) => self.visit(&**node),
+            Statement::ForOfLoop(node) => self.visit(&**node),
+            Statement::Switch(node) => self.visit(&**node),
             Statement::Labelled(node) => self.visit(node),
-            Statement::Try(node) => self.visit(node),
+            Statement::Try(node) => self.visit(&**node),
             Statement::With(node) => self.visit(node),
             _ => ControlFlow::Continue(()),
         }

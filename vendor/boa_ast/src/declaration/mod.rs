@@ -40,16 +40,16 @@ pub use variable::*;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Declaration {
     /// See [`FunctionDeclaration`]
-    FunctionDeclaration(FunctionDeclaration),
+    FunctionDeclaration(Box<FunctionDeclaration>),
 
     /// See [`GeneratorDeclaration`]
-    GeneratorDeclaration(GeneratorDeclaration),
+    GeneratorDeclaration(Box<GeneratorDeclaration>),
 
     /// See [`AsyncFunctionDeclaration`]
-    AsyncFunctionDeclaration(AsyncFunctionDeclaration),
+    AsyncFunctionDeclaration(Box<AsyncFunctionDeclaration>),
 
     /// See [`AsyncGeneratorDeclaration`]
-    AsyncGeneratorDeclaration(AsyncGeneratorDeclaration),
+    AsyncGeneratorDeclaration(Box<AsyncGeneratorDeclaration>),
 
     /// See [`ClassDeclaration`]
     ClassDeclaration(Box<ClassDeclaration>),

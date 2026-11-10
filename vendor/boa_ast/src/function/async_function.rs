@@ -133,7 +133,7 @@ impl VisitWith for AsyncFunctionDeclaration {
 impl From<AsyncFunctionDeclaration> for Declaration {
     #[inline]
     fn from(f: AsyncFunctionDeclaration) -> Self {
-        Self::AsyncFunctionDeclaration(f)
+        Self::AsyncFunctionDeclaration(Box::new(f))
     }
 }
 
@@ -282,7 +282,7 @@ impl ToIndentedString for AsyncFunctionExpression {
 impl From<AsyncFunctionExpression> for Expression {
     #[inline]
     fn from(expr: AsyncFunctionExpression) -> Self {
-        Self::AsyncFunctionExpression(expr)
+        Self::AsyncFunctionExpression(Box::new(expr))
     }
 }
 

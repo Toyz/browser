@@ -51,6 +51,7 @@ opt-level = 2
 # See vendor/README.md.
 [patch.crates-io]
 boa_ast = { path = "vendor/boa_ast" }
+boa_parser = { path = "vendor/boa_parser" }
 boa_gc = { path = "vendor/boa_gc" }
 boa_engine = { path = "vendor/boa_engine" }
 gpui-pre = { path = "vendor/gpui-pre" }

@@ -134,7 +134,7 @@ impl VisitWith for AsyncGeneratorDeclaration {
 impl From<AsyncGeneratorDeclaration> for Declaration {
     #[inline]
     fn from(f: AsyncGeneratorDeclaration) -> Self {
-        Self::AsyncGeneratorDeclaration(f)
+        Self::AsyncGeneratorDeclaration(Box::new(f))
     }
 }
 
@@ -279,7 +279,7 @@ impl ToIndentedString for AsyncGeneratorExpression {
 impl From<AsyncGeneratorExpression> for Expression {
     #[inline]
     fn from(expr: AsyncGeneratorExpression) -> Self {
-        Self::AsyncGeneratorExpression(expr)
+        Self::AsyncGeneratorExpression(Box::new(expr))
     }
 }
 
