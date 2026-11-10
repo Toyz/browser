@@ -1296,3 +1296,36 @@ fn location_navigator_and_console_are_native() {
         "https://example.com:8080/a/b?q=1#top https: example.com:8080 /a/b ?q=1 #top https://example.com:8080 https://example.com:8080/a/b?q=1#top en-US en-US+en function true"
     );
 }
+
+#[test]
+fn history_is_native_with_state_and_popstate() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const seen = [];
+        addEventListener("popstate", (e) => { seen.push("pop:" + JSON.stringify(e.state) + "@" + location.pathname); show(); });
+        addEventListener("hashchange", (e) => { seen.push("hash:" + e.newURL.split("#")[1]); show(); });
+        history.pushState({ page: 2 }, "", "/two");
+        history.pushState({ page: 3 }, "", "/three#x");
+        history.replaceState({ page: 33 }, "");
+        const show = () => document.getElementById("o").textContent = [history.length, JSON.stringify(history.state), location.pathname, seen.join(",")].join(" ");
+        show();
+        </script></body>"##,
+        Url::parse("https://example.com/one").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    assert_eq!(text_of(&doc, "o"), r#"3 {"page":33} /three "#);
+    // The tab goes back one: the entry before is current again.
+    let host = host.unwrap();
+    host.send(js::ToJs::Traverse { delta: -1 });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !text.contains("pop:") && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, r#"3 {"page":2} /two pop:{"page":2}@/two"#);
+}

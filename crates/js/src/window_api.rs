@@ -3,7 +3,8 @@
 use boa_engine::object::{FunctionObjectBuilder, ObjectInitializer};
 use boa_engine::property::Attribute;
 use boa_engine::object::builtins::JsFunction;
-use boa_engine::{Context, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string};
+use boa_engine::{Context, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string};
+use boa_gc::{Finalize, GcRefCell, Trace};
 use url::quirks;
 
 use crate::dom::{Shared, js_value_string};
@@ -20,12 +21,15 @@ fn function(cx: &mut Context, name: &str, f: NativeFunction) -> JsFunction {
     FunctionObjectBuilder::new(cx.realm(), f).name(JsString::from(name)).build()
 }
 
-/// Install `console`, `navigator` and `location` on the natives object.
+/// Install `console`, `navigator`, `location` and `history` (and the
+/// runtime's `historyTraverse` hook) on the natives object.
 pub(crate) fn install(natives: &JsObject, dom: &Shared, cx: &mut Context) {
     let console = console(dom, cx);
     let navigator = navigator(cx);
     let location = location(dom, cx);
-    for (name, value) in [("console", console), ("navigator", navigator), ("location", location)] {
+    let history = history(dom, cx);
+    let traverse = function(cx, "historyTraverse", native(dom, history_traverse));
+    for (name, value) in [("console", console), ("navigator", navigator), ("location", location), ("history", history), ("historyTraverse", traverse.into())] {
         natives.set(JsString::from(name), value, false, cx).ok();
     }
 }
@@ -217,4 +221,151 @@ fn location(dom: &Shared, cx: &mut Context) -> JsValue {
         init.accessor(JsString::from(name), Some(get), Some(set), Attribute::ENUMERABLE | Attribute::CONFIGURABLE);
     }
     init.build().into()
+}
+
+/// The session history of this document: the entries `pushState` made
+/// (address and state), and which one is current. The tab keeps the list
+/// of addresses, and tells us when it traverses.
+#[derive(Trace, Finalize, JsData)]
+struct History {
+    entries: GcRefCell<Vec<(JsValue, JsValue)>>,
+    #[unsafe_ignore_trace]
+    index: std::cell::Cell<usize>,
+}
+
+/// `this` as the history object.
+fn this_history(this: &JsValue) -> JsResult<JsObject> {
+    this.as_object()
+        .filter(|o| o.downcast_ref::<History>().is_some())
+        .ok_or_else(|| JsNativeError::typ().with_message("not a History").into())
+}
+
+/// `structuredClone(state)` (the state as it was when pushed); the value
+/// itself where that throws.
+fn clone_state(state: &JsValue, cx: &mut Context) -> JsValue {
+    if state.is_null_or_undefined() {
+        return JsValue::null();
+    }
+    let clone = cx.global_object().get(js_string!("structuredClone"), cx).ok().and_then(|f| f.as_callable());
+    clone.and_then(|f| f.call(&JsValue::undefined(), std::slice::from_ref(state), cx).ok()).unwrap_or_else(|| state.clone())
+}
+
+fn history(dom: &Shared, cx: &mut Context) -> JsValue {
+    let here = JsValue::from(JsString::from(dom.borrow().doc.url.as_str()));
+    let data = History { entries: GcRefCell::new(vec![(here, JsValue::null())]), index: std::cell::Cell::new(0) };
+    let length = NativeFunction::from_fn_ptr(|this, _, _| {
+        let h = this_history(this)?;
+        Ok(JsValue::from(h.downcast_ref::<History>().expect("a History").entries.borrow().len() as u32))
+    });
+    let state = NativeFunction::from_fn_ptr(|this, _, _| {
+        let h = this_history(this)?;
+        let h = h.downcast_ref::<History>().expect("a History");
+        Ok(h.entries.borrow()[h.index.get()].1.clone())
+    });
+    let (length, state) = (function(cx, "length", length), function(cx, "state", state));
+    // pushState / replaceState: (state, title, url?).
+    let d = dom.clone();
+    // SAFETY: captures only the Rc'd DOM.
+    let push = unsafe {
+        NativeFunction::from_closure(move |this, a, cx| {
+            let h = this_history(this)?;
+            let href = match a.get(2).filter(|u| !u.is_null_or_undefined()) {
+                Some(u) => crate::dom::js_value_string(u, cx),
+                None => d.borrow().doc.url.to_string(),
+            };
+            let url = crate::dom::set_url(&d, &href, 1)?;
+            let state = clone_state(&a.first().cloned().unwrap_or_default(), cx);
+            let h = h.downcast_ref::<History>().expect("a History");
+            let mut entries = h.entries.borrow_mut();
+            entries.truncate(h.index.get() + 1);
+            entries.push((JsValue::from(JsString::from(url.as_str())), state));
+            h.index.set(entries.len() - 1);
+            Ok(JsValue::undefined())
+        })
+    };
+    let d = dom.clone();
+    // SAFETY: captures only the Rc'd DOM.
+    let replace = unsafe {
+        NativeFunction::from_closure(move |this, a, cx| {
+            let h = this_history(this)?;
+            let url = match a.get(2).filter(|u| !u.is_null_or_undefined()) {
+                Some(u) => {
+                    let href = crate::dom::js_value_string(u, cx);
+                    crate::dom::set_url(&d, &href, 2)?
+                }
+                None => d.borrow().doc.url.clone(),
+            };
+            let state = clone_state(&a.first().cloned().unwrap_or_default(), cx);
+            let h = h.downcast_ref::<History>().expect("a History");
+            h.entries.borrow_mut()[h.index.get()] = (JsValue::from(JsString::from(url.as_str())), state);
+            Ok(JsValue::undefined())
+        })
+    };
+    let back = native(dom, |d, _, _| {
+        crate::dom::request_traverse(d, -1);
+        Ok(JsValue::undefined())
+    });
+    let forward = native(dom, |d, _, _| {
+        crate::dom::request_traverse(d, 1);
+        Ok(JsValue::undefined())
+    });
+    let go = native(dom, |d, a, cx| {
+        let n = a.first().map(|v| v.to_number(cx)).transpose()?.unwrap_or(0.0);
+        let n = if n.is_finite() { n as i32 } else { 0 };
+        if n == 0 {
+            let here = d.borrow().doc.url.to_string();
+            crate::dom::navigate_to(d, &here);
+        } else {
+            crate::dom::request_traverse(d, n);
+        }
+        Ok(JsValue::undefined())
+    });
+    let attrs = Attribute::ENUMERABLE | Attribute::CONFIGURABLE;
+    let mut init = ObjectInitializer::with_native_data(data, cx);
+    init.accessor(js_string!("length"), Some(length), None, attrs)
+        .accessor(js_string!("state"), Some(state), None, attrs)
+        .property(js_string!("scrollRestoration"), js_string!("auto"), Attribute::all())
+        .function(push, js_string!("pushState"), 2)
+        .function(replace, js_string!("replaceState"), 2)
+        .function(back, js_string!("back"), 0)
+        .function(forward, js_string!("forward"), 0)
+        .function(go, js_string!("go"), 1);
+    init.build().into()
+}
+
+/// The tab traversed this document's history by `delta`: the entry it
+/// lands on becomes current, `popstate` fires (and `hashchange` when only
+/// the fragment changed).
+fn history_traverse(d: &Shared, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
+    let delta = a.first().and_then(|v| v.as_number()).unwrap_or(0.0) as i64;
+    let global = cx.global_object();
+    let history = global.get(js_string!("history"), cx)?;
+    let h = this_history(&history)?;
+    let (from, to, state) = {
+        let h = h.downcast_ref::<History>().expect("a History");
+        let entries = h.entries.borrow();
+        let from = entries[h.index.get()].0.clone();
+        let index = (h.index.get() as i64 + delta).clamp(0, entries.len() as i64 - 1) as usize;
+        h.index.set(index);
+        (from, entries[index].0.clone(), entries[index].1.clone())
+    };
+    let (from, to) = (crate::dom::js_value_string(&from, cx), crate::dom::js_value_string(&to, cx));
+    crate::dom::set_url(d, &to, 0)?;
+    let event = |name: &str, cx: &mut Context| -> JsResult<JsObject> {
+        let ctor = cx.global_object().get(js_string!("Event"), cx)?;
+        let ctor = ctor.as_constructor().ok_or_else(|| JsNativeError::typ().with_message("no Event"))?;
+        ctor.construct(&[JsValue::from(JsString::from(name))], None, cx)
+    };
+    let dispatch = global.get(js_string!("dispatchEvent"), cx)?.as_callable().ok_or_else(|| JsNativeError::typ().with_message("no dispatchEvent"))?;
+    let pop = event("popstate", cx)?;
+    pop.set(js_string!("state"), state, false, cx)?;
+    dispatch.call(&global.clone().into(), &[pop.into()], cx)?;
+    let base = |u: &str| u.split('#').next().unwrap_or("").to_owned();
+    if base(&from) == base(&to) && from != to {
+        let hc = event("hashchange", cx)?;
+        hc.set(js_string!("oldURL"), JsString::from(from.as_str()), false, cx)?;
+        hc.set(js_string!("newURL"), JsString::from(to.as_str()), false, cx)?;
+        dispatch.call(&global.into(), &[hc.into()], cx)?;
+    }
+    Ok(JsValue::undefined())
 }

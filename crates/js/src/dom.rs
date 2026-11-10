@@ -960,6 +960,31 @@ pub(crate) fn js_value_string(v: &JsValue, cx: &mut Context) -> String {
     v.to_string(cx).map(|s| s.to_std_string_escaped()).unwrap_or_default()
 }
 
+/// The document's address becomes `href` (same origin only); `mode` 1
+/// tells the tab it's a new history entry, 2 that it replaces the current
+/// one, 0 nothing (a traversal the tab made).
+pub(crate) fn set_url(d: &Shared, href: &str, mode: u8) -> JsResult<Url> {
+    let mut dom = d.borrow_mut();
+    let Some(url) = dom.doc.url.join(href).ok() else {
+        return Err(boa_engine::JsNativeError::typ().with_message(format!("invalid URL {href}")).into());
+    };
+    if url.origin() != dom.doc.url.origin() {
+        return Err(boa_engine::JsNativeError::typ()
+            .with_message(format!("SecurityError: {url} isn't same-origin with {}", dom.doc.url))
+            .into());
+    }
+    dom.doc.url = url.clone();
+    if mode != 0 {
+        dom.url_changes.push((url.clone(), mode == 2));
+    }
+    Ok(url)
+}
+
+/// Traverse session history by `delta` (the tab does it, then tells us).
+pub(crate) fn request_traverse(d: &Shared, delta: i32) {
+    d.borrow_mut().traverse = Some(delta);
+}
+
 /// Are scripts' console messages printed (debugging)?
 pub(crate) fn debug_logs(d: &Shared) -> bool {
     d.borrow().debug
@@ -1285,20 +1310,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("setUrl", 2, Box::new(|d, a, cx| {
         let href = arg_string(a, 0, cx)?;
         let mode = a.get_or_undefined(1).as_number().unwrap_or(0.0) as u8;
-        let mut dom = d.borrow_mut();
-        let Some(url) = dom.doc.url.join(&href).ok() else {
-            return Err(boa_engine::JsNativeError::typ().with_message(format!("invalid URL {href}")).into());
-        };
-        if url.origin() != dom.doc.url.origin() {
-            return Err(boa_engine::JsNativeError::typ()
-                .with_message(format!("SecurityError: {url} isn't same-origin with {}", dom.doc.url))
-                .into());
-        }
-        dom.doc.url = url.clone();
-        if mode != 0 {
-            dom.url_changes.push((url.clone(), mode == 2));
-        }
-        Ok(js_str(url.as_str()))
+        Ok(js_str(set_url(d, &href, mode)?.as_str()))
     }));
     add("traverse", 1, Box::new(|d, a, _| {
         let delta = a.get_or_undefined(0).as_number().unwrap_or(0.0) as i32;

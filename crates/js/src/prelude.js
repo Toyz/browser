@@ -1861,46 +1861,8 @@
     window.dispatchEvent(hc);
   };
 
-  // Session history for this document: pushState entries live here (with
-  // their state); the tab keeps the list of URLs and asks us to traverse.
-  const historyEntries = [{ url: N.url(), state: null }];
-  let historyIndex = 0;
-  const cloneState = (state) => {
-    if (state === undefined || state === null) return null;
-    try { return structuredClone(state); } catch (_) { return state; }
-  };
-  const history = {
-    get length() { return historyEntries.length; },
-    get state() { return historyEntries[historyIndex].state; },
-    scrollRestoration: "auto",
-    pushState(state, _title, url) {
-      const href = url === undefined || url === null ? N.setUrl(N.url(), 1) : N.setUrl(String(url), 1);
-      historyEntries.length = historyIndex + 1;
-      historyEntries.push({ url: href, state: cloneState(state) });
-      historyIndex++;
-    },
-    replaceState(state, _title, url) {
-      const href = url === undefined || url === null ? N.url() : N.setUrl(String(url), 2);
-      historyEntries[historyIndex] = { url: href, state: cloneState(state) };
-    },
-    back() { N.traverse(-1); },
-    forward() { N.traverse(1); },
-    go(n) { n = Number(n) || 0; if (n) N.traverse(n); else location.reload(); },
-  };
-  function traverse(delta) {
-    const from = historyEntries[historyIndex].url;
-    historyIndex = Math.max(0, Math.min(historyEntries.length - 1, historyIndex + delta));
-    const entry = historyEntries[historyIndex];
-    N.setUrl(entry.url, 0);
-    const ev = new Event("popstate");
-    ev.state = entry.state;
-    window.dispatchEvent(ev);
-    if (from.split("#")[0] === entry.url.split("#")[0] && from !== entry.url) {
-      const hc = new Event("hashchange");
-      hc.oldURL = from; hc.newURL = entry.url;
-      window.dispatchEvent(hc);
-    }
-  }
+  // Session history is native (window_api.rs).
+  const history = N.history;
 
   // getComputedStyle: the style engine's values (natively), with the size
   // the tab laid the element out at (or, before that, a block's estimate).
@@ -3300,7 +3262,7 @@
       fire(kind, MouseEvent);
     },
     __flushCanvases: flushCanvases,
-    __traverse: traverse,
+    __traverse: N.historyTraverse,
     __dispatchClick(id) {
       const n = wrap(id);
       if (!n) return false;
