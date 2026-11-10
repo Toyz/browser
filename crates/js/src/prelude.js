@@ -1872,46 +1872,9 @@
     for (const list of mediaLists) list._recheck();
   }
 
-  const resizeObservers = new Set();
-  class ResizeObserver {
-    constructor(cb) { this._cb = cb; this._targets = new Map(); this._late = new Set(); }
-    observe(el) {
-      if (!el) return;
-      this._targets.set(el, null);
-      resizeObservers.add(this);
-      if (N.measure(el.__id)) setTimeout(deliverResizes, 0);
-      // Not laid out yet: scripts saw it as 0x0 so far.
-      else this._late.add(el);
-    }
-    unobserve(el) { this._targets.delete(el); }
-    disconnect() { this._targets.clear(); resizeObservers.delete(this); }
-    takeRecords() { return []; }
-  }
-  // ResizeObserver callbacks for targets whose size is new.
-  function deliverResizes() {
-    for (const ro of resizeObservers) {
-      const entries = [];
-      for (const [el, last] of ro._targets) {
-        const r = N.rect(el.__id);
-        if (!r || (last && last[0] === r[2] && last[1] === r[3])) continue;
-        ro._targets.set(el, [r[2], r[3]]);
-        const size = [{ inlineSize: r[2], blockSize: r[3] }];
-        entries.push({ target: el, contentRect: new DOMRect(0, 0, r[2], r[3]), borderBoxSize: size, contentBoxSize: size, devicePixelContentBoxSize: size });
-      }
-      if (entries.length) { try { ro._cb(entries, ro); } catch (e) { reportError(e); } }
-      // A size that arrived after observe() also counts as a change from the
-      // 0x0 scripts saw (the first callback is often taken as the initial one).
-      let again = false;
-      for (const e of entries) {
-        if (ro._late.delete(e.target)) { ro._targets.set(e.target, null); again = true; }
-      }
-      if (again) setTimeout(deliverResizes, 16);
-    }
-  }
-  // The tab sent a layout (geometry.rs has it): observers hear what changed.
+  // The tab sent a layout (geometry.rs has it; observers.rs told the
+  // observers): media queries and `resize` follow the viewport.
   function layout(resized) {
-    deliverResizes();
-    deliverIntersections();
     if (resized) { recheckMedia(); window.dispatchEvent(new Event("resize")); }
   }
 
@@ -1969,92 +1932,6 @@
     previousSibling() { for (let c = this.currentNode.previousSibling; c; c = c.previousSibling) if (this._accept(c) === NodeFilter.FILTER_ACCEPT) return (this.currentNode = c); return null; }
   }
 
-  // Real browsers' entry class (polyfills replace observers without it).
-  class IntersectionObserverEntry {
-    constructor(init) { Object.assign(this, init); }
-  }
-  for (const k of ["target", "isIntersecting", "intersectionRatio", "boundingClientRect", "intersectionRect", "rootBounds", "time"]) {
-    Object.defineProperty(IntersectionObserverEntry.prototype, k, { configurable: true, writable: true, value: undefined });
-  }
-  const observer = (name) => class {
-    constructor(cb) { this._cb = cb; }
-    observe() {}
-    unobserve() {} disconnect() {} takeRecords() { return []; }
-  };
-
-  // IntersectionObserver from the tab's layout: a target intersects when the
-  // box it was last painted in overlaps the viewport (grown by rootMargin).
-  // One never painted is off-screen: the page list only draws what's in view
-  // (and measured elements always get a box). Without this, everything was
-  // "visible", and infinite feeds loaded page after page in the background.
-  const intersectionObservers = new Set();
-  class IntersectionObserver {
-    constructor(cb, opts = {}) {
-      this._cb = cb;
-      this._targets = new Map(); // element -> last isIntersecting (undefined: not reported yet)
-      this.root = opts.root || null;
-      this.rootMargin = opts.rootMargin || "0px";
-      const t = opts.threshold;
-      this.thresholds = Array.isArray(t) ? t.slice() : [typeof t === "number" ? t : 0];
-      const parts = String(this.rootMargin).trim().split(/\s+/).map((v) => ({ n: parseFloat(v) || 0, pct: /%$/.test(v) }));
-      const [top, right = top, bottom = top, left = right] = parts;
-      this._margin = { top, right, bottom, left };
-    }
-    observe(target) {
-      if (!target || target.__id === undefined || this._targets.has(target)) return;
-      this._targets.set(target, undefined);
-      intersectionObservers.add(this);
-      // Its nearest ancestors too: a box with nothing in it yet (an <img>
-      // waiting for its `src`) may not be painted, but where they are, it is.
-      for (let n = target, i = 0; n && n.nodeType === 1 && i <= 4; n = n.parentNode, i++) N.measure(n.__id);
-      setTimeout(() => this._check(false), 0);
-      // The tab says where it's painted, or that it isn't (off screen,
-      // nothing rendered). Should it never say (no layout comes), report
-      // anyway: callers wait for a first entry.
-      setTimeout(() => this._check(target), 3000);
-    }
-    unobserve(target) { this._targets.delete(target); }
-    disconnect() { this._targets.clear(); intersectionObservers.delete(this); }
-    takeRecords() { return []; }
-    // `settle`: the target whose wait for a first paint is over (it's
-    // reported even if it never got one).
-    _check(settle) {
-      const [vw, vh] = [window.innerWidth, window.innerHeight];
-      const rootRect = this.root && this.root.__id !== undefined ? N.rect(this.root.__id) : null;
-      const [rx, ry, rw, rh] = rootRect || [0, 0, vw, vh];
-      const px = (m, size) => (m.pct ? (m.n * size) / 100 : m.n);
-      const m = this._margin;
-      const box = { left: rx - px(m.left, rw), top: ry - px(m.top, rh), right: rx + rw + px(m.right, rw), bottom: ry + rh + px(m.bottom, rh) };
-      const entries = [];
-      for (const [target, last] of this._targets) {
-        const r = N.paintedRect(target.__id);
-        if (settle && settle !== target) continue;
-        if (!r && !settle && !N.unpainted(target.__id)) continue;
-        const [x, y, w, h] = r || [0, 0, 0, 0];
-        const ix = Math.max(x, box.left), iy = Math.max(y, box.top);
-        const ax = Math.min(x + w, box.right), ay = Math.min(y + h, box.bottom);
-        const inside = !!r && N.connected(target.__id) && ax >= ix && ay >= iy;
-        const area = w * h;
-        const ratio = !inside ? 0 : area > 0 ? ((ax - ix) * (ay - iy)) / area : 1;
-        const visible = inside && this.thresholds.some((t) => (t === 0 ? true : ratio >= t));
-        if (last === visible) continue;
-        if (N.debugIO && N.debugIO() && target.localName === "img") console.log("IODBG img " + (visible ? "in" : "out") + " t=" + Math.round(N.now()) + " r=" + JSON.stringify(r) + " root=" + (this.root ? this.root.localName : "vp") + " th=" + JSON.stringify(this.thresholds) + " margin=" + this.rootMargin + " src=" + (target.getAttribute("src") ? "y" : "n"));
-        if (visible && N.debugIO && N.debugIO()) console.log("IODBG visible " + target.localName + "." + String(target.className).slice(0, 60) + " r=" + JSON.stringify(r) + " own=" + JSON.stringify(N.rect(target.__id)) + " vp=" + vw + "x" + vh + " box=" + JSON.stringify(box));
-        this._targets.set(target, visible);
-        entries.push(new IntersectionObserverEntry({
-          target, isIntersecting: visible, intersectionRatio: ratio, time: N.now(),
-          boundingClientRect: new DOMRect(x, y, w, h),
-          intersectionRect: inside ? new DOMRect(ix, iy, ax - ix, ay - iy) : new DOMRect(0, 0, 0, 0),
-          rootBounds: new DOMRect(rx, ry, rw, rh),
-        }));
-      }
-      if (entries.length) { try { this._cb(entries, this); } catch (e) { reportError(e); } }
-    }
-  }
-  function deliverIntersections() {
-    for (const io of intersectionObservers) io._check(false);
-  }
-
   // Text selection: there's none we know of (the tab owns it).
   const selection = {
     rangeCount: 0, isCollapsed: true, type: "None", anchorNode: null, focusNode: null, anchorOffset: 0, focusOffset: 0,
@@ -2105,7 +1982,6 @@
       }
     },
     CustomElementRegistry: class CustomElementRegistry {},
-    ResizeObserverEntry: class ResizeObserverEntry {},
     CompositionEvent: class CompositionEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.data = i.data || ""; } },
     SubmitEvent: class SubmitEvent extends Event { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter || null; } },
     XPathResult: Object.assign(class XPathResult {}, { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 }),
@@ -2152,9 +2028,8 @@
     matchMedia,
     getComputedStyle: computedStyleOf,
     MutationObserver, MutationRecord: class MutationRecord {},
-    IntersectionObserver, IntersectionObserverEntry,
-    ResizeObserver, NodeFilter, TreeWalker,
-    PerformanceObserver: observer("PerformanceObserver"),
+    NodeFilter, TreeWalker,
+    PerformanceObserver: Object.assign(class PerformanceObserver { constructor(cb) { this._cb = cb; } observe() {} unobserve() {} disconnect() {} takeRecords() { return []; } }, { supportedEntryTypes: [] }),
     outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
     screen: { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24 },
     scrollTo: N.scrollTo, scrollBy: N.scrollBy, scroll: N.scrollTo,

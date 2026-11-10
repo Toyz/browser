@@ -102,6 +102,8 @@ impl Dom {
 
 #[path = "geometry.rs"]
 pub(crate) mod geometry;
+#[path = "observers.rs"]
+pub(crate) mod observers;
 
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
@@ -815,6 +817,7 @@ impl Runtime {
                     dom.laid_out = true;
                     dom.geometry.apply(&rects, &gone, viewport)
                 };
+                observers::deliver(&mut self.cx);
                 self.call_global("__layout", &[JsValue::from(resized)]);
                 if scrolled {
                     self.call_global("__fireWindow", &[js_str("scroll")]);
@@ -1842,6 +1845,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);
     geometry::install(&obj, dom, cx);
+    observers::install(dom, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 

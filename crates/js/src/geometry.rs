@@ -96,7 +96,7 @@ pub(crate) fn measure(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
 /// Where `node` is painted now: its own box if it has ever had one (not
 /// painted now: nowhere); one that never got a box (a 0x0 lazy `<img>`)
 /// goes by its nearest painted ancestor.
-fn painted_rect(dom: &Dom, node: NodeId) -> Option<[f32; 4]> {
+pub(super) fn painted_rect(dom: &Dom, node: NodeId) -> Option<[f32; 4]> {
     let g = &dom.geometry;
     if g.unpainted.contains(&node) {
         return None;
@@ -186,14 +186,14 @@ fn root_size(dom: &mut Dom, node: NodeId, axis: usize) -> f32 {
 }
 
 /// The element `this` is (a wrapper's `__id`).
-fn this_node(d: &Shared, this: &JsValue, cx: &mut Context) -> Option<NodeId> {
+pub(super) fn this_node(d: &Shared, this: &JsValue, cx: &mut Context) -> Option<NodeId> {
     let id = this.as_object()?.get(js_string!("__id"), cx).ok()?.as_number()?;
     let id = node_from_number(id);
     d.borrow().doc.get(id).map(|_| id)
 }
 
 /// A `DOMRect` (the page's class; a plain object before it exists).
-fn dom_rect(r: [f32; 4], cx: &mut Context) -> JsResult<JsValue> {
+pub(super) fn dom_rect(r: [f32; 4], cx: &mut Context) -> JsResult<JsValue> {
     let args = r.map(JsValue::from);
     let class = cx.global_object().get(js_string!("DOMRect"), cx)?;
     if let Some(class) = class.as_constructor() {

@@ -737,6 +737,28 @@ fn geometry_before_layout_is_estimated_natively() {
 }
 
 #[test]
+fn observers_are_native_classes() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        const io = new IntersectionObserver(() => {}, { rootMargin: "10px 20%", threshold: [0, 0.5] });
+        let threw = false;
+        try { new IntersectionObserver(); } catch (e) { threw = e instanceof TypeError; }
+        document.getElementById("o").textContent = [
+          "isIntersecting" in IntersectionObserverEntry.prototype, io instanceof IntersectionObserver, io.rootMargin, io.thresholds.join("+"), io.root,
+          typeof io.observe, io.takeRecords().length, threw, typeof ResizeObserver, typeof ResizeObserverEntry, typeof PerformanceObserver.supportedEntryTypes,
+          new IntersectionObserverEntry({ isIntersecting: true }).isIntersecting,
+        ].join(" ");
+        io.observe(document.body); io.unobserve(document.body); io.disconnect();
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, _host) = js::start(doc, opts);
+    assert_eq!(text_of(&doc, "o"), "true true 10px 20% 10px 20% 0+0.5  function 0 true function function object true");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
