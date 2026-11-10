@@ -477,10 +477,50 @@ impl Render for Feather {
             .flex_col()
             .bg(bg)
             .text_color(fg)
+            // Drawing our own frame (Linux), the window's edges are ours to
+            // resize it by too.
+            .capture_any_mouse_down(|event: &MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                if let Some(edge) = resize_edge(event.position, window) {
+                    window.start_window_resize(edge);
+                    cx.stop_propagation();
+                }
+            })
             .child(self.render_tab_strip(window, cx))
             .child(self.render_toolbar(cx))
             .child(div().flex_1().min_h_0().child(self.active_tab()))
     }
+}
+
+/// The window edge (or corner) under `position`, when we draw the window's
+/// frame ourselves and that edge isn't against a screen edge or another
+/// window (tiled).
+fn resize_edge(position: Point<Pixels>, window: &Window) -> Option<ResizeEdge> {
+    const GRIP: f32 = 6.0;
+    let Decorations::Client { tiling } = window.window_decorations() else { return None };
+    if window.is_maximized() || window.is_fullscreen() {
+        return None;
+    }
+    let size = window.viewport_size();
+    let (x, y) = (f32::from(position.x), f32::from(position.y));
+    let (w, h) = (f32::from(size.width), f32::from(size.height));
+    let left = x < GRIP && !tiling.left;
+    let right = x > w - GRIP && !tiling.right;
+    let top = y < GRIP && !tiling.top;
+    let bottom = y > h - GRIP && !tiling.bottom;
+    Some(match (top, bottom, left, right) {
+        (true, _, true, _) => ResizeEdge::TopLeft,
+        (true, _, _, true) => ResizeEdge::TopRight,
+        (_, true, true, _) => ResizeEdge::BottomLeft,
+        (_, true, _, true) => ResizeEdge::BottomRight,
+        (true, ..) => ResizeEdge::Top,
+        (_, true, ..) => ResizeEdge::Bottom,
+        (_, _, true, _) => ResizeEdge::Left,
+        (_, _, _, true) => ResizeEdge::Right,
+        _ => return None,
+    })
 }
 
 // gpui-kit embeds only the components' own icons; these are ours.
@@ -567,6 +607,10 @@ fn main() {
                 traffic_light_position: Some(point(px(13.), px(TAB_STRIP_HEIGHT / 2. - 7.))),
                 ..TitleBar::title_bar_options()
             }),
+            // Linux: we draw the frame (the tab strip, and TitleBar's window
+            // buttons) instead of the window manager stacking its own on top.
+            // (macOS and Windows hide theirs through `appears_transparent`.)
+            window_decorations: cfg!(target_os = "linux").then_some(WindowDecorations::Client),
             ..TitleBar::window_options()
         };
         let urls: Vec<Url> = args.urls.iter().filter_map(|arg| net::parse_input(arg).ok()).collect();
