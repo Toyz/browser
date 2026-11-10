@@ -436,3 +436,12 @@ fn any_transform_but_none_is_noted() {
     assert!(!style_of(&doc, &s, "span").transformed);
     assert!(style_of(&doc, &s, "b").transformed);
 }
+
+#[test]
+fn mixed_calc_widths_are_kept_for_the_box_builder() {
+    let (doc, s) = styled(r#"<div><p>x</p></div>"#, "div { max-width: calc(100% - 32px); width: calc(50% + 10px) } p { max-width: calc(100% - 32px); max-width: 300px }");
+    let d = style_of(&doc, &s, "div");
+    let m = d.mixed_widths.as_deref().expect("mixed widths");
+    assert_eq!((m.max_width, m.width, m.min_width), (Some((-32.0, 100.0)), Some((10.0, 50.0)), None));
+    assert!(style_of(&doc, &s, "p").mixed_widths.is_none(), "a later plain value clears it");
+}

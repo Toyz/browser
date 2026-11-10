@@ -1730,6 +1730,26 @@ impl Builder<'_> {
     ) -> Block {
         let base = self.percent_base.take();
         let mut style = style;
+        // `calc(100% - 32px)` widths, against our guess at the containing
+        // block (the layout only takes one or the other: alone, the
+        // percentage made BBC's page as wide as the window, margins and all).
+        if let Some(mixed) = style.mixed_widths.clone()
+            && !matches!(style.position, style::Position::Absolute | style::Position::Fixed)
+            && self.avail > 0.0
+        {
+            let avail = self.avail;
+            let at = |(px, pct): (f32, f32)| Length::Px((avail * pct / 100.0 + px).max(0.0));
+            let st = Arc::make_mut(&mut style);
+            if let Some(m) = mixed.width {
+                st.width = at(m);
+            }
+            if let Some(m) = mixed.min_width {
+                st.min_width = at(m);
+            }
+            if let Some(m) = mixed.max_width {
+                st.max_width = at(m);
+            }
+        }
         let through = std::mem::take(&mut self.viewport_sized);
         let mut chain = if id == self.doc.root() || through { base } else { None };
         if let Some(base) = base.filter(|_| !matches!(style.position, style::Position::Absolute | style::Position::Fixed)) {
@@ -1943,6 +1963,27 @@ impl Builder<'_> {
         // ...and so are grids that align their items in their areas
         // (`place-items: center`: a login form in the middle of the page).
         let aligns = |a: Option<style::Align>| a.is_some_and(|a| a != style::Align::Stretch);
+        // A grid of one implicit column with its items in order is a column
+        // of items aligned by `justify-items`: a flex column. (As a real grid
+        // its auto column took the content's max-content width, pictures
+        // sized in percentages at their natural size and all: BBC's
+        // `justify-items: center` wrapper made its front page 1296px wide.)
+        let kind = if kind == BlockKind::Grid && single_column_grid(&style, &children) {
+            let st = Arc::make_mut(&mut style);
+            st.flex_direction = style::FlexDirection::Column;
+            st.flex_wrap = false;
+            st.align_items = st.justify_items;
+            st.justify_content = None;
+            st.column_gap = Length::ZERO;
+            for child in &mut children {
+                if let LayoutBox::Block(b) = child {
+                    Arc::make_mut(&mut b.style).flex_shrink = 0.0;
+                }
+            }
+            BlockKind::Flex
+        } else {
+            kind
+        };
         let real = kind == BlockKind::Grid
             && (needs_real_grid(&children)
                 || ((content_sized_grid(&style) || aligns(style.justify_items) || aligns(style.align_items))
@@ -2449,6 +2490,33 @@ fn round_corner_children(style: &ComputedStyle, kind: &BlockKind, children: &mut
 /// Do these grid items need a real grid layout (named lines, rows, line
 /// ranges, lines counted from the end)? The row-based one only places items
 /// by column start and span, in reading order.
+/// A grid with no tracks of its own (one implicit column, rows as they
+/// come) whose items are placed in order.
+fn single_column_grid(s: &ComputedStyle, children: &[LayoutBox]) -> bool {
+    let auto = |t: &[style::TrackSize]| t.iter().all(|t| matches!(t, style::TrackSize::Auto));
+    s.grid_template_columns.is_none()
+        && s.grid_template_rows.is_none()
+        && s.grid_areas.is_none()
+        && s.grid_tracks.is_none()
+        && s.grid_auto.is_none()
+        && s.grid_columns.is_none_or(|n| n <= 1)
+        && !s.grid_auto_flow.0
+        && auto(&s.grid_auto_columns)
+        && auto(&s.grid_auto_rows)
+        && children.iter().all(|c| match c {
+            LayoutBox::Block(b) => {
+                let st = &b.style;
+                let auto_line = |l: &style::GridLine| matches!(l, style::GridLine::Auto | style::GridLine::Span(1));
+                st.grid_column.is_none()
+                    && st.grid_column_start.is_none()
+                    && st.grid_row_start.is_none()
+                    && st.grid_area.is_none()
+                    && [&st.grid_row_lines.0, &st.grid_row_lines.1, &st.grid_column_lines.0, &st.grid_column_lines.1].into_iter().all(auto_line)
+            }
+            _ => true,
+        })
+}
+
 fn needs_real_grid(children: &[LayoutBox]) -> bool {
     children.iter().any(|c| {
         let LayoutBox::Block(b) = c else { return false };
@@ -4114,6 +4182,24 @@ mod tests {
         assert_eq!(float.style.width, Length::Px(200.0));
         assert_eq!(row.style.border_width.top, 0.0, "anonymous boxes have no borders");
         assert_eq!(texts(&LayoutTree { rows: tree.rows[1..].to_vec(), ..Default::default() }), vec!["next", "three"]);
+    }
+
+    #[test]
+    fn one_column_grids_are_flex_columns_and_mixed_calc_resolves() {
+        // BBC: a `justify-items: center` wrapper grid around a page-wide
+        // grid capped at `calc(100% - 32px)`.
+        let tree = layout_css(
+            r#"<section class="wrap"><div class="inner"><p>a</p><p>b</p></div></section>"#,
+            ".wrap { display: grid; justify-items: center } .inner { width: 100%; max-width: calc(100% - 32px); margin-inline: 16px }",
+        );
+        let LayoutBox::Block(wrap) = &tree.rows[0].content else { panic!("{:?}", tree.rows[0].content) };
+        assert_eq!(wrap.kind, BlockKind::Flex);
+        assert_eq!(wrap.style.align_items, Some(style::Align::Center));
+        let LayoutBox::Block(inner) = &wrap.children[0] else { panic!() };
+        let Length::Px(max) = inner.style.max_width else { panic!("{:?}", inner.style.max_width) };
+        // The containing block is the viewport less the body's margins.
+        let expected = MediaEnv::default().width - 16.0 - 32.0;
+        assert!((max - expected).abs() < 1.0, "{max} vs {expected}");
     }
 
     #[test]

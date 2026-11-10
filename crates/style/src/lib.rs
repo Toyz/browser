@@ -199,7 +199,21 @@ pub struct ComputedStyle {
     /// widths, percentages of the parent's guess), for container units.
     pub est_width: Option<f32>,
     pub est_height: Option<f32>,
+    /// `width`, `min-width`, `max-width` given as a percentage and a fixed
+    /// part together (`calc(100% - 32px)`), as (px, percent): the layout
+    /// can't take a sum, so the box builder works it out against its guess
+    /// at the containing block's width (`width` and friends hold the
+    /// percentage alone meanwhile).
+    pub mixed_widths: Option<Arc<MixedWidths>>,
     pub custom: CustomProps,
+}
+
+/// See [`ComputedStyle::mixed_widths`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MixedWidths {
+    pub width: Option<(f32, f32)>,
+    pub min_width: Option<(f32, f32)>,
+    pub max_width: Option<(f32, f32)>,
 }
 
 impl ComputedStyle {
@@ -311,6 +325,7 @@ impl ComputedStyle {
             query_container: None,
             est_width: None,
             est_height: None,
+            mixed_widths: None,
             custom: CustomProps::default(),
         }
     }

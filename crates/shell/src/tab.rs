@@ -2050,6 +2050,10 @@ impl Tab {
         let _ = palette;
         div()
             .size_full()
+            // A content mask for the page: pinned and fixed boxes draw in
+            // the deferred layer, clipped to it (a sticky header pushed up
+            // by its container drew over the tab strip).
+            .overflow_hidden()
             .child(
                 list(self.list_state.clone(), move |ix, _window, _cx| {
                     let row = render::render_row(&layout.rows[ix], &rcx);

@@ -184,13 +184,20 @@ impl Styler {
             Decl::MaskPosition(v) => s.mask_position = *v,
             Decl::Width(v) => {
                 s.width = len(v);
+                set_mixed(s, |m| &mut m.width, v.mixed(&cx));
                 // (`width: fit-content` follows this with `FitWidth(true)`.)
                 s.fit_width = false;
             }
             Decl::Height(v) => s.height = len(v),
-            Decl::MinWidth(v) => s.min_width = len(v),
+            Decl::MinWidth(v) => {
+                s.min_width = len(v);
+                set_mixed(s, |m| &mut m.min_width, v.mixed(&cx));
+            }
             Decl::MinHeight(v) => s.min_height = len(v),
-            Decl::MaxWidth(v) => s.max_width = len(v),
+            Decl::MaxWidth(v) => {
+                s.max_width = len(v);
+                set_mixed(s, |m| &mut m.max_width, v.mixed(&cx));
+            }
             Decl::MaxHeight(v) => s.max_height = len(v),
             Decl::FlexDirection(v) => s.flex_direction = *v,
             Decl::FlexWrap(v) => s.flex_wrap = *v,
@@ -502,5 +509,17 @@ fn resolve_template(t: &GridTemplateSpec, len: &impl Fn(&LenSpec) -> Length) -> 
             })
             .collect(),
         names: t.names.clone(),
+    }
+}
+
+/// Note (or clear) one of the box's mixed `calc()` widths.
+fn set_mixed(s: &mut ComputedStyle, field: fn(&mut crate::MixedWidths) -> &mut Option<(f32, f32)>, value: Option<(f32, f32)>) {
+    if value.is_none() && s.mixed_widths.as_ref().is_none_or(|m| field(&mut (**m).clone()).is_none()) {
+        return;
+    }
+    let m = Arc::make_mut(s.mixed_widths.get_or_insert_default());
+    *field(m) = value;
+    if *m == crate::MixedWidths::default() {
+        s.mixed_widths = None;
     }
 }

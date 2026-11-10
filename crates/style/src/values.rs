@@ -189,6 +189,32 @@ impl LenSpec {
         LenSpec::Lin(Lin::px(v))
     }
 
+    /// A percentage and a fixed part together (`calc(100% - 32px)`), as
+    /// (px, percent); `None` for anything else.
+    pub fn mixed(&self, cx: &ResolveCx) -> Option<(f32, f32)> {
+        let (px, pct) = match self {
+            LenSpec::Lin(l) => (l.abs_px(cx), l.pct),
+            LenSpec::Sum(terms) => {
+                let (mut px, mut pct) = (0.0, 0.0);
+                for (k, term) in terms {
+                    match term {
+                        LenSpec::Lin(l) => {
+                            px += k * l.abs_px(cx);
+                            pct += k * l.pct;
+                        }
+                        other => match other.resolve(cx) {
+                            Length::Px(v) => px += k * v,
+                            _ => return None,
+                        },
+                    }
+                }
+                (px, pct)
+            }
+            _ => return None,
+        };
+        (pct != 0.0 && px != 0.0).then_some((px, pct))
+    }
+
     pub fn resolve(&self, cx: &ResolveCx) -> Length {
         match self {
             LenSpec::Auto => Length::Auto,
