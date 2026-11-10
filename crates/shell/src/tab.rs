@@ -916,6 +916,14 @@ impl Tab {
         let view = self.list_state.viewport_bounds();
         let scroll = -self.list_state.scroll_px_offset_for_scrollbar().y;
         let y = f32::from(view.origin.y) - crate::CHROME_HEIGHT + f32::from(top - scroll);
+        // Its row as a stand-in says where an element scrolled out of view
+        // is (a jump link's target). In a row that's showing, it's just not
+        // painted yet (or hidden): no answer, rather than the row's width
+        // (GitHub's breadcrumbs, each "as wide as the page", collapsed).
+        let shown = y < f32::from(view.size.height) && y + f32::from(h) > 0.0;
+        if shown {
+            return None;
+        }
         Some([f32::from(view.origin.x), y, f32::from(view.size.width), f32::from(h)])
     }
 
@@ -1678,11 +1686,12 @@ impl Tab {
                 // Keep drawing meanwhile, as a window on screen would: scripts
                 // measuring the page hear about layout only from drawn frames.
                 let until = std::time::Instant::now() + Duration::from_millis(job.wait);
+                // (FEATHER_FRAME_MS=16 draws at a display's rate: pages that
+                // react to layout can differ from the default's 100ms.)
+                let every = std::env::var("FEATHER_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
                 while std::time::Instant::now() < until {
                     cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
-                    // At a display's rate: scripts waiting on a layout (a
-                    // forced one) wait for frames.
-                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                    cx.background_executor().timer(Duration::from_millis(every)).await;
                 }
             }
             // Wait (a while) for images, then let the list lay out and measure.

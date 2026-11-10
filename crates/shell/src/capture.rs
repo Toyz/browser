@@ -46,6 +46,8 @@ Environment:
   FEATHER_EVAL=FILE      Run this script in each page, FEATHER_EVAL_DELAY ms
                          in (default 5000; negative: before the page's own)
   FEATHER_DUMP_DOM=FILE  Keep writing the latest DOM snapshot here
+  FEATHER_FRAME_MS=N     Draw every N ms while waiting (default 100; 16 is
+                         a display's rate)
   FEATHER_REFLOW         Experimental: scripts reading layout right after
                          changing the DOM wait for a fresh layout
   FEATHER_JS_TRACE       Log who removes large subtrees
