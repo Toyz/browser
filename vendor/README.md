@@ -57,6 +57,10 @@ Drop these when Boa releases include equivalent fixes.
   pivot; glyphs are rasterized at the scaled size. Layout and hit testing
   are unchanged. It's CSS `transform: scale()`: GPUI could transform only
   monochrome SVGs.
+- `src/elements/list.rs`: `ListState::item_extent` (where an item starts
+  and how tall it is, measured or estimated) and `offset_for_y` (the item
+  and offset at a pixel position), so scripts can be told where off-screen
+  elements are and `window.scrollTo` can scroll past rows not yet measured.
 - `src/elements/img.rs`: animated images keep playing while the window
   isn't the focused one (GPUI paused them, which browsers don't).
 
@@ -69,6 +73,9 @@ Drop these when Boa releases include equivalent fixes.
   `id_for_native_font` tells instances apart by their `wght`. Without it,
   every weight of a variable web font (Inter, Roboto Flex...) drew as its
   default one: NASA's 700-weight headline was regular.
+- `src/text_system.rs` (`add_fonts`): fonts CoreText can't open or name are
+  skipped. font-kit's `family_name` aborts the app on a web font without a
+  family name.
 
 ## gpui-component 0.9.0
 

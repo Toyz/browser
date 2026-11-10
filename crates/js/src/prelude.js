@@ -2013,7 +2013,15 @@
   }
   function measure(el) {
     if (!el || el.__id === undefined) return null;
-    if (!measuredIds.has(el.__id)) { measuredIds.add(el.__id); N.touch(); }
+    if (!measuredIds.has(el.__id)) {
+      measuredIds.add(el.__id);
+      N.touch();
+      // Never reported: ask the tab where it is now.
+      if (!layoutRects.has(el.__id)) {
+        const r = N.locate(el.__id);
+        if (r) layoutRects.set(el.__id, r);
+      }
+    }
     return layoutRects.get(el.__id) || null;
   }
   const resizeObservers = new Set();
@@ -2259,6 +2267,11 @@
     serviceWorker: undefined,
   };
 
+  // Where the page is scrolled, as the tab last said (getters: assigning
+  // them would copy one value).
+  for (const [name, get] of [["scrollX", N.scrollX], ["pageXOffset", N.scrollX], ["scrollY", N.scrollY], ["pageYOffset", N.scrollY]]) {
+    Object.defineProperty(window, name, { get, configurable: true });
+  }
   Object.assign(window, {
     window, self: window, globalThis: window, top: window, parent: window, frames: window,
     document, location, history, navigator: navigatorImpl, console: consoleImpl, getSelection,
@@ -2350,8 +2363,7 @@
     PerformanceObserver: observer("PerformanceObserver"),
     outerWidth: 1280, outerHeight: 900, devicePixelRatio: 2,
     screen: { width: 1512, height: 982, availWidth: 1512, availHeight: 950, colorDepth: 24 },
-    scrollX: 0, scrollY: 0, pageXOffset: 0, pageYOffset: 0,
-    scrollTo() {}, scrollBy() {}, scroll() {},
+    scrollTo: N.scrollTo, scrollBy: N.scrollBy, scroll: N.scrollTo,
     alert() {}, confirm() { return false; }, prompt() { return null; },
     open() { return null; }, close() {}, focus() {}, blur() {}, print() {},
     // Messages to this window arrive asynchronously, as `message` events.

@@ -339,10 +339,13 @@ impl Document {
     }
 
     pub fn descendants(&self, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
-        let mut stack = vec![id];
+        // (Nothing, for a node not in this document.)
+        let mut stack = if self.nodes.contains_key(id) { vec![id] } else { Vec::new() };
         std::iter::from_fn(move || {
             let next = stack.pop()?;
-            stack.extend(self.nodes[next].children.iter().rev().copied());
+            if let Some(node) = self.nodes.get(next) {
+                stack.extend(node.children.iter().rev().copied());
+            }
             Some(next)
         })
     }

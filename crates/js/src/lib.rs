@@ -84,7 +84,7 @@ pub enum ToJs {
     /// elements that stopped being painted (hidden, or scrolled out of the
     /// rows on screen); their last rect stays for `getBoundingClientRect`,
     /// but they no longer intersect anything.
-    Layout { rects: Vec<(NodeId, [f32; 4])>, gone: Vec<NodeId>, viewport: (f32, f32) },
+    Layout { rects: Vec<(NodeId, [f32; 4])>, gone: Vec<NodeId>, viewport: (f32, f32), scroll: (f32, f32) },
     /// Back/forward between history entries of this document (made by
     /// `pushState`): `popstate` with the entry `delta` steps away.
     Traverse { delta: i32 },
@@ -111,6 +111,13 @@ pub enum FromJs {
     Traverse(i32),
     /// Scripts moved focus (`el.focus()`, `el.blur()`): `None` is nothing.
     Focus(Option<NodeId>),
+    /// Where is this element (viewport rect: x, y, width, height)? Asked,
+    /// and waited for, the first time a script measures one the tab hasn't
+    /// reported (a jump link scrolling to a section never on screen).
+    Locate(NodeId, std::sync::mpsc::Sender<Option<[f32; 4]>>),
+    /// `window.scrollTo()` and friends: scroll the page to (x, y), px;
+    /// `smooth`: animated (`behavior: "smooth"`).
+    ScrollTo { x: f32, y: f32, smooth: bool },
 }
 
 /// The tab's handle on a page's script thread.

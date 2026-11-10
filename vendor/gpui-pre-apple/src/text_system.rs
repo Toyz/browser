@@ -283,7 +283,10 @@ impl AppleTextSystemState {
                 Cow::Owned(bytes) => Ok(Handle::from_memory(Arc::new(bytes), 0)),
             })
             .collect::<Result<Vec<_>>>()?;
-        self.memory_source.add_fonts(fonts.into_iter())?;
+        // Feather: web fonts CoreText can't open or name are left out
+        // (font-kit aborts the app on a font without a family name).
+        let fonts = fonts.into_iter().filter(core_text_can_name);
+        self.memory_source.add_fonts(fonts)?;
         Ok(())
     }
 
@@ -1145,4 +1148,25 @@ mod tests {
         assert_eq!(layout.len, 0);
         assert!(layout.runs.is_empty());
     }
+}
+
+/// Feather: can CoreText load this font and tell its family name?
+fn core_text_can_name(handle: &Handle) -> bool {
+    use core_foundation::base::{CFRelease, CFTypeRef};
+    unsafe extern "C" {
+        fn CTFontCopyFamilyName(font: core_text::font::CTFontRef) -> CFTypeRef;
+    }
+    let Handle::Memory { bytes, .. } = handle else { return true };
+    let provider = core_graphics::data_provider::CGDataProvider::from_buffer(bytes.clone());
+    let Ok(cg) = core_graphics::font::CGFont::from_data_provider(provider) else { return false };
+    let font = core_text::font::new_from_CGFont(&cg, 12.0);
+    // SAFETY: a live CTFont; the copied name (if any) is released here.
+    unsafe {
+        let name = CTFontCopyFamilyName(core_foundation::base::TCFType::as_concrete_TypeRef(&font));
+        if name.is_null() {
+            return false;
+        }
+        CFRelease(name);
+    }
+    true
 }

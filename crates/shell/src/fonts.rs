@@ -69,16 +69,35 @@ pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16), fallback: Option<&str>) -
         }
     };
     let variable = ttf_parser::Face::parse(&data, 0).is_ok_and(|f| f.is_variable());
-    if !variable {
-        return vec![(data, family)];
-    }
-    let (lo, hi) = (weights.0.min(weights.1), weights.0.max(weights.1));
-    let instances: Vec<(Vec<u8>, String)> = INSTANCE_WEIGHTS
-        .iter()
-        .filter(|w| (lo..=hi).contains(*w))
-        .filter_map(|&w| instance(&data, w, &family).map(|d| (d, family.clone())))
-        .collect();
-    if instances.is_empty() { vec![(data, family)] } else { instances }
+    let fonts = if !variable {
+        vec![(data, family)]
+    } else {
+        let (lo, hi) = (weights.0.min(weights.1), weights.0.max(weights.1));
+        let instances: Vec<(Vec<u8>, String)> = INSTANCE_WEIGHTS
+            .iter()
+            .filter(|w| (lo..=hi).contains(*w))
+            .filter_map(|&w| instance(&data, w, &family).map(|d| (d, family.clone())))
+            .collect();
+        if instances.is_empty() { vec![(data, family)] } else { instances }
+    };
+    // Every font handed to the platform has a family name it can read
+    // (CoreText's font-kit binding aborts the app on one without).
+    fonts
+        .into_iter()
+        .filter_map(|(data, family)| {
+            if has_family_name(&data) {
+                Some((data, family))
+            } else {
+                renamed(&data, &family).filter(|d| has_family_name(d)).map(|d| (d, family))
+            }
+        })
+        .collect()
+}
+
+/// Does the font parse, with a readable family name (name ID 1 or 16)?
+fn has_family_name(data: &[u8]) -> bool {
+    let Ok(face) = ttf_parser::Face::parse(data, 0) else { return false };
+    face.names().into_iter().any(|n| matches!(n.name_id, 1 | 16) && n.to_string().is_some_and(|s| !s.trim().is_empty()))
 }
 
 /// A static instance of a variable font at `weight` (other axes at default).

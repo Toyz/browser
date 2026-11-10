@@ -142,7 +142,14 @@ pub struct Tab {
     layout_keep: HashSet<NodeId>,
     /// Ones of those reported unpainted and not painted since.
     unpainted_sent: HashSet<NodeId>,
+    /// Which row each measured element is in, for the layout it was
+    /// worked out for (see `rows_of_measured`).
+    measured_rows: Option<(usize, usize, HashMap<NodeId, usize>)>,
     layout_viewport_sent: (f32, f32),
+    /// The scroll position the page's scripts were last told.
+    layout_scroll_sent: (f32, f32),
+    /// A smooth scroll in progress: (from, to, started), px of the page.
+    scroll_animation: Option<(f32, f32, std::time::Instant)>,
     layout_scheduled: Rc<std::cell::Cell<bool>>,
     /// A restyle is building; another was asked for meanwhile.
     restyle_busy: bool,
@@ -261,7 +268,10 @@ impl Tab {
             layout_painted: HashSet::new(),
             layout_keep: HashSet::new(),
             unpainted_sent: HashSet::new(),
+            measured_rows: None,
             layout_viewport_sent: (0.0, 0.0),
+            layout_scroll_sent: (0.0, 0.0),
+            scroll_animation: None,
             layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
             hover_inline: None,
@@ -556,6 +566,7 @@ impl Tab {
         self.layout_keep.clear();
         self.unpainted_sent.clear();
         self.layout_viewport_sent = (0.0, 0.0);
+        self.layout_scroll_sent = (0.0, 0.0);
         self._scroll_end = None;
         self.hover_styler = None;
         self.forms = Default::default();
@@ -626,10 +637,32 @@ impl Tab {
         let seen = self.bounds_seen.borrow();
         let now: HashSet<NodeId> = seen.iter().filter(|(_, f)| **f == frame).map(|(n, _)| *n).collect();
         drop(seen);
+        // Scrolled: scripts hear it (`window.scrollY`, `scroll` events) even
+        // when nothing they measure moved.
+        let scroll = f32::from(-self.list_state.scroll_px_offset_for_scrollbar().y).max(0.0).round();
+        if scroll != self.layout_scroll_sent.1 && !self.layout_scheduled.replace(true) {
+            let tab = cx.entity().downgrade();
+            cx.defer(move |cx| {
+                tab.update(cx, |this, _| this.send_layout()).ok();
+            });
+        }
         if now.is_empty() && self.layout_painted.is_empty() && self.layout_keep.is_empty() {
             return;
         }
         let mut gone: Vec<NodeId> = self.layout_painted.difference(&now).copied().collect();
+        // Measured elements in rows scrolled out of the list: about where
+        // their row is (a jump link scrolling to a section asks where it is
+        // before it was ever on screen). One in a row that's showing but
+        // wasn't painted is hidden: gone.
+        let approx = self.offscreen_rects(&now);
+        if !approx.is_empty() {
+            let mut store = self.measured_bounds.borrow_mut();
+            for (n, r) in &approx {
+                store.0.insert(*n, *r);
+            }
+            drop(store);
+            gone.retain(|n| !approx.contains_key(n));
+        }
         // Measured elements the layout has (or, rendering nothing, doesn't
         // have) a box for that this paint didn't paint: off screen. Said
         // once, so an IntersectionObserver's first entry comes from where
@@ -641,7 +674,7 @@ impl Tab {
         let never: Vec<NodeId> = self
             .layout_keep
             .iter()
-            .filter(|n| !now.contains(n) && !self.layout_painted.contains(n) && !self.unpainted_sent.contains(n))
+            .filter(|n| !now.contains(n) && !self.layout_painted.contains(n) && !self.unpainted_sent.contains(n) && !approx.contains_key(n))
             .copied()
             .collect();
         self.unpainted_sent.extend(never.iter().copied());
@@ -657,7 +690,7 @@ impl Tab {
             appeared = true;
         }
         self.layout_painted = now;
-        if gone.is_empty() && !appeared {
+        if gone.is_empty() && !appeared && approx.is_empty() {
             return;
         }
         self.layout_gone.extend(gone);
@@ -667,6 +700,100 @@ impl Tab {
                 tab.update(cx, |this, _| this.send_layout()).ok();
             });
         }
+    }
+
+    /// Where `node` is for a script asking (viewport rect): where it was
+    /// painted, else where its row is.
+    pub(super) fn locate(&mut self, node: NodeId) -> Option<[f32; 4]> {
+        if self.layout_painted.contains(&node)
+            && let Some(r) = self.measured_bounds.borrow().0.get(&node)
+        {
+            return Some(*r);
+        }
+        let page = self.page.as_ref()?;
+        let layout = page.layout.clone();
+        // An element without a box of its own (nothing measured it yet):
+        // where its first laid-out descendant is.
+        let mut wanted: HashSet<NodeId> = HashSet::from([node]);
+        if let Some(doc) = page.doc.as_ref() {
+            wanted.extend(doc.descendants(node).take(256));
+        }
+        let ix = rows_of(&layout, &wanted).into_values().min()?;
+        let (top, h) = self.list_state.item_extent(ix)?;
+        let view = self.list_state.viewport_bounds();
+        let scroll = -self.list_state.scroll_px_offset_for_scrollbar().y;
+        let y = f32::from(view.origin.y) - crate::CHROME_HEIGHT + f32::from(top - scroll);
+        Some([f32::from(view.origin.x), y, f32::from(view.size.width), f32::from(h)])
+    }
+
+    /// The page's scroll position, px from the top.
+    fn scroll_y(&self) -> f32 {
+        f32::from(-self.list_state.scroll_px_offset_for_scrollbar().y).max(0.0)
+    }
+
+    /// Scroll the page to `y` px (by row: the list's own pixel offsets stop
+    /// at the rows it has measured).
+    fn scroll_page_to(&self, y: f32) {
+        let offset = self.list_state.offset_for_y(px(y.max(0.0)));
+        self.list_state.scroll_to(offset);
+    }
+
+    /// Scripts scrolled the page (`window.scrollTo`): there at once, or
+    /// animated for `behavior: "smooth"`.
+    pub(super) fn script_scroll(&mut self, y: f32, smooth: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if smooth {
+            self.scroll_animation = Some((self.scroll_y(), y, std::time::Instant::now()));
+            window.request_animation_frame();
+        } else {
+            self.scroll_animation = None;
+            self.scroll_page_to(y);
+        }
+        cx.notify();
+    }
+
+    /// A frame of a smooth scroll (ease-in-out, 350ms).
+    fn step_scroll_animation(&mut self, window: &mut Window) {
+        let Some((from, to, started)) = self.scroll_animation else { return };
+        let t = (started.elapsed().as_secs_f32() / 0.35).min(1.0);
+        let eased = if t < 0.5 { 2.0 * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(2) / 2.0 };
+        self.scroll_page_to(from + (to - from) * eased);
+        if t < 1.0 {
+            window.request_animation_frame();
+        } else {
+            self.scroll_animation = None;
+        }
+    }
+
+    /// Approximate rects (window coordinates, as painted ones are) for the
+    /// measured elements not painted this frame whose row is out of view:
+    /// the row's box, from the heights the list has measured.
+    fn offscreen_rects(&mut self, painted: &HashSet<NodeId>) -> HashMap<NodeId, [f32; 4]> {
+        let Some(page) = self.page.as_ref() else { return HashMap::new() };
+        let layout = page.layout.clone();
+        let key = (Arc::as_ptr(&layout) as usize, self.layout_keep.len());
+        if self.measured_rows.as_ref().is_none_or(|(p, n, _)| (*p, *n) != key) {
+            self.measured_rows = Some((key.0, key.1, rows_of(&layout, &self.layout_keep)));
+        }
+        let rows = &self.measured_rows.as_ref().expect("just set").2;
+        let view = self.list_state.viewport_bounds();
+        let scroll = -self.list_state.scroll_px_offset_for_scrollbar().y;
+        let (left, width, height) = (f32::from(view.origin.x), f32::from(view.size.width), f32::from(view.size.height));
+        let list_top = f32::from(view.origin.y) - crate::CHROME_HEIGHT;
+        let mut out = HashMap::new();
+        for (&node, &ix) in rows {
+            if painted.contains(&node) {
+                continue;
+            }
+            let Some((top, h)) = self.list_state.item_extent(ix) else { continue };
+            let y = f32::from(top - scroll);
+            let h = f32::from(h);
+            // A row in view was rendered: an element in it not painted is hidden.
+            if y + h > 0.0 && y < height {
+                continue;
+            }
+            out.insert(node, [left, list_top + y, width, h]);
+        }
+        out
     }
 
     /// Tell the page's scripts where the elements they measure were
@@ -680,13 +807,15 @@ impl Tab {
                 store.0.iter().filter(|(n, r)| self.layout_sent.get(n) != Some(r)).map(|(n, r)| (*n, *r)).collect();
             (changed, store.1)
         };
-        if rects.is_empty() && self.layout_gone.is_empty() && viewport == self.layout_viewport_sent {
+        let scroll = (0.0, f32::from(-self.list_state.scroll_px_offset_for_scrollbar().y).max(0.0).round());
+        if rects.is_empty() && self.layout_gone.is_empty() && viewport == self.layout_viewport_sent && scroll == self.layout_scroll_sent {
             return;
         }
         for (n, r) in &rects {
             self.layout_sent.insert(*n, *r);
         }
         self.layout_viewport_sent = viewport;
+        self.layout_scroll_sent = scroll;
         let gone = std::mem::take(&mut self.layout_gone);
         if std::env::var_os("FEATHER_DEBUG_IO").is_some()
             && let Some(doc) = self.page.as_ref().and_then(|p| p.doc.as_ref())
@@ -704,7 +833,7 @@ impl Tab {
                 with_rect
             );
         }
-        host.send(js::ToJs::Layout { rects, gone, viewport });
+        host.send(js::ToJs::Layout { rects, gone, viewport, scroll });
     }
 
     /// The page's scripts changed its address (`history.pushState`, or
@@ -2160,6 +2289,7 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
+        self.step_scroll_animation(window);
         self.animation_frame(window);
         self.apply_row_hint(window);
         let theme = cx.theme();
@@ -2236,6 +2366,8 @@ impl Render for Tab {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, _| this.script_key("keydown", &event.keystroke)))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, _| this.script_key("keyup", &event.keystroke)))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                // The reader scrolling takes over from a script's smooth scroll.
+                this.scroll_animation = None;
                 this.scrolling_until = Some(std::time::Instant::now() + Duration::from_millis(150));
                 // Wheel listeners (zooming maps and graphs): deltaY > 0 scrolls down.
                 let delta = event.delta.pixel_delta(px(16.));
@@ -2311,4 +2443,54 @@ impl Render for Tab {
             .children(status)
             .children(self.render_auth_prompt(cx))
     }
+}
+
+/// The row each of `wanted` is in (the first, for a container split
+/// across rows).
+fn rows_of(layout: &render::LayoutTree, wanted: &HashSet<NodeId>) -> HashMap<NodeId, usize> {
+    use render::boxes::{Block, InlineObject, LayoutBox};
+    type Found = HashMap<NodeId, usize>;
+    fn note(n: Option<NodeId>, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
+        if let Some(n) = n.filter(|n| wanted.contains(n)) {
+            out.entry(n).or_insert(ix);
+        }
+    }
+    fn block(b: &Block, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
+        note(b.node, ix, wanted, out);
+        for c in &b.children {
+            walk(c, ix, wanted, out);
+        }
+    }
+    fn walk(b: &LayoutBox, ix: usize, wanted: &HashSet<NodeId>, out: &mut Found) {
+        match b {
+            LayoutBox::Block(b) => block(b, ix, wanted, out),
+            LayoutBox::Image(i) => note(i.node, ix, wanted, out),
+            LayoutBox::Paragraph(p) => {
+                for span in p.spans.iter() {
+                    note(span.style.node, ix, wanted, out);
+                }
+                for o in &p.objects {
+                    match o {
+                        InlineObject::Image(i) => note(i.node, ix, wanted, out),
+                        InlineObject::Block(a) => note(a.node, ix, wanted, out),
+                        InlineObject::BlockBox(b) => block(b, ix, wanted, out),
+                    }
+                }
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    for (ix, row) in layout.rows.iter().enumerate() {
+        for w in row.wrappers.iter() {
+            note(w.node, ix, wanted, &mut out);
+        }
+        walk(&row.content, ix, wanted, &mut out);
+        for a in &row.absolutes {
+            walk(a, ix, wanted, &mut out);
+        }
+    }
+    out
 }

@@ -132,6 +132,10 @@ pub(crate) struct Dom {
     debug: bool,
     dark: bool,
     started: Instant,
+    /// To the tab (`locate`'s questions, scrolling).
+    tab: async_channel::Sender<FromJs>,
+    /// How far the page is scrolled (`window.scrollX`/`scrollY`), px.
+    scroll: (f32, f32),
     /// Shadow roots by host (and back).
     shadows: HashMap<NodeId, NodeId>,
     hosts: HashMap<NodeId, NodeId>,
@@ -215,6 +219,8 @@ impl Runtime {
             debug: opts.debug,
             dark: opts.dark,
             started: Instant::now(),
+            tab: updates.clone(),
+            scroll: (0.0, 0.0),
         }));
         let modules = Rc::new(crate::modules::WebModules::new(opts.fetch_text.clone(), dom.borrow().doc.url.clone(), opts.debug));
         let hooks = Rc::new(Hooks::default());
@@ -742,7 +748,8 @@ impl Runtime {
                 ];
                 self.call_global("__dispatchMouse", &args);
             }
-            ToJs::Layout { rects, gone, viewport } => {
+            ToJs::Layout { rects, gone, viewport, scroll } => {
+                let scrolled = std::mem::replace(&mut self.dom.borrow_mut().scroll, scroll) != scroll;
                 let flat: Vec<JsValue> = rects
                     .iter()
                     .flat_map(|(n, r)| [JsValue::from(node_to_number(*n)), r[0].into(), r[1].into(), r[2].into(), r[3].into()])
@@ -750,6 +757,9 @@ impl Runtime {
                 let flat = JsArray::from_iter(flat, &mut self.cx);
                 let gone = JsArray::from_iter(gone.iter().map(|n| JsValue::from(node_to_number(*n))), &mut self.cx);
                 self.call_global("__layout", &[flat.into(), JsValue::from(viewport.0), JsValue::from(viewport.1), gone.into()]);
+                if scrolled {
+                    self.call_global("__fireWindow", &[js_str("scroll")]);
+                }
             }
             ToJs::Focus { node } => {
                 let id = node.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
@@ -1349,6 +1359,58 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
                 None => return Ok(JsValue::from(false)),
             }
         }
+    }));
+    // window.scrollX / scrollY (getters) and scrollTo / scroll / scrollBy:
+    // `(x, y)` or `({ left, top, behavior })`.
+    add("scrollX", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().scroll.0))));
+    add("scrollY", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().scroll.1))));
+    fn scroll_target(d: &Shared, a: &[JsValue], cx: &mut Context, relative: bool) -> JsResult<(f32, f32, bool)> {
+        let now = d.borrow().scroll;
+        let base = if relative { now } else { (0.0, 0.0) };
+        let num = |v: &JsValue, cx: &mut Context| -> JsResult<Option<f32>> {
+            if v.is_undefined() { Ok(None) } else { Ok(Some(v.to_number(cx)? as f32)).map(|n| n.filter(|n| n.is_finite())) }
+        };
+        let (x, y, smooth) = match a.first().and_then(|v| v.as_object()) {
+            Some(o) => {
+                let left = o.get(js_string!("left"), cx)?;
+                let top = o.get(js_string!("top"), cx)?;
+                let behavior = o.get(js_string!("behavior"), cx)?;
+                let smooth = behavior.as_string().is_some_and(|b| b.to_std_string_escaped() == "smooth");
+                (num(&left, cx)?, num(&top, cx)?, smooth)
+            }
+            None => (num(a.first().unwrap_or(&JsValue::undefined()), cx)?, num(a.get(1).unwrap_or(&JsValue::undefined()), cx)?, false),
+        };
+        Ok((x.map_or(now.0, |x| base.0 + x).max(0.0), y.map_or(now.1, |y| base.1 + y).max(0.0), smooth))
+    }
+    for (name, relative) in [("scrollTo", false), ("scrollBy", true)] {
+        add(name, 2, Box::new(move |d, a, cx| {
+            let (x, y, smooth) = scroll_target(d, a, cx, relative)?;
+            let tab = {
+                let mut dom = d.borrow_mut();
+                // Scripts reading it right after see where they put it.
+                dom.scroll = (x, y);
+                dom.tab.clone()
+            };
+            tab.send_blocking(FromJs::ScrollTo { x, y, smooth }).ok();
+            Ok(JsValue::undefined())
+        }));
+    }
+    // Where the tab has an element, asked and waited for (briefly: the tab
+    // answers between frames).
+    add("locate", 1, Box::new(|d, a, cx| {
+        let (tab, node) = {
+            let dom = d.borrow();
+            (dom.tab.clone(), arg_node(&dom, a, 0))
+        };
+        let Some(node) = node else { return Ok(JsValue::null()) };
+        let (tx, rx) = std::sync::mpsc::channel();
+        if tab.send_blocking(FromJs::Locate(node, tx)).is_err() {
+            return Ok(JsValue::null());
+        }
+        Ok(match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(Some(r)) => JsArray::from_iter(r.map(JsValue::from), cx).into(),
+            _ => JsValue::null(),
+        })
     }));
     add("shadowHost", 1, Box::new(|d, a, _| {
         let dom = d.borrow();

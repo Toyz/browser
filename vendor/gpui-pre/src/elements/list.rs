@@ -738,6 +738,36 @@ impl ListState {
         None
     }
 
+    /// Feather: where item `ix` starts and how tall it is, in the list's
+    /// content (from the top of the first item), from the heights measured
+    /// so far (items not measured yet count as nothing); `None` past the end.
+    pub fn item_extent(&self, ix: usize) -> Option<(Pixels, Pixels)> {
+        let state = &*self.0.borrow();
+        if ix >= state.items.summary().count {
+            return None;
+        }
+        let mut cursor = state.items.cursor::<Dimensions<Count, Height>>(());
+        cursor.seek(&Count(ix), Bias::Right);
+        let top = cursor.start().1.0;
+        let height = cursor.item().and_then(ListItem::size_hint).map_or(Pixels::ZERO, |s| s.height);
+        Some((top, height))
+    }
+
+    /// Feather: the item at `y` in the list's content (heights as in
+    /// [`Self::item_extent`]) and how far into it, to scroll there with
+    /// [`Self::scroll_to`]; past the end, the last item.
+    pub fn offset_for_y(&self, y: Pixels) -> ListOffset {
+        let state = &*self.0.borrow();
+        let count = state.items.summary().count;
+        let mut cursor = state.items.cursor::<ListItemSummary>(());
+        cursor.seek(&Height(y.max(Pixels::ZERO)), Bias::Right);
+        let (ix, top) = (cursor.start().count, cursor.start().height);
+        if ix >= count {
+            return ListOffset { item_ix: count.saturating_sub(1), offset_in_item: Pixels::ZERO };
+        }
+        ListOffset { item_ix: ix, offset_in_item: (y - top).max(Pixels::ZERO) }
+    }
+
     /// Call this method when the user starts dragging the scrollbar.
     ///
     /// This will prevent the height reported to the scrollbar from changing during the drag
