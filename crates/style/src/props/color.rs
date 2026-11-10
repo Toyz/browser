@@ -42,8 +42,172 @@ pub(crate) fn parse_color<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
     if let Ok(c) = p.try_parse(parse_color_mix) {
         return Ok(c);
     }
+    if let Ok(c) = p.try_parse(parse_color_with_math) {
+        return Ok(c);
+    }
     let c = cssparser_color::Color::parse(p)?;
     Ok(convert_color(c))
+}
+
+/// A math function's result's kind.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Unit {
+    Number,
+    Percent,
+    Degrees,
+}
+
+type Value = (f64, Unit);
+
+/// `+`/`-` of `a` and `b` (same kinds only).
+fn add(a: Value, b: Value, sign: f64) -> Option<Value> {
+    (a.1 == b.1).then_some((a.0 + sign * b.0, a.1))
+}
+
+/// A sum: products joined by `+`/`-`.
+fn math_sum<'i>(p: &mut Parser<'i>) -> PResult<'i, Value> {
+    let mut acc = math_product(p)?;
+    loop {
+        let sign = p.try_parse(|p| match p.next()? {
+            Token::Delim('+') => Ok(1.0),
+            Token::Delim('-') => Ok(-1.0),
+            _ => Err(ParseError::<()>::custom(())),
+        });
+        let Ok(sign) = sign else { break };
+        let b = math_product(p)?;
+        acc = add(acc, b, sign).ok_or_else(|| ParseError::custom(()))?;
+    }
+    Ok(acc)
+}
+
+fn math_product<'i>(p: &mut Parser<'i>) -> PResult<'i, Value> {
+    let mut acc = math_value(p)?;
+    loop {
+        let op = p.try_parse(|p| match p.next()? {
+            Token::Delim('*') => Ok(true),
+            Token::Delim('/') => Ok(false),
+            _ => Err(ParseError::<()>::custom(())),
+        });
+        let Ok(multiply) = op else { break };
+        let b = math_value(p)?;
+        acc = if multiply {
+            match (acc.1, b.1) {
+                (Unit::Number, u) => (acc.0 * b.0, u),
+                (u, Unit::Number) => (acc.0 * b.0, u),
+                _ => return Err(ParseError::custom(())),
+            }
+        } else {
+            if b.1 != Unit::Number || b.0 == 0.0 {
+                return Err(ParseError::custom(()));
+            }
+            (acc.0 / b.0, acc.1)
+        };
+    }
+    Ok(acc)
+}
+
+/// `a, b, c` inside a math function.
+fn math_args<'i>(p: &mut Parser<'i>) -> PResult<'i, Vec<Value>> {
+    let mut args = vec![math_sum(p)?];
+    while p.try_parse(|p| p.expect_comma()).is_ok() {
+        args.push(math_sum(p)?);
+    }
+    Ok(args)
+}
+
+fn math_value<'i>(p: &mut Parser<'i>) -> PResult<'i, Value> {
+    let token = p.next()?.clone();
+    match token {
+        Token::Number { value, .. } => Ok((f64::from(value), Unit::Number)),
+        Token::Percentage { unit_value, .. } => Ok((f64::from(unit_value) * 100.0, Unit::Percent)),
+        Token::Dimension { value, ref unit, .. } => {
+            let v = f64::from(value);
+            match unit.to_ascii_lowercase().as_str() {
+                "deg" => Ok((v, Unit::Degrees)),
+                "rad" => Ok((v.to_degrees(), Unit::Degrees)),
+                "grad" => Ok((v * 0.9, Unit::Degrees)),
+                "turn" => Ok((v * 360.0, Unit::Degrees)),
+                _ => Err(ParseError::<()>::custom(())),
+            }
+        }
+        Token::ParenthesisBlock => p.parse_nested_block(math_sum),
+        Token::Function(ref name) => {
+            let name = name.to_ascii_lowercase();
+            p.parse_nested_block(|p| {
+                let args = math_args(p)?;
+                let same = args.iter().all(|a| a.1 == args[0].1);
+                let pick = |f: fn(f64, f64) -> f64| args.iter().map(|a| a.0).reduce(f).map(|v| (v, args[0].1));
+                let v = match (name.as_str(), args.len()) {
+                    ("calc", 1) => Some(args[0]),
+                    ("min", _) if same => pick(f64::min),
+                    ("max", _) if same => pick(f64::max),
+                    ("clamp", 3) if same => Some((args[1].0.clamp(args[0].0, args[2].0.max(args[0].0)), args[0].1)),
+                    _ => None,
+                };
+                v.ok_or_else(|| ParseError::custom(()))
+            })
+        }
+        _ => Err(ParseError::custom(())),
+    }
+}
+
+/// `rgb()`/`hsl()`/`hwb()` with math in its arguments (GitHub's labels:
+/// `hsl(55, calc(99 * 1%), calc((49 + ...) * 1%))`, after `var()`s): the
+/// math worked out, then parsed as usual.
+fn parse_color_with_math<'i>(p: &mut Parser<'i>) -> PResult<'i, Color> {
+    let name = p.expect_function()?.to_ascii_lowercase();
+    if !matches!(name.as_str(), "rgb" | "rgba" | "hsl" | "hsla" | "hwb") {
+        return err(p);
+    }
+    let text = p.parse_nested_block(|p| {
+        let mut out = String::new();
+        let mut math = false;
+        while !p.is_exhausted() {
+            let token = p.next()?.clone();
+            let piece = match &token {
+                Token::Function(f) if matches!(f.to_ascii_lowercase().as_str(), "calc" | "min" | "max" | "clamp") => {
+                    math = true;
+                    let f = f.to_ascii_lowercase();
+                    let v = p.parse_nested_block(|p| {
+                        let args = math_args(p)?;
+                        let same = args.iter().all(|a| a.1 == args[0].1);
+                        let pick = |g: fn(f64, f64) -> f64| args.iter().map(|a| a.0).reduce(g).map(|v| (v, args[0].1));
+                        let v = match (f.as_str(), args.len()) {
+                            ("calc", 1) => Some(args[0]),
+                            ("min", _) if same => pick(f64::min),
+                            ("max", _) if same => pick(f64::max),
+                            ("clamp", 3) if same => Some((args[1].0.clamp(args[0].0, args[2].0.max(args[0].0)), args[0].1)),
+                            _ => None,
+                        };
+                        v.ok_or_else(|| ParseError::custom(()))
+                    })?;
+                    match v.1 {
+                        Unit::Number => format!("{}", v.0),
+                        Unit::Percent => format!("{}%", v.0),
+                        Unit::Degrees => format!("{}deg", v.0),
+                    }
+                }
+                Token::Number { value, .. } => format!("{value}"),
+                Token::Percentage { unit_value, .. } => format!("{}%", unit_value * 100.0),
+                Token::Dimension { value, unit, .. } => format!("{value}{unit}"),
+                Token::Comma => ",".into(),
+                Token::Delim('/') => "/".into(),
+                Token::Ident(i) => i.to_string(),
+                _ => return Err(ParseError::custom(())),
+            };
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(&piece);
+        }
+        if math { Ok(out) } else { Err(ParseError::custom(())) }
+    }).map_err(|_| ParseError::custom(()))?;
+    let text = format!("{name}({text})");
+    let mut input = Parser::new(&text);
+    match cssparser_color::Color::parse(&mut input) {
+        Ok(c) => Ok(convert_color(c)),
+        Err(_) => err(p),
+    }
 }
 
 /// `color-mix(in <space>, <color> [<p>%]?, <color> [<p>%]?)`: mixed with
@@ -225,5 +389,22 @@ pub(crate) fn convert_color(c: cssparser_color::Color) -> Color {
             };
             pack(r, g, b, alpha(f.alpha))
         }
+    }
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::parse_color_str;
+
+    #[test]
+    fn color_arguments_may_be_math() {
+        // GitHub's dark-mode label text, once its var()s are in.
+        let label = "hsl(55,calc(99*1%),calc((49 + calc((.6 - calc(247*.2126/255 + 225*.7152/255 + 1*.0722/255))*100*max(0,min(calc(1/(.6 - calc(247*.2126/255 + 225*.7152/255 + 1*.0722/255))),1))))*1%))";
+        assert_eq!(parse_color_str(label), parse_color_str("hsl(55, 99%, 49%)"));
+        // Its light-mode text: white on a dark label.
+        let switch = "hsl(0deg,0%,calc(max(0,min(calc(1/(.453 - .2)),1))*100%))";
+        assert_eq!(parse_color_str(switch), parse_color_str("#fff"));
+        assert_eq!(parse_color_str("rgb(calc(255 / 2), 0, clamp(0, 300, 255))"), parse_color_str("rgb(127.5, 0, 255)"));
+        assert!(parse_color_str("hsl(calc(1px + 2), 50%, 50%)").is_none());
     }
 }
