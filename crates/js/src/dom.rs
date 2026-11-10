@@ -159,6 +159,9 @@ pub(crate) struct Runtime {
     hooks: Rc<Hooks>,
     last_sent: Instant,
     flush_at: Option<Instant>,
+    /// When scripts started: past the first-paint budget (the tab shows
+    /// what it has), the initial scripts' progress is sent as it happens.
+    started: Instant,
 }
 
 impl Runtime {
@@ -211,7 +214,7 @@ impl Runtime {
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
-        let mut rt = Runtime { cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None };
+        let mut rt = Runtime { cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -294,7 +297,11 @@ impl Runtime {
             Some(src) => {
                 let url = dom.doc.resolve_url(src)?;
                 drop(dom);
+                let t = Instant::now();
                 let code = (self.opts.fetch_text)(&url)?;
+                if self.opts.debug && t.elapsed() > Duration::from_millis(20) {
+                    eprintln!("js: waited {:?} for {url}", t.elapsed());
+                }
                 Some((code, url.to_string()))
             }
             None => Some((dom.doc.text_content(node), "inline script".into())),
@@ -319,6 +326,12 @@ impl Runtime {
             if self.opts.debug {
                 eprintln!("js: ran {what} ({} bytes) in {:?}", code.len(), t.elapsed());
             }
+        }
+        // A page whose scripts take longer than the first paint waits for
+        // shows them as they go, not all at the end (Microsoft's ~400 took
+        // 13s before anything changed on screen).
+        if self.started.elapsed() > self.opts.budget {
+            self.flush_doc();
         }
     }
 
@@ -1678,6 +1691,16 @@ fn queue_scripts(dom: &mut Dom, id: NodeId) {
         .collect();
     if dom.debug && !found.is_empty() {
         eprintln!("js: queued {} inserted script(s)", found.len());
+    }
+    // Start downloading them now, together: each is otherwise fetched only
+    // when it runs, one after another (a page inserting a few dozen spent
+    // seconds waiting on them in turn).
+    let urls: Vec<Url> = found
+        .iter()
+        .filter_map(|&n| dom.doc.element(n)?.attr("src").and_then(|src| dom.doc.resolve_url(src)))
+        .collect();
+    if !urls.is_empty() {
+        net::prefetch(urls);
     }
     dom.pending_scripts.extend(found);
 }
