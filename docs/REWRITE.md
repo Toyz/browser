@@ -30,9 +30,12 @@ behavior are checked for exact equivalence (see "parser parity" below).
    `minmax(auto, …)` become `Auto`), lengths with units we don't keep,
    `background-repeat` beyond x/y, `transform` lists beyond
    translate/rotate/scale.
-4. **Split `cascade.rs`**: matching, the cascade proper, value
-   computation (`apply`), and size estimates are separate concerns in one
-   1,900-line file.
+4. **Split `cascade.rs`** (done): `cascade/` has the cascade itself in
+   `mod.rs`, and `sources` (UA sheet, document sheets, `@import`,
+   presentational hints), `index` (rule indexes and cascade order), `apply`
+   (declarations to computed values), `vars`, `size` (estimates for
+   container units) and `dark`. Static pages render pixel-identically
+   before and after (beyond run-to-run noise).
 
 ## Stage 2: layout
 
