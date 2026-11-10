@@ -1398,7 +1398,18 @@ pub(crate) mod transform {
             return None;
         }
         // The border box's size (only fixed sizes).
-        let (CssLength::Px(w), CssLength::Px(h)) = (s.width, s.height) else { return None };
+        // An empty box that shrinks to fit (inline-block, floated, out of
+        // flow) is as wide as nothing when its width is `auto`: GitHub's
+        // breadcrumb slash is a rotated right border on one.
+        let shrinks = !s.display.is_block_level()
+            || s.float != style::Float::None
+            || matches!(s.position, style::Position::Absolute | style::Position::Fixed);
+        let w = match s.width {
+            CssLength::Px(w) => w,
+            CssLength::Auto if shrinks => 0.0,
+            _ => return None,
+        };
+        let CssLength::Px(h) = s.height else { return None };
         let (w, h) = if s.border_box { (w, h) } else { (w + s.horizontal_edges(), h + s.vertical_edges()) };
         if w <= 0.0 || h <= 0.0 {
             return None;

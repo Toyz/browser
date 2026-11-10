@@ -118,6 +118,7 @@ impl RuleIndex {
                     order: entry.rule,
                     normal: rule.normal.clone(),
                     important: rule.important.clone(),
+                    layer: rule.layer_rank,
                     containers: rule.media.iter().any(|m| media::is_container(m)).then(|| rule.media.clone()),
                 });
             }
@@ -142,6 +143,8 @@ pub(super) struct Matched {
     pub(super) order: u32,
     pub(super) normal: Arc<[Decl]>,
     pub(super) important: Arc<[Decl]>,
+    /// Its cascade layer's rank: later layers win, unlayered rules most.
+    pub(super) layer: u16,
     /// `@container` conditions around the rule (checked against the
     /// element's query container when it's cascaded).
     pub(super) containers: Option<Arc<[Arc<str>]>>,

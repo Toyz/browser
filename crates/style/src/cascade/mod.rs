@@ -3,13 +3,14 @@
 mod apply;
 mod dark;
 mod index;
+mod layers;
 mod size;
 mod sources;
 mod vars;
 
 pub use dark::DARK_CANVAS;
 pub use sources::{StyleSource, collect_style_sources};
-use self::{apply::*, dark::*, index::*, sources::*};
+use self::{apply::*, dark::*, index::*, layers::*, sources::*};
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -69,7 +70,11 @@ impl StyleData {
         let mut keyframes: HashMap<Arc<str>, Arc<Keyframes>> = HashMap::new();
         let mut rules: Vec<StyleRule> = Vec::new();
         let mut font_faces: Vec<FontFace> = Vec::new();
+        let mut layers = LayerOrder::default();
         for sheet in sheets {
+            for name in &sheet.layers {
+                layers.declare(name);
+            }
             rules.extend(sheet.rules);
             for face in sheet.font_faces {
                 if !font_faces.contains(&face) {
@@ -82,6 +87,7 @@ impl StyleData {
             }
         }
         let keyframes = Arc::new(keyframes);
+        layers.rank(&mut rules);
         let mut conditions: Vec<Arc<str>> = Vec::new();
         for rule in &rules {
             for c in rule.media.iter() {
@@ -249,13 +255,14 @@ impl Styler {
             let mut st = base.clone();
             for d in decls.iter() {
                 match d {
-                    Decl::Unresolved { name, raw } => {
-                        if let Some(resolved) = self.resolve_vars(name, raw, &st.custom) {
+                    Decl::Unresolved { name, raw } => match self.resolve_vars(name, raw, &st.custom) {
+                        Some(resolved) if !resolved.is_empty() => {
                             for d in resolved.iter() {
                                 self.apply(&mut st, base, d);
                             }
                         }
-                    }
+                        _ => apply_wide(&mut st, base, name, Wide::Unset),
+                    },
                     d => self.apply(&mut st, base, d),
                 }
             }
@@ -355,6 +362,7 @@ impl Styler {
                 order: 0,
                 normal: parsed.0.clone().into(),
                 important: Arc::from([]),
+                layer: UNLAYERED,
                 containers: None,
             });
         }
@@ -366,6 +374,7 @@ impl Styler {
                 order: 0,
                 normal: parsed.0.clone().into(),
                 important: parsed.1.clone().into(),
+                layer: UNLAYERED,
                 containers: None,
             });
         }
@@ -416,15 +425,17 @@ impl Styler {
             let size = parent.query_container.unwrap_or((self.env.width, self.env.height));
             matched.retain(|m| m.containers.iter().flat_map(|c| c.iter()).all(|c| media::container_matches(c, size)));
         }
-        matched.sort_by_key(|m| (m.origin, m.specificity, m.order));
-
-        // Cascade order: normal declarations by origin/specificity/order, then
-        // author !important (UA !important isn't used by our UA sheet).
+        // Cascade order: normal declarations by origin, layer, specificity
+        // and order; then author !important ones, where layers count the
+        // other way round (an earlier layer's !important wins).
+        matched.sort_by_key(|m| (m.origin, m.layer, m.specificity, m.order));
         let mut ordered: Vec<&Decl> = Vec::new();
         for m in &matched {
             ordered.extend(m.normal.iter());
         }
-        for m in matched.iter().filter(|m| m.origin >= ORIGIN_AUTHOR) {
+        let mut important: Vec<&Matched> = matched.iter().filter(|m| m.origin >= ORIGIN_AUTHOR && !m.important.is_empty()).collect();
+        important.sort_by_key(|m| (m.origin, std::cmp::Reverse(m.layer), m.specificity, m.order));
+        for m in important {
             ordered.extend(m.important.iter());
         }
 
@@ -449,13 +460,18 @@ impl Styler {
                     continue;
                 }
                 match d {
-                    Decl::Unresolved { name, raw } => {
-                        if let Some(decls) = self.resolve_vars(name, raw, &style.custom) {
+                    Decl::Unresolved { name, raw } => match self.resolve_vars(name, raw, &style.custom) {
+                        Some(decls) if !decls.is_empty() => {
                             for d in decls.iter().filter(|d| d.is_font_size() == font_pass) {
                                 self.apply(style, parent, d);
                             }
                         }
-                    }
+                        // Invalid at computed-value time (an undefined
+                        // variable, or a value that doesn't parse once
+                        // substituted): the property is `unset`, not left
+                        // as earlier rules had it.
+                        _ => apply_wide(style, parent, name, Wide::Unset),
+                    },
                     d => self.apply(style, parent, d),
                 }
             }

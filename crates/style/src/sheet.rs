@@ -23,6 +23,11 @@ pub struct StyleRule {
     /// enclosing `@media` blocks, `<link media>`, `@import ... media`).
     /// Kept rather than evaluated at parse time, so resizing can re-check them.
     pub media: Arc<[Arc<str>]>,
+    /// The cascade layer it's in (`a.b` for nested ones), if any.
+    pub layer: Option<Arc<str>>,
+    /// Where its layer sits in the cascade (set when a document's sheets
+    /// are put together; higher wins for normal declarations).
+    pub layer_rank: u16,
 }
 
 /// An `@font-face` rule.
@@ -48,6 +53,9 @@ pub struct Stylesheet {
     pub font_faces: Vec<FontFace>,
     /// `@import`s: (url as written, media query list). Resolved by the caller.
     pub imports: Vec<(String, String)>,
+    /// Cascade layer names in the order this sheet first mentions them
+    /// (`@layer a, b;` statements and `@layer a { }` blocks).
+    pub layers: Vec<Arc<str>>,
 }
 
 /// Parse a stylesheet. Rules inside `@media` keep their conditions (see
@@ -55,7 +63,7 @@ pub struct Stylesheet {
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let mut sheet = Stylesheet::default();
     let mut parser = Parser::new(css);
-    let mut top = TopLevel { sheet: &mut sheet, seen_rule: false, media: Vec::new() };
+    let mut top = TopLevel { sheet: &mut sheet, seen_rule: false, media: Vec::new(), layer: None };
     parse_rule_list(&mut parser, &mut top);
     sheet
 }
@@ -78,6 +86,32 @@ struct TopLevel<'a> {
     seen_rule: bool,
     /// Conditions of the `@media` blocks we're inside.
     media: Vec<Arc<str>>,
+    /// The `@layer` block we're inside (full dotted name).
+    layer: Option<Arc<str>>,
+}
+
+impl TopLevel<'_> {
+    /// `name` declared inside the current layer: its full name, recorded in
+    /// the sheet's layer order (parents first).
+    fn declare_layer(&mut self, name: &str) -> Arc<str> {
+        let mut full = self.layer.as_deref().map(str::to_owned).unwrap_or_default();
+        for segment in name.split('.') {
+            if !full.is_empty() {
+                full.push('.');
+            }
+            full.push_str(segment.trim());
+            if !self.sheet.layers.iter().any(|l| **l == *full) {
+                self.sheet.layers.push(full.as_str().into());
+            }
+        }
+        full.into()
+    }
+}
+
+/// A name for an anonymous `@layer { }`: unique, and not one a page can write.
+fn anonymous_layer() -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    format!("\u{0}anonymous{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 enum AtPrelude {
@@ -86,6 +120,9 @@ enum AtPrelude {
     Media(Arc<str>),
     Import(String, String),
     Keyframes(Arc<str>),
+    /// `@layer a, b;` (names, in order) or `@layer a { }` (one name; an
+    /// anonymous block gets a generated one).
+    Layer(Vec<String>),
     FontFace,
     Skip,
 }
@@ -123,7 +160,12 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                 AtPrelude::Group(!condition.trim_start().to_ascii_lowercase().starts_with("not"))
             }
             "container" => AtPrelude::Media(media::container_condition(&consume_rest(input)).into()),
-            "layer" | "scope" | "document" | "-moz-document" => {
+            "layer" => {
+                let names = consume_rest(input);
+                let names: Vec<String> = names.split(',').map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).collect();
+                AtPrelude::Layer(names)
+            }
+            "scope" | "document" | "-moz-document" => {
                 consume_rest(input);
                 AtPrelude::Group(true)
             }
@@ -157,8 +199,15 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
     }
 
     fn rule_without_block(&mut self, prelude: AtPrelude, _start: &ParserState) -> Result<(), ()> {
-        if let AtPrelude::Import(url, media) = prelude {
-            self.sheet.imports.push((url, media));
+        match prelude {
+            AtPrelude::Import(url, media) => self.sheet.imports.push((url, media)),
+            // `@layer a, b;`: just the order.
+            AtPrelude::Layer(names) => {
+                for name in names {
+                    self.declare_layer(&name);
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -171,6 +220,13 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
     ) -> Result<(), ParseError<Self::Error>> {
         match prelude {
             AtPrelude::Group(true) => parse_rule_list(input, self),
+            AtPrelude::Layer(names) => {
+                let name = names.into_iter().next().unwrap_or_else(anonymous_layer);
+                let full = self.declare_layer(&name);
+                let outer = self.layer.replace(full);
+                parse_rule_list(input, self);
+                self.layer = outer;
+            }
             AtPrelude::Media(query) => {
                 self.media.push(query);
                 parse_rule_list(input, self);
@@ -222,7 +278,7 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
         _start: &ParserState,
         input: &mut Parser<'i>,
     ) -> Result<(), ParseError<Self::Error>> {
-        let mut body = NestedBody { parent: text, media: self.media.clone(), decls: Declarations::default(), nested: Vec::new() };
+        let mut body = NestedBody { parent: text, media: self.media.clone(), layer: self.layer.clone(), decls: Declarations::default(), nested: Vec::new() };
         for _ in RuleBodyParser::new(input, &mut body) {}
         let decls = body.decls;
         if !decls.normal.is_empty() || !decls.important.is_empty() {
@@ -231,6 +287,8 @@ impl<'i> QualifiedRuleParser<'i> for TopLevel<'_> {
                 normal: decls.normal.into(),
                 important: decls.important.into(),
                 media: self.media.clone().into(),
+                layer: self.layer.clone(),
+                layer_rank: 0,
             });
         }
         // Nested rules (CSS nesting) follow, as plain rules.
@@ -279,6 +337,7 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
 struct NestedBody {
     parent: String,
     media: Vec<Arc<str>>,
+    layer: Option<Arc<str>>,
     decls: Declarations,
     nested: Vec<StyleRule>,
 }
@@ -286,7 +345,7 @@ struct NestedBody {
 impl NestedBody {
     /// A nested block (`& .b { ... }`, or `@media` inside a rule).
     fn child(&mut self, selector: String, media: Vec<Arc<str>>, input: &mut Parser<'_>) {
-        let mut body = NestedBody { parent: selector.clone(), media: media.clone(), decls: Declarations::default(), nested: Vec::new() };
+        let mut body = NestedBody { parent: selector.clone(), media: media.clone(), layer: self.layer.clone(), decls: Declarations::default(), nested: Vec::new() };
         for _ in RuleBodyParser::new(input, &mut body) {}
         let decls = body.decls;
         if !decls.normal.is_empty() || !decls.important.is_empty() {
@@ -297,6 +356,8 @@ impl NestedBody {
                     normal: decls.normal.into(),
                     important: decls.important.into(),
                     media: media.into(),
+                    layer: self.layer.clone(),
+                    layer_rank: 0,
                 });
             }
         }

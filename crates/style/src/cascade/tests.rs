@@ -207,8 +207,9 @@ fn custom_properties_and_var() {
     assert_eq!(p.color, Color::Rgba(0x123456ff));
     assert_eq!(p.padding.top, Length::Px(12.0));
     assert_eq!(p.padding.right, Length::Px(3.0));
-    // Unresolvable var → declaration ignored → UA margin (1em) stays.
-    assert_eq!(p.margin.top, Length::Px(16.0));
+    // Unresolvable var: invalid at computed-value time, so `unset` (the
+    // initial 0), not the UA's 1em.
+    assert_eq!(p.margin.top, Length::Px(0.0));
 }
 
 #[test]
@@ -352,4 +353,40 @@ fn collects_sources_in_order() {
     assert_eq!(sources.len(), 2);
     assert!(matches!(&sources[0], StyleSource::External { url, .. } if url.as_str() == "https://example.com/a.css"));
     assert!(matches!(&sources[1], StyleSource::Inline { css, .. } if css == "p{}"));
+}
+
+#[test]
+fn undefined_variables_unset_the_property() {
+    // Invalid at computed-value time: `color` inherits, `width` goes back to
+    // its initial value; neither keeps what an earlier rule said.
+    let (doc, s) = styled(
+        "<div><a href=x>a</a></div>",
+        "div { color: rgb(1, 2, 3) } a { color: blue; width: 10px } a { color: var(--nope); width: var(--nope) }",
+    );
+    let a = style_of(&doc, &s, "a");
+    assert_eq!(a.color, style_of(&doc, &s, "div").color);
+    assert_eq!(a.width, Length::Auto);
+}
+
+
+#[test]
+fn cascade_layers() {
+    let red = Color::Rgba(0xff0000ff);
+    let green = Color::Rgba(0x008000ff);
+    let color = |css: &str| {
+        let (doc, s) = styled("<nav data-v=n><a class=i>x</a></nav>", css);
+        style_of(&doc, &s, "a").color
+    };
+    // Unlayered beats a layer, whatever the specificity (GitHub's
+    // breadcrumbs: Primer's rules are in `@layer primer-react`).
+    assert_eq!(color("@layer lib { [data-v=n] .i { color: red } } .i { color: green }"), green);
+    // Later layers win; `@layer a, b;` fixes the order up front.
+    assert_eq!(color("@layer b, a; @layer a { .i { color: green } } @layer b { .i { color: red } }"), green);
+    assert_eq!(color("@layer a { .i { color: red } } @layer b { .i { color: green } }"), green);
+    // A layer's own rules beat its nested layers.
+    assert_eq!(color("@layer a { .i { color: green } @layer inner { .i { color: red } } }"), green);
+    // !important: the earlier layer wins.
+    assert_eq!(color("@layer a { .i { color: green !important } } @layer b { .i { color: red !important } }"), green);
+    assert_eq!(color("@layer a { .i { color: green !important } } .i { color: red !important }"), green);
+    let _ = red;
 }

@@ -25,6 +25,11 @@ behavior are checked for exact equivalence (see "parser parity" below).
    whether it inherits and which computed fields it owns; the cascade's
    `inherit`/`initial`/`unset` handling is a lookup in it, and a test checks
    `ComputedStyle::inherit` copies exactly the inherited ones.
+   Cascade correctness found on the way: `@layer` (layer order across a
+   document's sheets, nested layers, `!important` reversed; GitHub's
+   Primer styles are layered, so unlayered site CSS has to beat them) and
+   `var()` that can't be resolved making the property `unset` (invalid at
+   computed-value time), not leaving earlier rules' values in place.
 3. **Lossless values**: parse into what CSS specifies and resolve late,
    against the box. Known losses: grid track lists (`max()`, `calc()`,
    `minmax(auto, …)` become `Auto`), lengths with units we don't keep,

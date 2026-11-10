@@ -52,9 +52,9 @@ fn tree(b: &LayoutBox, depth: usize, max_depth: usize) {
 
 fn style_line(s: &style::ComputedStyle) -> String {
     format!(
-        "display={:?} pos={:?} w={:?} h={:?} minh={:?} maxh={:?} pad={:?} margin={:?} inset={:?} translate={:?} flex={:?}/{:?} lh={:?} fs={}",
+        "display={:?} pos={:?} w={:?} h={:?} minh={:?} maxh={:?} pad={:?} margin={:?} inset={:?} translate={:?} flex={:?}/{:?} lh={:?} fs={} color={:?} weight={}",
         s.display, s.position, s.width, s.height, s.min_height, s.max_height, s.padding, s.margin, s.inset, s.translate,
-        s.flex_direction, s.align_items, s.line_height, s.font_size
+        s.flex_direction, s.align_items, s.line_height, s.font_size, s.color, s.font_weight
     )
 }
 
