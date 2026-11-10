@@ -55,24 +55,31 @@ const INSTANCE_WEIGHTS: [u16; 6] = [300, 400, 500, 600, 700, 800];
 /// name: the font itself, or for a variable font, a static instance per
 /// common weight (GPUI can't set variation axes, so a variable font would
 /// draw every weight as its default).
-/// `fallback` names a file that doesn't name itself (the CSS family).
-pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16), fallback: Option<&str>) -> Vec<(Vec<u8>, String)> {
+/// `css_family`: the `@font-face` family it's for. Every face of a page's
+/// family is registered under that name (with its own weight and style),
+/// so the platform picks among them as CSS does: a file's own name may be
+/// per weight (Open Sans ships "Open Sans Light", "Open Sans SemiBold"...,
+/// and the family named the last one registered: the Rust book all bold),
+/// or nothing readable (BBC's twenty Reith files, sans and serif, upright
+/// and italic, are all ".\u{7f}": headlines in italic serif).
+pub fn decode_all(bytes: Vec<u8>, weights: (u16, u16), css_family: Option<&str>) -> Vec<(Vec<u8>, String)> {
     let Some((data, family)) = decode(bytes) else { return Vec::new() };
-    // Webfonts with their names blanked out: the platform won't load those,
-    // so they get the page's name for them. So do ones named nothing
-    // readable: BBC's twenty Reith files, sans and serif, upright and
-    // italic, are all called ".\u{7f}", and as one family the platform
-    // picked among them by weight alone (headlines in italic serif).
     let family = family.filter(|f| f.chars().any(char::is_alphabetic));
-    let (data, family) = match family {
-        Some(family) => (data, family),
-        None => {
-            let Some(fallback) = fallback.map(str::trim).filter(|f| !f.is_empty()) else { return Vec::new() };
-            let Some(data) = renamed(&data, fallback) else { return Vec::new() };
-            (data, fallback.to_owned())
-        }
-    };
+    let css = css_family.map(str::trim).filter(|f| !f.is_empty());
     let variable = ttf_parser::Face::parse(&data, 0).is_ok_and(|f| f.is_variable());
+    let (data, family) = match (css, family) {
+        // (Variable fonts get their names with each instance below.)
+        (Some(css), _) if variable => (data, css.to_owned()),
+        (Some(css), family) => match renamed(&data, css) {
+            Some(data) => (data, css.to_owned()),
+            None => match family {
+                Some(family) => (data, family),
+                None => return Vec::new(),
+            },
+        },
+        (None, Some(family)) => (data, family),
+        (None, None) => return Vec::new(),
+    };
     let fonts = if !variable {
         vec![(data, family)]
     } else {
@@ -145,10 +152,16 @@ fn instance(data: &[u8], weight: u16, family: &str) -> Option<Vec<u8>> {
 /// The font with a fresh `name` table (Windows and Mac records for its
 /// family and style): for files whose names the platform can't read.
 pub fn renamed(data: &[u8], family: &str) -> Option<Vec<u8>> {
+    use std::hash::{Hash, Hasher};
     let face = ttf_parser::Face::parse(data, 0).ok()?;
     let (weight, italic) = (face.weight().to_number(), face.is_italic());
     let style = format!("{}{}", weight_name(weight), if italic { " Italic" } else { "" });
-    let postscript: String = format!("{family}-{style}").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    // Unique per file: fonts are keyed by PostScript name, and a family's
+    // faces of one weight split by `unicode-range` would be taken for one.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut h);
+    let tag = h.finish() as u32;
+    let postscript: String = format!("{family}-{style}-{tag:08x}").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
     let name = name_table(&[
         (1, family.to_owned()),
         (2, if italic { "Italic".into() } else { "Regular".into() }),
