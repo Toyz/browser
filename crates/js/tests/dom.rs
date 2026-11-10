@@ -1194,3 +1194,26 @@ fn get_computed_style_reads_the_cascade() {
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "flex rgb(255, 0, 0) 10px 4px 700 true none");
 }
+
+#[test]
+fn url_follows_the_standard() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const out = [];
+        const u = new URL("../x/./y?a=1&b=2#h", "HTTPS://Example.COM:443/p/q/r");
+        out.push(u.href, u.origin, u.host, u.pathname);
+        u.searchParams.append("c", "3 4");
+        out.push(u.search);
+        u.search = "?z=9";
+        out.push(u.searchParams.get("z"), u.searchParams.size);
+        u.hostname = "other.test"; u.port = "8080"; u.hash = "";
+        out.push(u.href);
+        out.push(URL.canParse("nope"), URL.parse("nope"), String(new URLSearchParams({ a: "1", b: "x y" })));
+        out.push([...new URLSearchParams("q=1&q=2&r")].map((p) => p.join("=")).join(","));
+        try { new URL("not a url"); } catch (e) { out.push(e instanceof TypeError); }
+        document.getElementById("o").textContent = out.join(" | ");
+    </script></body>"##);
+    assert_eq!(
+        text_of(&doc, "o"),
+        "https://example.com/p/x/y?a=1&b=2#h | https://example.com | example.com | /p/x/y | ?a=1&b=2&c=3+4 | 9 | 1 | https://other.test:8080/p/x/y?z=9 | false |  | a=1&b=x+y | q=1,q=2,r= | true"
+    );
+}

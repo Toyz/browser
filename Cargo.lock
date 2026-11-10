@@ -4298,6 +4298,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "boa_engine",
+ "boa_gc",
  "chrono",
  "cssparser",
  "html",

@@ -1847,61 +1847,7 @@
   };
 
   // A small URL implementation (enough for the common uses).
-  class URLSearchParams {
-    constructor(init) {
-      this._list = [];
-      if (typeof init === "string") {
-        for (const part of init.replace(/^\?/, "").split("&")) {
-          if (!part) continue;
-          const i = part.indexOf("=");
-          const dec = (s) => decodeURIComponent(s.replace(/\+/g, " "));
-          this._list.push(i < 0 ? [dec(part), ""] : [dec(part.slice(0, i)), dec(part.slice(i + 1))]);
-        }
-      } else if (init && typeof init === "object") {
-        for (const [k, v] of (Symbol.iterator in init ? init : Object.entries(init))) this._list.push([String(k), String(v)]);
-      }
-    }
-    get(k) { const e = this._list.find(([a]) => a === k); return e ? e[1] : null; }
-    getAll(k) { return this._list.filter(([a]) => a === k).map(([, v]) => v); }
-    has(k) { return this._list.some(([a]) => a === k); }
-    set(k, v) { const i = this._list.findIndex(([a]) => a === k); if (i < 0) this._list.push([k, String(v)]); else { this._list[i][1] = String(v); this._list = this._list.filter(([a], j) => a !== k || j === i); } }
-    append(k, v) { this._list.push([k, String(v)]); }
-    delete(k) { this._list = this._list.filter(([a]) => a !== k); }
-    forEach(fn) { this._list.forEach(([k, v]) => fn(v, k, this)); }
-    keys() { return this._list.map(([k]) => k)[Symbol.iterator](); }
-    values() { return this._list.map(([, v]) => v)[Symbol.iterator](); }
-    entries() { return this._list.map((e) => e.slice())[Symbol.iterator](); }
-    [Symbol.iterator]() { return this.entries(); }
-    toString() { return this._list.map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&"); }
-  }
-  class URL {
-    constructor(href, base) {
-      const abs = N.resolveAgainst(String(href), base === undefined ? null : String(base));
-      if (abs === null) throw new TypeError("Invalid URL: " + href);
-      this._parse(abs);
-    }
-    _parse(abs) {
-      const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)(?:\/\/(?:([^:@\/]*)(?::([^@\/]*))?@)?([^:\/?#]*)(?::(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/.exec(abs) || [];
-      this.protocol = m[1] || ""; this.username = m[2] || ""; this.password = m[3] || "";
-      this.hostname = m[4] || ""; this.port = m[5] || ""; this.pathname = m[6] || "/";
-      this.search = m[7] && m[7] !== "?" ? m[7] : ""; this.hash = m[8] && m[8] !== "#" ? m[8] : "";
-    }
-    get host() { return this.hostname + (this.port ? ":" + this.port : ""); }
-    get origin() { return this.protocol + "//" + this.host; }
-    get href() { return this.protocol + (this.hostname || this.protocol === "file:" ? "//" : "") + (this.username ? this.username + (this.password ? ":" + this.password : "") + "@" : "") + this.host + this.pathname + this.search + this.hash; }
-    set href(v) { this._parse(N.resolveAgainst(String(v), null)); }
-    get searchParams() {
-      const p = new URLSearchParams(this.search);
-      const self = this;
-      for (const m of ["set", "append", "delete"]) { const f = p[m].bind(p); p[m] = (...a) => { f(...a); const s = p.toString(); self.search = s ? "?" + s : ""; }; }
-      return p;
-    }
-    toString() { return this.href; }
-    toJSON() { return this.href; }
-    static createObjectURL() { return "blob:feather"; }
-    static revokeObjectURL() {}
-    static canParse(h, b) { try { new URL(h, b); return true; } catch (_) { return false; } }
-  }
+  // URL and URLSearchParams are native classes (web_url.rs).
 
   const location = {
     get href() { return N.url(); },

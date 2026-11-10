@@ -225,6 +225,7 @@ impl Runtime {
         cx.runtime_limits_mut().set_stack_size_limit(1 << 20);
         declarative_shadow_roots(&mut dom.borrow_mut());
         install_natives(&mut cx, &dom);
+        crate::web_url::register(&mut cx);
         if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
             eprintln!("js prelude failed: {e}");
         }
