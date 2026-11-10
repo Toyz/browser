@@ -120,9 +120,12 @@ pub struct Tab {
     /// page's viewport) and the viewport's size, gathered while painting,
     /// and what the script thread was last told.
     measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
-    /// Bumped every frame: bounds reported twice in one frame (a container
-    /// split across rows) are unioned.
+    /// Bumped each time the tab paints (by an element painted before the
+    /// page): bounds reported twice in one frame (a container split across
+    /// rows) are unioned, and what a frame didn't paint is off screen.
     bounds_frame: Rc<std::cell::Cell<u64>>,
+    /// The painted frame `note_unpainted` last looked at.
+    bounds_checked: u64,
     bounds_seen: Rc<std::cell::RefCell<HashMap<NodeId, u64>>>,
     layout_sent: HashMap<NodeId, [f32; 4]>,
     /// Measured elements painted in an earlier frame but not the latest,
@@ -132,6 +135,11 @@ pub struct Tab {
     debug_scroll_top: std::cell::Cell<Option<(usize, f32, usize)>>,
     /// Measured elements painted in the last frame scripts were told about.
     layout_painted: HashSet<NodeId>,
+    /// The elements scripts measure that the current layout was built with
+    /// (each has a box, if it renders at all).
+    layout_keep: HashSet<NodeId>,
+    /// Ones of those reported unpainted and not painted since.
+    unpainted_sent: HashSet<NodeId>,
     layout_viewport_sent: (f32, f32),
     layout_scheduled: Rc<std::cell::Cell<bool>>,
     /// A restyle is building; another was asked for meanwhile.
@@ -242,11 +250,14 @@ impl Tab {
             restyle_queued: false,
             measured_bounds: Rc::default(),
             bounds_frame: Rc::default(),
+            bounds_checked: 0,
             bounds_seen: Rc::default(),
             layout_sent: HashMap::new(),
             layout_gone: Vec::new(),
             debug_scroll_top: Default::default(),
             layout_painted: HashSet::new(),
+            layout_keep: HashSet::new(),
+            unpainted_sent: HashSet::new(),
             layout_viewport_sent: (0.0, 0.0),
             layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
@@ -539,6 +550,8 @@ impl Tab {
         self.layout_sent.clear();
         self.layout_gone.clear();
         self.layout_painted.clear();
+        self.layout_keep.clear();
+        self.unpainted_sent.clear();
         self.layout_viewport_sent = (0.0, 0.0);
         self._scroll_end = None;
         self.hover_styler = None;
@@ -598,14 +611,38 @@ impl Tab {
         if self.page.as_ref().and_then(|p| p.scripts.as_ref()).is_none() {
             return;
         }
+        // Only after a paint: a render with none since (GPUI can render more
+        // than once a frame) saw nothing painted, and would report every
+        // element gone, then back the next frame (observers flapped, and
+        // YouTube's lazy images could miss the moment they were in view).
         let frame = self.bounds_frame.get();
+        if frame == self.bounds_checked {
+            return;
+        }
+        self.bounds_checked = frame;
         let seen = self.bounds_seen.borrow();
         let now: HashSet<NodeId> = seen.iter().filter(|(_, f)| **f == frame).map(|(n, _)| *n).collect();
         drop(seen);
-        if now.is_empty() && self.layout_painted.is_empty() {
+        if now.is_empty() && self.layout_painted.is_empty() && self.layout_keep.is_empty() {
             return;
         }
-        let gone: Vec<NodeId> = self.layout_painted.difference(&now).copied().collect();
+        let mut gone: Vec<NodeId> = self.layout_painted.difference(&now).copied().collect();
+        // Measured elements the layout has (or, rendering nothing, doesn't
+        // have) a box for that this paint didn't paint: off screen. Said
+        // once, so an IntersectionObserver's first entry comes from where
+        // they are (a timer guessing "not painted yet, so not visible"
+        // raced YouTube's lazy images, which then never loaded).
+        for n in &now {
+            self.unpainted_sent.remove(n);
+        }
+        let never: Vec<NodeId> = self
+            .layout_keep
+            .iter()
+            .filter(|n| !now.contains(n) && !self.layout_painted.contains(n) && !self.unpainted_sent.contains(n))
+            .copied()
+            .collect();
+        self.unpainted_sent.extend(never.iter().copied());
+        gone.extend(never);
         // Painted again: the next layout message lists it among the rects
         // only if it moved, so make sure it does, and that there is one (in
         // the same place as before, nothing else sends one: YouTube's icons
@@ -648,6 +685,22 @@ impl Tab {
         }
         self.layout_viewport_sent = viewport;
         let gone = std::mem::take(&mut self.layout_gone);
+        if std::env::var_os("FEATHER_DEBUG_IO").is_some()
+            && let Some(doc) = self.page.as_ref().and_then(|p| p.doc.as_ref())
+        {
+            let img = |n: &NodeId| doc.get(*n).is_some() && doc.element(*n).is_some_and(|e| &**e.local_name() == "img");
+            let measured: Vec<NodeId> = host.measured.read().map(|m| m.iter().copied().filter(img).collect()).unwrap_or_default();
+            let store = self.measured_bounds.borrow();
+            let with_rect = measured.iter().filter(|n| store.0.contains_key(n)).count();
+            eprintln!(
+                "layout: {} rects ({} img), {} gone; measured imgs {} with rect {}",
+                rects.len(),
+                rects.iter().filter(|(n, _)| img(n)).count(),
+                gone.len(),
+                measured.len(),
+                with_rect
+            );
+        }
         host.send(js::ToJs::Layout { rects, gone, viewport });
     }
 
@@ -1174,6 +1227,7 @@ impl Tab {
             let Ok(keep) = this.update(cx, |this, _| {
                 this.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.read().map(|m| m.clone()).unwrap_or_default()).unwrap_or_default()
             }) else { return };
+            let kept = keep.clone();
             let (layout, changed) = loader::deep({
                 let state = state.clone();
                 move || {
@@ -1212,6 +1266,7 @@ impl Tab {
                     .flatten();
                 page.layout = Arc::new(layout);
                 page.signature = signature;
+                this.layout_keep = kept;
                 this.element_state = state;
                 if same_shape {
                     // Usually a hover changed a color in a row or two: re-measure
@@ -2101,7 +2156,6 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
-        self.bounds_frame.set(self.bounds_frame.get() + 1);
         self.animation_frame(window);
         self.apply_row_hint(window);
         let theme = cx.theme();
@@ -2133,11 +2187,14 @@ impl Render for Tab {
                 .child(url.to_string())
         });
 
+        let frame = self.bounds_frame.clone();
         div()
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()
             .bg(canvas)
+            // Painted before the page: a new frame for the bounds it reports.
+            .child(gpui::canvas(move |_, _, _| frame.set(frame.get() + 1), |_, _, _, _| {}).absolute().size_0())
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {

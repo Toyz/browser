@@ -832,15 +832,16 @@ fn intersection_observer_follows_layout() {
     );
     let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0 };
     let id = |doc: &page::Document, name: &str| doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(name)).unwrap();
-    let (a, b) = (id(&doc, "a"), id(&doc, "b"));
+    let (a, b, c) = (id(&doc, "a"), id(&doc, "b"), id(&doc, "c"));
     let (_, host) = js::start(doc, opts);
     let host = host.unwrap();
-    // `a` is in view, `b` far below it (even with the margin), `c` never painted.
-    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], gone: Vec::new(), viewport: (1024.0, 700.0) });
+    // `a` is in view, `b` far below it (even with the margin), `c` not
+    // painted (the tab says so: its first entry comes at once, not after a
+    // timer guessing it).
+    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], gone: vec![c], viewport: (1024.0, 700.0) });
     let mut text = String::new();
-    let until = std::time::Instant::now() + Duration::from_secs(3);
-    // (The settle check before the layout reports everything as out of view.)
-    while !text.contains("a=true") && std::time::Instant::now() < until {
+    let until = std::time::Instant::now() + Duration::from_secs(1);
+    while !text.contains("c=false") && std::time::Instant::now() < until {
         if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
             text = text_of(&d, "o");
         }

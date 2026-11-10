@@ -1939,14 +1939,17 @@
   // Elements painted in the tab's latest frame (layoutRects keeps the last
   // rect of ones that no longer are).
   const painted = new Set();
+  // Measured elements the tab says it didn't paint (off screen, or no box).
+  const unpainted = new Set();
   function layout(flat, vw, vh, gone) {
     const resized = viewport[0] !== vw || viewport[1] !== vh;
     viewport = [vw, vh];
     for (let i = 0; i + 4 < flat.length; i += 5) {
       layoutRects.set(flat[i], [flat[i + 1], flat[i + 2], flat[i + 3], flat[i + 4]]);
       painted.add(flat[i]);
+      unpainted.delete(flat[i]);
     }
-    if (gone) for (const id of gone) painted.delete(id);
+    if (gone) for (const id of gone) { painted.delete(id); unpainted.add(id); }
     deliverResizes();
     deliverIntersections();
     if (resized) window.dispatchEvent(new Event("resize"));
@@ -2030,6 +2033,7 @@
   // painted now: nowhere); a box that never got one (a 0x0 lazy <img>)
   // goes by its nearest painted ancestor.
   function paintedRect(el) {
+    if (unpainted.has(el.__id)) return undefined;
     if (layoutRects.has(el.__id)) return painted.has(el.__id) ? layoutRects.get(el.__id) : undefined;
     for (let n = el.parentNode, i = 1; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) {
       const r = painted.has(n.__id) && layoutRects.get(n.__id);
@@ -2057,8 +2061,10 @@
       // waiting for its `src`) may not be painted, but where they are, it is.
       for (let n = target, i = 0; n && n.nodeType === 1 && i <= NEAR_ANCESTORS; n = n.parentNode, i++) measure(n);
       setTimeout(() => this._check(false), 0);
-      // Never painted in that time: say so (callers wait for a first entry).
-      setTimeout(() => this._check(target), 500);
+      // The tab says where it's painted, or that it isn't (off screen,
+      // nothing rendered). Should it never say (no layout comes), report
+      // anyway: callers wait for a first entry.
+      setTimeout(() => this._check(target), 3000);
     }
     unobserve(target) { this._targets.delete(target); }
     disconnect() { this._targets.clear(); intersectionObservers.delete(this); }
@@ -2076,7 +2082,7 @@
       for (const [target, last] of this._targets) {
         const r = paintedRect(target);
         if (settle && settle !== target) continue;
-        if (!r && !settle) continue;
+        if (!r && !settle && !unpainted.has(target.__id)) continue;
         const [x, y, w, h] = r || [0, 0, 0, 0];
         const ix = Math.max(x, box.left), iy = Math.max(y, box.top);
         const ax = Math.min(x + w, box.right), ay = Math.min(y + h, box.bottom);
