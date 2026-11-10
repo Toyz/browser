@@ -1541,6 +1541,10 @@ impl Builder<'_> {
         // The picture itself: its natural size, in the box.
         let mut pic = ComputedStyle::initial();
         pic.display = Display::Block;
+        // (The initial `medium` width with style `none` computes to 0; this
+        // style skips the cascade, and the picture had a 3px black frame:
+        // docs.rs's toolbar icons were boxes.)
+        pic.border_width = Edges::all(0.0);
         let image = LayoutBox::Image(ImageBox {
             id: self.next_id(),
             node: None,
@@ -2410,6 +2414,17 @@ impl Builder<'_> {
                 },
                 display => {
                     self.flush(c);
+                    // A block-level button in block flow is as wide as its
+                    // content (`width: auto` is fit-content for buttons),
+                    // not its container (flex and grid items still stretch).
+                    let in_block_flow = !matches!(parent_style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
+                    let style = if tag == "button" && style.width.is_auto() && !style.fit_width && in_block_flow {
+                        let mut st = (*style).clone();
+                        st.fit_width = true;
+                        Arc::new(st)
+                    } else {
+                        style
+                    };
                     let kind = match display {
                         Display::ListItem => {
                             if let Some(v) = element.attr("value").and_then(|v| v.trim().parse().ok()) {
