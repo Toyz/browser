@@ -2057,24 +2057,6 @@
   const encodeBody = (body) => (body === undefined || body === null ? [null, null] : N.encodeBody(body));
   const bodyBytes = (payload) => (payload === null ? new Uint8Array(0) : typeof payload === "string" ? utf8Encoder.encode(payload) : new Uint8Array(payload));
 
-  class Request {
-    constructor(input, init) {
-      init = init || {};
-      const from = input instanceof Request ? input : null;
-      this.url = from ? from.url : (N.resolve(String(input)) || String(input));
-      this.method = String(init.method || (from && from.method) || "GET").toUpperCase();
-      this.headers = new Headers(init.headers || (from && from.headers));
-      this._body = init.body !== undefined ? init.body : from ? from._body : null;
-      this.mode = init.mode || (from && from.mode) || "cors";
-      this.credentials = init.credentials || (from && from.credentials) || "same-origin";
-      this.cache = init.cache || "default";
-      this.redirect = init.redirect || "follow";
-      this.signal = init.signal || (from && from.signal) || null;
-      this.referrer = "about:client";
-    }
-    clone() { return new Request(this); }
-  }
-
   class Response {
     constructor(body, init) {
       init = init || {};
@@ -2360,7 +2342,7 @@
 
   Object.assign(window, {
     WebSocket, MessageEvent, CloseEvent, __socketEvent: socketEvent,
-    fetch, Request, Response, XMLHttpRequest, TextEncoder, TextDecoder,
+    fetch, Response, XMLHttpRequest, TextEncoder, TextDecoder,
 
     __fetchHead(...args) { const r = requests.get(args[0]); if (r) r.head(args); },
     __fetchChunk(id, data) { const r = requests.get(id); if (r) r.chunk(data); },

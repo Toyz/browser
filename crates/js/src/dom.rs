@@ -1823,6 +1823,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::structured_clone::install(cx);
     crate::form_data::install(cx);
     crate::abort::install(cx);
+    crate::request::install(cx);
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);

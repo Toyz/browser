@@ -291,6 +291,19 @@ fn encode_body(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue
     Ok(JsArray::from_iter([payload, kind], cx).into())
 }
 
+/// A body as bytes and its content type (as `encodeBody` makes it).
+pub(crate) fn encode(body: &JsValue, cx: &mut Context) -> JsResult<(Vec<u8>, Option<String>)> {
+    let pair = encode_body(&JsValue::undefined(), std::slice::from_ref(body), cx)?;
+    let pair = pair.as_object().and_then(|o| JsArray::from_object(o).ok()).expect("a pair");
+    let (payload, kind) = (pair.get(0, cx)?, pair.get(1, cx)?);
+    let bytes = match payload.as_string() {
+        Some(s) => s.to_std_string_escaped().into_bytes(),
+        None => binary_of(&payload, cx)?.unwrap_or_default(),
+    };
+    let kind = (!kind.is_null()).then(|| js_value_string(&kind, cx));
+    Ok((bytes, kind))
+}
+
 /// Register `Blob` and `File` (a File is a Blob: its prototype's), and the
 /// `encodeBody` native.
 pub(crate) fn install(natives: &JsObject, cx: &mut Context) {

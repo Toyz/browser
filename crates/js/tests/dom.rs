@@ -1012,6 +1012,26 @@ fn abort_is_native() {
 }
 
 #[test]
+fn request_is_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        try {
+        const r = new Request("/api?x=1", { method: "post", body: JSON.stringify({ a: 1 }), headers: { "X-T": "v" }, credentials: "include" });
+        const c = r.clone(), copy = new Request(r, { method: "PUT" });
+        let getBody = ""; try { new Request("/x", { body: "no" }); } catch (e) { getBody = e.name; }
+        const out = [r.url, r.method, r.headers.get("x-t"), r.credentials, r.mode, copy.method, copy.url === r.url, r instanceof Request, getBody];
+        r.json().then((j) => {
+          out.push(j.a, r.bodyUsed);
+          return r.text().catch((e) => out.push(e.name));
+        }).then(() => c.text()).then((t) => {
+          out.push(t);
+          document.getElementById("o").textContent = out.join(" ");
+        });
+        } catch (e) { document.getElementById("o").textContent = "ERR " + e; }
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), r#"https://example.com/api?x=1 POST v include cors PUT true true TypeError 1 true TypeError {"a":1}"#);
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
