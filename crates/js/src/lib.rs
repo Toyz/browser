@@ -32,6 +32,7 @@ mod form_data;
 mod abort;
 mod request;
 mod body;
+mod streams;
 mod response;
 mod worker_net;
 pub mod worker;

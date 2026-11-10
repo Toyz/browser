@@ -187,18 +187,13 @@ const METHODS: &[(&str, usize, Method)] = &[
         };
         Ok(new_blob(bytes[start..end].into(), kind, cx))
     }),
-    // A stream of its bytes, in one chunk (the page's ReadableStream).
+    // A stream of its bytes, in one chunk.
     ("stream", 0, |this, _, cx| {
         let (bytes, _) = this_blob(this)?;
-        let class = cx.global_object().get(js_string!("ReadableStream"), cx)?;
-        let class = class.as_constructor().ok_or_else(|| JsNativeError::typ().with_message("no ReadableStream"))?;
-        let stream = class.construct(&[], None, cx)?;
+        let (stream, shared) = crate::streams::readable(cx)?;
         let chunk = uint8_array(&bytes, cx)?;
-        for (method, args) in [("_push", vec![chunk]), ("_close", Vec::new())] {
-            if let Some(f) = stream.get(JsString::from(method), cx)?.as_callable() {
-                f.call(&stream.clone().into(), &args, cx)?;
-            }
-        }
+        crate::streams::push(&shared, chunk, cx);
+        crate::streams::close(&shared, cx);
         Ok(stream.into())
     }),
 ];

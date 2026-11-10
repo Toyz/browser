@@ -458,6 +458,7 @@ fn install_scope(cx: &mut Context, natives: &JsObject, setup: &Setup, clock: Rc<
     crate::abort::install(cx);
     crate::request::install(cx);
     crate::response::install(cx);
+    crate::streams::install(cx);
     crate::worker_net::install(cx);
     cx.insert_data(clock.clone());
     crate::timers::install(natives, clock, cx);

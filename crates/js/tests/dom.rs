@@ -1094,6 +1094,41 @@ fn workers_fetch_and_xhr() {
 }
 
 #[test]
+fn streams_are_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        (async () => {
+          const out = [];
+          const s1 = new ReadableStream({ start(c) { c.enqueue("a"); c.enqueue("b"); c.close(); } });
+          const r1 = s1.getReader();
+          out.push((await r1.read()).value, (await r1.read()).value, (await r1.read()).done, s1.locked);
+          let n = 0;
+          const pulled = new ReadableStream({ pull(c) { n++; if (n > 3) c.close(); else c.enqueue(n); } });
+          const got = []; for await (const x of pulled) got.push(x);
+          out.push(got.join(""));
+          const bytes = new TextEncoder().encode("héllo");
+          const parts = new ReadableStream({ start(c) { c.enqueue(bytes.slice(0, 2)); c.enqueue(bytes.slice(2)); c.close(); } });
+          const upper = new TransformStream({ transform(chunk, c) { c.enqueue(chunk.toUpperCase()); } });
+          let text = ""; for await (const t of parts.pipeThrough(new TextDecoderStream()).pipeThrough(upper)) text += t;
+          out.push(text);
+          const [ta, tb] = ReadableStream.from(["x", Promise.resolve("y")]).tee();
+          const ra = []; for await (const x of ta) ra.push(x);
+          const rb = []; for await (const x of tb) rb.push(x);
+          out.push(ra.join("") + rb.join(""));
+          const blobText = []; for await (const c of new Blob(["zz"]).stream()) blobText.push(new TextDecoder().decode(c));
+          out.push(blobText.join(""));
+          const sunk = [];
+          await new ReadableStream({ start(c) { c.enqueue(1); c.enqueue(2); c.close(); } }).pipeTo(new WritableStream({ write(c) { sunk.push(c); }, close() { sunk.push("closed"); } }));
+          out.push(sunk.join(","));
+          const r2 = new ReadableStream({ start(c) { c.close(); } }).getReader();
+          await r2.closed; out.push("closed-ok", new TextDecoderStream().encoding);
+          document.getElementById("o").textContent = out.join(" ");
+        })().catch((e) => { document.getElementById("o").textContent = "ERR " + e; });
+        setTimeout(() => {}, 300);
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "a b true true 123 HÉLLO xyxy zz 1,2,closed closed-ok utf-8");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

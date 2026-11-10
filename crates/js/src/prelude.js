@@ -1945,107 +1945,6 @@
   // UTF-8 both ways (Boa has no TextEncoder).
   // TextEncoder and TextDecoder are native classes (encoding.rs).
 
-  // Streams: enough for reading bodies chunk by chunk (NDJSON, SSE-ish
-  // protocols over fetch) and piping through text decoding.
-  class ReadableStream {
-    constructor(source) {
-      this._queue = []; this._waiters = []; this._done = false; this._error = null; this.locked = false;
-      const controller = {
-        enqueue: (c) => this._push(c), close: () => this._close(), error: (e) => this._fail(e),
-        get desiredSize() { return 1; },
-      };
-      this._controller = controller;
-      this._pull = source && source.pull ? () => { try { source.pull(controller); } catch (e) { this._fail(e); } } : null;
-      this._cancel = source && source.cancel ? (r) => source.cancel(r) : null;
-      if (source && source.start) { try { source.start(controller); } catch (e) { this._fail(e); } }
-    }
-    _push(c) { if (this._done) return; const w = this._waiters.shift(); if (w) w.resolve({ value: c, done: false }); else this._queue.push(c); }
-    _close() { if (this._done) return; this._done = true; for (const w of this._waiters.splice(0)) w.resolve({ value: undefined, done: true }); }
-    _fail(e) { this._error = e; for (const w of this._waiters.splice(0)) w.reject(e); }
-    getReader() {
-      if (this.locked) throw new TypeError("ReadableStream is locked");
-      this.locked = true;
-      const s = this;
-      return {
-        read() {
-          if (s._queue.length) return Promise.resolve({ value: s._queue.shift(), done: false });
-          if (s._error) return Promise.reject(s._error);
-          if (s._done) return Promise.resolve({ value: undefined, done: true });
-          return new Promise((resolve, reject) => { s._waiters.push({ resolve, reject }); if (s._pull) s._pull(); });
-        },
-        releaseLock() { s.locked = false; },
-        cancel(r) { if (s._cancel) s._cancel(r); s._queue = []; s._close(); return Promise.resolve(); },
-        get closed() { return new Promise((r) => { const t = setInterval(() => { if (s._done) { clearInterval(t); r(); } }, 10); }); },
-      };
-    }
-    cancel(r) { if (this._cancel) this._cancel(r); this._close(); return Promise.resolve(); }
-    pipeThrough(transform) {
-      this.pipeTo(transform.writable).catch((e) => transform.readable._fail(e));
-      return transform.readable;
-    }
-    async pipeTo(writable) {
-      const reader = this.getReader();
-      const writer = writable.getWriter();
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        await writer.write(value);
-      }
-      await writer.close();
-    }
-    tee() {
-      const a = new ReadableStream(), b = new ReadableStream();
-      (async () => { const r = this.getReader(); for (;;) { const { value, done } = await r.read(); if (done) { a._close(); b._close(); return; } a._push(value); b._push(value); } })();
-      return [a, b];
-    }
-    async *[Symbol.asyncIterator]() {
-      const reader = this.getReader();
-      try { for (;;) { const { value, done } = await reader.read(); if (done) return; yield value; } } finally { reader.releaseLock(); }
-    }
-    static from(iterable) {
-      return new ReadableStream({ async start(c) { for await (const x of iterable) c.enqueue(x); c.close(); } });
-    }
-  }
-  class WritableStream {
-    constructor(sink) { this._sink = sink || {}; this.locked = false; }
-    getWriter() {
-      const sink = this._sink;
-      return {
-        write: (c) => Promise.resolve(sink.write && sink.write(c)),
-        close: () => Promise.resolve(sink.close && sink.close()),
-        abort: (r) => Promise.resolve(sink.abort && sink.abort(r)),
-        releaseLock() {}, get ready() { return Promise.resolve(); }, get desiredSize() { return 1; },
-      };
-    }
-  }
-  class TransformStream {
-    constructor(transformer) {
-      transformer = transformer || {};
-      const readable = new ReadableStream();
-      const controller = { enqueue: (c) => readable._push(c), error: (e) => readable._fail(e), terminate: () => readable._close() };
-      if (transformer.start) transformer.start(controller);
-      this.readable = readable;
-      this.writable = new WritableStream({
-        write: (c) => (transformer.transform ? transformer.transform(c, controller) : controller.enqueue(c)),
-        close: () => { if (transformer.flush) transformer.flush(controller); readable._close(); },
-        abort: (e) => readable._fail(e),
-      });
-    }
-  }
-  class TextDecoderStream extends TransformStream {
-    constructor(label, opts) {
-      const decoder = new TextDecoder(label, opts);
-      super({
-        transform(chunk, c) { const t = decoder.decode(chunk, { stream: true }); if (t) c.enqueue(t); },
-        flush(c) { const t = decoder.decode(); if (t) c.enqueue(t); },
-      });
-      this.encoding = decoder.encoding;
-    }
-  }
-  class TextEncoderStream extends TransformStream {
-    constructor() { const e = new TextEncoder(); super({ transform(chunk, c) { c.enqueue(e.encode(chunk)); } }); this.encoding = "utf-8"; }
-  }
-
   // Blob and File are native (blob.rs), holding bytes.
 
   // Bodies are bytes: `N.encodeBody` makes a body ([string | ArrayBuffer,
@@ -2350,7 +2249,7 @@
       requests.delete(args[0]);
       r.done(args);
     },
-    ReadableStream, WritableStream, TransformStream, TextDecoderStream, TextEncoderStream, EventSource, __sseEvent: sseEvent,
+    EventSource, __sseEvent: sseEvent,
   });
 
   // ---- hooks for the host ----------------------------------------------
