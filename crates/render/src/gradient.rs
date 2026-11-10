@@ -201,6 +201,17 @@ impl GradientFill {
         let y0 = free.1 * self.position.y;
         let start = |offset: f32, step: f32, repeat: bool| if repeat { offset - (offset / step).ceil() * step } else { offset };
         let (sx, sy) = (start(x0, f32::from(block.width), rx), start(y0, f32::from(block.height), ry));
+        // Rounded corners: GPUI rounds each picture's visible part, not the
+        // box, so a tile part-way across a round box (a loading shimmer
+        // sliding over an avatar) came out as a pill. Draw the layer as one
+        // box-sized picture instead.
+        let at_box = sx.abs() < 0.5 && sy.abs() < 0.5 && (f32::from(block.width) - bw).abs() < 0.5 && (f32::from(block.height) - bh).abs() < 0.5;
+        if !at_box && radii != Corners::default() {
+            if let Some(layer) = composed(&image, (sx, sy), (f32::from(block.width), f32::from(block.height)), (rx, ry), (bw, bh), scale, window) {
+                window.paint_image(bounds, bounds, radii, layer, 0, false).ok();
+            }
+            return;
+        }
         let mut y = sy;
         while y < bh {
             let mut x = sx;
@@ -218,6 +229,64 @@ impl GradientFill {
             y += f32::from(block.height);
         }
     }
+}
+
+/// A layer as it shows across a `size` box: `block` (the rasterized tiles,
+/// `block_size` px) placed at `offset`, repeating along `repeat`, sampled
+/// into one picture of about the box's device size (small: gradients are
+/// smooth). Cached by placement, offsets rounded to 1/64 of the box.
+fn composed(
+    block: &Arc<RenderImage>,
+    offset: (f32, f32),
+    block_size: (f32, f32),
+    repeat: (bool, bool),
+    size: (f32, f32),
+    scale: f32,
+    window: &mut Window,
+) -> Option<Arc<RenderImage>> {
+    thread_local! {
+        static COMPOSED: RefCell<HashMap<(usize, i32, i32, u32, u32, bool, bool), Arc<RenderImage>>> = RefCell::default();
+    }
+    let q = |v: f32, of: f32| (v / of.max(1.0) * 64.0).round() as i32;
+    let key = (Arc::as_ptr(block) as usize, q(offset.0, size.0), q(offset.1, size.1), size.0 as u32, size.1 as u32, repeat.0, repeat.1);
+    if let Some(hit) = COMPOSED.with_borrow(|c| c.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let src = block.size(0);
+    let (tw, th) = (src.width.0 as u32, src.height.0 as u32);
+    let bytes = block.as_bytes(0)?;
+    if tw == 0 || th == 0 {
+        return None;
+    }
+    let fit = |v: f32| (v * scale).ceil().clamp(1.0, 128.0) as u32;
+    let (cw, ch) = (fit(size.0), fit(size.1));
+    // The offset as it was rounded for the key, so cached frames match it.
+    let offset = (key.1 as f32 / 64.0 * size.0, key.2 as f32 / 64.0 * size.1);
+    let mut out = image::RgbaImage::new(cw, ch);
+    for (x, y, px) in out.enumerate_pixels_mut() {
+        // Where this pixel is in the box, then in the tiles.
+        let bx = (x as f32 + 0.5) / cw as f32 * size.0 - offset.0;
+        let by = (y as f32 + 0.5) / ch as f32 * size.1 - offset.1;
+        let wrap = |v: f32, len: f32, on: bool| if on { v.rem_euclid(len) } else { v };
+        let (tx, ty) = (wrap(bx, block_size.0, repeat.0), wrap(by, block_size.1, repeat.1));
+        if tx < 0.0 || ty < 0.0 || tx >= block_size.0 || ty >= block_size.1 {
+            continue;
+        }
+        let (sx, sy) = (((tx / block_size.0) * tw as f32) as u32, ((ty / block_size.1) * th as f32) as u32);
+        let i = ((sy.min(th - 1) * tw + sx.min(tw - 1)) * 4) as usize;
+        *px = image::Rgba([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    }
+    let image = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
+    // Evicted pictures leave the GPU atlas too.
+    let evicted: Vec<Arc<RenderImage>> = COMPOSED.with_borrow_mut(|c| {
+        let old = if c.len() > 256 { c.drain().map(|(_, v)| v).collect() } else { Vec::new() };
+        c.insert(key, image.clone());
+        old
+    });
+    for old in evicted {
+        window.drop_image(old).ok();
+    }
+    Some(image)
 }
 
 /// The angle of a linear gradient that's just "from one color to another".
