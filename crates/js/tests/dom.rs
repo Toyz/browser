@@ -1067,21 +1067,25 @@ fn probe_styles() {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
-    let styler = style::StyleData::for_document(&doc, &|_| None).styler(style::MediaEnv { width: 1280.0, height: 900.0, ..Default::default() });
-    fn walk(doc: &page::Document, styler: &style::Styler, n: page::NodeId, parent: &style::ComputedStyle, want: &str, path: &str) {
+    let styler = style::StyleData::for_document(&doc, &|u| net::fetch_text_cached(u)).styler(style::MediaEnv { width: 1280.0, height: 900.0, scripting: true, ..Default::default() });
+    let depth: usize = std::env::var("PROBE_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(0);
+    fn walk(doc: &page::Document, styler: &style::Styler, n: page::NodeId, parent: &style::ComputedStyle, want: &str, path: &str, depth: usize, level: usize) {
         let Some(e) = doc.element(n) else { return };
         let s = styler.compute(doc, n, parent);
         let class = e.attr("class").unwrap_or("");
         let path = format!("{path} > {}{}", e.name.local, class.split_whitespace().next().map(|c| format!(".{c}")).unwrap_or_default());
+        if level <= depth && depth > 0 {
+            println!("{}{}.{} display={:?} vis={} opacity={} h={:?}", "  ".repeat(level), e.name.local, class.split_whitespace().next().unwrap_or(""), s.display, s.visible, s.opacity, s.height);
+        }
         if &*e.name.local == want || class.split_whitespace().any(|c| want.strip_prefix('.') == Some(c)) {
             println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible);
         }
         for &c in doc.children(n) {
-            walk(doc, styler, c, &s, want, &path);
+            walk(doc, styler, c, &s, want, &path, depth, level + 1);
         }
     }
     let html_el = doc.children(doc.root()).iter().copied().find(|&n| doc.element(n).is_some()).unwrap();
-    walk(&doc, &styler, html_el, &style::ComputedStyle::initial(), &want, "");
+    walk(&doc, &styler, html_el, &style::ComputedStyle::initial(), &want, "", depth, 0);
 }
 
 #[test]
@@ -1153,4 +1157,14 @@ fn match_media_evaluates_real_queries() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(text, "0 1 1 1 0 1 1 0 | false");
+}
+
+#[test]
+fn css_supports_answers_for_this_engine() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        document.getElementById("o").textContent = [CSS.supports("display", "grid"), CSS.supports("display", "bogus"),
+          CSS.supports("-webkit-touch-callout", "none"), CSS.supports("(gap: 1px) and (display: flex)"), CSS.supports("display: flex"),
+          CSS.supports("selector(:has(a))")].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true false false true true true");
 }

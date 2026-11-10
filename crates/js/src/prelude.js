@@ -3185,10 +3185,7 @@
 
   const cssEscapeImpl = (v) => String(v).replace(/[\0-\x1f\x7f]|^-?\d|^-$|[^\w-]/g, (c, i) => (/[\0-\x1f\x7f]|\d/.test(c) && (i === 0 || /^-/.test(String(v))) ? "\\" + c.charCodeAt(0).toString(16) + " " : "\\" + c));
   const CSSApi = {
-    supports(prop, value) {
-      if (value === undefined) return !/^\s*selector\(/.test(String(prop)) || true;
-      return typeof prop === "string";
-    },
+    supports(prop, value) { return value === undefined ? N.cssSupports(String(prop)) : N.cssSupports(String(prop), String(value)); },
     escape: cssEscapeImpl,
     registerProperty() {},
   };

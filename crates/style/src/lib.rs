@@ -12,6 +12,7 @@ pub mod props;
 pub mod query;
 pub mod selector;
 pub mod sheet;
+pub mod supports;
 pub mod values;
 
 use std::collections::HashMap;

@@ -84,6 +84,28 @@ pub fn parse_declaration(name: &str, value: &str, out: &mut Vec<Decl>) {
     }
 }
 
+/// Is `name: value` a declaration we'd use (`@supports`, `CSS.supports`)?
+/// The property is one we know and the value parses as one of it.
+pub fn declaration_valid(name: &str, value: &str) -> bool {
+    if name.starts_with("--") {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    if SVG_PAINT.contains(&name.as_str()) {
+        return !value.trim().is_empty();
+    }
+    if !registry().contains_key(name.as_str()) {
+        return false;
+    }
+    let trimmed = value.trim();
+    if contains_var(trimmed) || matches!(trimmed.to_ascii_lowercase().as_str(), "inherit" | "initial" | "unset" | "revert" | "revert-layer") {
+        return true;
+    }
+    let mut out = Vec::new();
+    let mut p = Parser::new(trimmed);
+    parse_property(&name, &mut p, &mut out).is_ok() && p.expect_exhausted().is_ok()
+}
+
 fn err<'i, T>(_p: &Parser<'i>) -> PResult<'i, T> {
     Err(ParseError::custom(()))
 }

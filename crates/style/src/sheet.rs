@@ -157,11 +157,7 @@ impl<'i> AtRuleParser<'i> for TopLevel<'_> {
                     AtPrelude::Group(false)
                 }
             }
-            "supports" => {
-                // Optimistic: we claim support for anything, except explicit negations.
-                let condition = consume_rest(input);
-                AtPrelude::Group(!condition.trim_start().to_ascii_lowercase().starts_with("not"))
-            }
+            "supports" => AtPrelude::Group(crate::supports::supports(&consume_rest(input))),
             "container" => AtPrelude::Media(media::container_condition(&consume_rest(input)).into()),
             "layer" => {
                 let names = consume_rest(input);
