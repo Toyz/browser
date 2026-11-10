@@ -147,6 +147,9 @@ pub struct ComputedStyle {
     /// `transform-origin` (x, y): what scaling is about (default the
     /// center, 50% 50%).
     pub transform_origin: (Length, Length),
+    /// `transform` is something other than `none` (even an identity
+    /// matrix): the box is the containing block of absolute descendants.
+    pub transformed: bool,
     /// `mask-image` is set: the background is a stencil (usually an icon).
     pub masked: bool,
     /// The mask image's (absolute) URL, if it's one we can fetch.
@@ -272,6 +275,7 @@ impl ComputedStyle {
             text_fill: None,
             scale: (1.0, 1.0),
             transform_origin: (Length::Percent(50.0), Length::Percent(50.0)),
+            transformed: false,
             shadows: None,
             filter: None,
             transitions: None,

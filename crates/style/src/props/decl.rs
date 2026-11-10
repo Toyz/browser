@@ -148,6 +148,8 @@ pub enum Decl {
     /// Degrees.
     Rotate(f32),
     Scale(f32, f32),
+    /// `transform` has functions (not `none`).
+    Transformed(bool),
     TransformOrigin(LenSpec, LenSpec),
     Masked(bool),
     MaskUrl(Option<Arc<str>>),

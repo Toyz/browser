@@ -427,3 +427,12 @@ fn place_items_sets_both_axes_and_small_caps_parse() {
     assert_eq!((d.align_items, d.justify_items), (Some(Align::Center), Some(Align::Center)));
     assert_eq!(style_of(&doc, &s, "p").small_caps, Some(false));
 }
+
+#[test]
+fn any_transform_but_none_is_noted() {
+    let (doc, s) = styled(r#"<div><p>x</p><span>y</span><b>z</b></div>"#, "div { transform: matrix(1, 0, 0, 1, 0, 0) } span { transform: none } b { transform: translateX(2px) }");
+    assert!(style_of(&doc, &s, "div").transformed, "an identity matrix is still a transform");
+    assert!(!style_of(&doc, &s, "p").transformed, "not inherited");
+    assert!(!style_of(&doc, &s, "span").transformed);
+    assert!(style_of(&doc, &s, "b").transformed);
+}

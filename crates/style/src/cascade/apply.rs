@@ -290,6 +290,7 @@ impl Styler {
                 s.svg_paint = Some(list.into());
             }
             Decl::Scale(x, y) => s.scale = (*x, *y),
+            Decl::Transformed(v) => s.transformed = *v,
             Decl::TransformOrigin(x, y) => s.transform_origin = (len(x), len(y)),
             Decl::TransitionProperty(v) => Arc::make_mut(s.transitions.get_or_insert_default()).properties = v.clone(),
             Decl::TransitionDuration(v) => Arc::make_mut(s.transitions.get_or_insert_default()).durations = v.clone(),

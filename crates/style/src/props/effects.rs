@@ -146,6 +146,7 @@ pub(super) fn p_transform<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl
     // Translations, rotations and scales (skews and 3D are ignored).
     let (mut x, mut y) = (Vec::new(), Vec::new());
     let (mut rotate, mut scale) = (0.0f32, (1.0f32, 1.0f32));
+    let mut functions = false;
     if name == "translate" {
         if let Ok(v) = parse_len(p) {
             x.push(v);
@@ -157,6 +158,7 @@ pub(super) fn p_transform<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl
     while !p.is_exhausted() {
         let Ok(token) = p.next().cloned() else { break };
         let Token::Function(f) = token else { continue };
+        functions = true;
         let f = f.to_ascii_lowercase();
         p.parse_nested_block(|p| {
             match f.as_str() {
@@ -222,6 +224,7 @@ pub(super) fn p_transform<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl
     if name == "transform" {
         out.push(D::Rotate(rotate));
         out.push(D::Scale(scale.0, scale.1));
+        out.push(D::Transformed(functions));
     }
 }
     Ok(())

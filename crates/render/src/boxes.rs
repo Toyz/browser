@@ -1878,7 +1878,7 @@ impl Builder<'_> {
         // A positioned box is the containing block of the absolute boxes
         // inside it; a static one sends those placed by their insets on up
         // (ones with no insets sit where they'd be in the flow: they stay).
-        if style.position != style::Position::Static {
+        if contains_absolutes(&style) {
             c.absolutes.extend(self.hoisted.drain(hoist_mark..));
         } else if self.positioned > 0 {
             let (up, stay): (Vec<_>, Vec<_>) = std::mem::take(&mut c.absolutes).into_iter().partition(|b| {
@@ -2055,7 +2055,7 @@ impl Builder<'_> {
             c.inline.nodes.push(id);
         }
         let root_like = doc.element(id).is_some_and(|e| matches!(&*e.name.local, "html" | "body"));
-        let positioned = is_element && !root_like && parent_style.position != style::Position::Static;
+        let positioned = is_element && !root_like && contains_absolutes(parent_style);
         if positioned {
             self.positioned += 1;
         }
@@ -3846,6 +3846,14 @@ fn collect_images(b: &LayoutBox, out: &mut Vec<Arc<Url>>) {
         LayoutBox::Image(i) => out.push(i.src.clone()),
         LayoutBox::Paragraph(p) => p.objects.iter().for_each(|o| o.images(out)),
     }
+}
+
+/// Is a box with `style` the containing block of its absolute descendants?
+/// Positioned boxes are, and transformed ones (any `transform` but `none`):
+/// DuckDuckGo's checkmark sat in a span with an identity transform, and
+/// without it went to the page's corner.
+fn contains_absolutes(style: &ComputedStyle) -> bool {
+    style.position != style::Position::Static || style.transformed
 }
 
 /// A float that takes no room: no content, and nothing giving it height.
