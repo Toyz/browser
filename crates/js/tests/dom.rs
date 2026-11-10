@@ -834,6 +834,20 @@ fn inline_caches_follow_a_reshaped_prototype() {
 }
 
 #[test]
+fn computed_styles_see_cssom_rules() {
+    // CSS-in-JS: rules inserted through the CSSOM (styled-components empties
+    // its tags and inserts them all).
+    let doc = run(r##"<body><style id="s"></style><div id="d" class="x"></div><p id="o"></p><script>
+        const before = getComputedStyle(document.getElementById("d")).display;
+        const sheet = document.getElementById("s").sheet;
+        sheet.insertRule(".x { display: grid; color: rgb(1, 2, 3) }", 0);
+        const after = getComputedStyle(document.getElementById("d"));
+        document.getElementById("o").textContent = [before, after.display, after.color].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "block grid rgb(1, 2, 3)");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

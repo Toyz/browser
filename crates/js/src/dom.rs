@@ -126,6 +126,10 @@ pub(crate) struct Dom {
     pub generation: u64,
     /// For `getComputedStyle`.
     pub(crate) styles: crate::computed::StyleCache,
+    /// `<style>` sheets as scripts changed them through the CSSOM, for
+    /// `getComputedStyle` (refreshed when `cssom_dirty`).
+    cssom: HashMap<NodeId, String>,
+    cssom_dirty: bool,
     /// (due, id)
     pub(crate) timers: Vec<(Instant, u32)>,
     /// Scripts inserted by scripts, to run after the current task.
@@ -238,6 +242,8 @@ impl Runtime {
             dirty: false,
             generation: 0,
             styles: Default::default(),
+            cssom: HashMap::new(),
+            cssom_dirty: false,
             timers: Vec::new(),
             pending_scripts: Vec::new(),
             ran: HashSet::new(),
@@ -1022,12 +1028,23 @@ fn media_env(dom: &Dom) -> style::MediaEnv {
     style::MediaEnv { width: dom.geometry.viewport.0, height: dom.geometry.viewport.1, dark: dom.dark, scripting: true }
 }
 
+/// Bring the CSSOM-changed sheets `getComputedStyle` sees up to date.
+fn refresh_cssom(d: &Shared, cx: &mut Context) {
+    if !std::mem::take(&mut d.borrow_mut().cssom_dirty) {
+        return;
+    }
+    let Some(f) = cx.global_object().get(js_string!("__cssomStyles"), cx).ok().and_then(|f| f.as_callable()) else { return };
+    let Ok(v) = f.call(&JsValue::undefined(), &[], cx) else { return };
+    let texts = node_texts(v, cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
+    d.borrow_mut().cssom = texts;
+}
+
 /// An element's computed `prop` (`size`: as laid out, for `width`/`height`).
 fn computed_value(dom: &mut Dom, id: NodeId, prop: &str, size: Option<(f32, f32)>) -> String {
     let env = media_env(dom);
-    let Dom { doc, styles, generation, dark, .. } = dom;
+    let Dom { doc, styles, generation, dark, cssom, .. } = dom;
     let fetch = |u: &Url| net::fetch_text_cached(u);
-    let Some(style) = styles.style_of(doc, id, *generation, env, &fetch) else { return String::new() };
+    let Some(style) = styles.style_of(doc, id, *generation, env, &fetch, cssom) else { return String::new() };
     crate::computed::value(&style, prop, size, *dark)
 }
 
@@ -1502,6 +1519,13 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         dom.focus = Some(node);
         Ok(JsValue::undefined())
     }));
+    // A sheet's rules changed through the CSSOM.
+    add("cssomChanged", 0, Box::new(|d, _, _| {
+        let mut dom = d.borrow_mut();
+        dom.cssom_dirty = true;
+        dom.changed();
+        Ok(JsValue::undefined())
+    }));
     add("touch", 0, Box::new(|d, _, _| {
         d.borrow_mut().changed();
         Ok(JsValue::undefined())
@@ -1522,6 +1546,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("computedStyle", 2, Box::new(|d, a, cx| {
         let prop = arg_string(a, 1, cx)?;
         let Some(id) = arg_node(&d.borrow(), a, 0) else { return Ok(js_str("")) };
+        refresh_cssom(d, cx);
         let size = match prop.as_str() {
             "width" | "height" => geometry::laid_out_size(d, id),
             _ => None,

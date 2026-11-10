@@ -33,15 +33,19 @@ impl StyleCache {
         generation: u64,
         env: MediaEnv,
         fetch: &(dyn Fn(&Url) -> Option<String> + Sync),
+        cssom: &HashMap<NodeId, String>,
     ) -> Option<Arc<ComputedStyle>> {
         doc.element(id)?;
         let env_key = (env.width as u32, env.height as u32, env.dark);
         if generation != self.generation || env_key != self.env {
             self.styles.clear();
             self.generation = generation;
-            let key = sheets_key(doc);
+            let key = sheets_key(doc, cssom);
             if self.data.is_none() || key != self.key {
-                self.data = Some(StyleData::for_document(doc, fetch));
+                // `<style>` sheets scripts changed through the CSSOM count as
+                // what they hold now (CSS-in-JS: styled-components empties
+                // its tags and inserts every rule).
+                self.data = Some(StyleData::for_document_with(doc, fetch, &|n| cssom.get(&n).cloned()));
                 self.key = key;
                 self.styler = None;
             }
@@ -75,8 +79,11 @@ impl StyleCache {
 
 /// What a document's stylesheets are made of, cheaply: each sheet's
 /// element and size, and the adopted ones (re-parsed when this changes).
-fn sheets_key(doc: &Document) -> u64 {
+fn sheets_key(doc: &Document, cssom: &HashMap<NodeId, String>) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    let mut overridden: Vec<_> = cssom.iter().collect();
+    overridden.sort_by_key(|(n, _)| **n);
+    overridden.hash(&mut h);
     for n in doc.descendants(doc.root()) {
         let Some(e) = doc.element(n) else { continue };
         match &*e.name.local {

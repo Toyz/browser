@@ -28,6 +28,12 @@ pub enum StyleSource {
 /// Find `<style>` and `<link rel=stylesheet>` in document order (each
 /// for the tree it's in), then constructed (`adoptedStyleSheets`) ones.
 pub fn collect_style_sources(doc: &Document) -> Vec<StyleSource> {
+    collect_style_sources_with(doc, &|_| None)
+}
+
+/// The same, with some `<style>` elements' sheets given in place of their
+/// text (`overrides`: what scripts made of them through the CSSOM).
+pub fn collect_style_sources_with(doc: &Document, overrides: &dyn Fn(NodeId) -> Option<String>) -> Vec<StyleSource> {
     let mut out = Vec::new();
     for id in doc.descendants(doc.root()) {
         let Some(e) = doc.element(id) else { continue };
@@ -37,7 +43,7 @@ pub fn collect_style_sources(doc: &Document) -> Vec<StyleSource> {
         let media = e.attr("media").unwrap_or("").to_owned();
         let scope = doc.tree_of(id);
         match &*e.name.local {
-            "style" => out.push(StyleSource::Inline { css: doc.text_content(id), media, scope }),
+            "style" => out.push(StyleSource::Inline { css: overrides(id).unwrap_or_else(|| doc.text_content(id)), media, scope }),
             "link" => {
                 let rel = e.attr("rel").unwrap_or("").to_ascii_lowercase();
                 let is_sheet = rel.split_ascii_whitespace().any(|r| r == "stylesheet");

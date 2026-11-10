@@ -176,8 +176,14 @@ impl StyleData {
     /// Gather, fetch and parse every stylesheet a document uses. `fetch` is
     /// called (in parallel) for `<link>`ed sheets and `@import`s.
     pub fn for_document(doc: &Document, fetch: &(dyn Fn(&Url) -> Option<String> + Sync)) -> Self {
+        Self::for_document_with(doc, fetch, &|_| None)
+    }
+
+    /// The same, with some `<style>` elements' sheets given in place of
+    /// their text (see `collect_style_sources_with`).
+    pub fn for_document_with(doc: &Document, fetch: &(dyn Fn(&Url) -> Option<String> + Sync), overrides: &dyn Fn(NodeId) -> Option<String>) -> Self {
         let mut external = 0;
-        let sources: Vec<StyleSource> = collect_style_sources(doc)
+        let sources: Vec<StyleSource> = sources::collect_style_sources_with(doc, overrides)
             .into_iter()
             // Print stylesheets and the like can never apply on screen.
             .filter(|s| media::can_ever_match(source_media(s)))

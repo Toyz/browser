@@ -1429,7 +1429,7 @@
     removeRule(index) { this.deleteRule(index || 0); }
     _changed() {
       if (this.ownerNode) { this._cssom = true; this._source = this.ownerNode.textContent; cssomStyles.add(this.ownerNode); }
-      N.touch();
+      N.cssomChanged();
     }
   }
   const cssomStyles = new Set();
