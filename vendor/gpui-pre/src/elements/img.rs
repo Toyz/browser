@@ -319,7 +319,9 @@ impl Element for Img {
                             if let Some(state) = &mut state {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
-                                    if window.is_window_active() {
+                                    // Feather: animations play in windows that
+                                    // aren't focused too, as in browsers.
+                                    {
                                         let current_time = Instant::now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
@@ -335,8 +337,6 @@ impl Element for Img {
                                         } else {
                                             state.last_frame_time = Some(current_time);
                                         }
-                                    } else {
-                                        state.last_frame_time = None;
                                     }
                                 } else {
                                     state.last_frame_time = None;
@@ -381,7 +381,6 @@ impl Element for Img {
 
                             if global_id.is_some()
                                 && data.frame_count() > 1
-                                && window.is_window_active()
                                 && !cx.reduce_motion()
                             {
                                 window.request_animation_frame();

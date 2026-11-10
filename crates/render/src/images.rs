@@ -10,7 +10,7 @@ use std::sync::{OnceLock, RwLock};
 
 use anyhow::{Context as _, Result, bail};
 use gpui_kit::{
-    AnyElement, AssetSource, Image, ImageFormat, ImageSource, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
+    AnyElement, AssetSource, Image, ImageFormat, ImageSource, InteractiveElement, IntoElement, ObjectFit, ParentElement, RenderImage, SharedString,
     Img, Pixels, Styled, StyledImage, div, img, px, relative,
 };
 use url::Url;
@@ -152,8 +152,15 @@ pub fn picture_fitted(
         style::ObjectFit::ScaleDown => Some(ObjectFit::ScaleDown),
     };
     let image: ImageSource = image.into();
+    // An animation plays only in an element with state (its frame and
+    // clock), which needs an id: the picture's own (the same animation
+    // shown twice plays in step).
+    let animated = |i: Img, source: &ImageSource| match source {
+        ImageSource::Render(r) if r.frame_count() > 1 => i.id(("animation", r.id.0)).into_any_element(),
+        _ => i.into_any_element(),
+    };
     if let Some(fit) = fit {
-        return round(img(image)).size_full().object_fit(fit).into_any_element();
+        return animated(round(img(image.clone())).size_full().object_fit(fit), &image);
     }
     match padded {
         Some(p) if width > 0.0 && height > 0.0 => div()
@@ -170,7 +177,7 @@ pub fn picture_fitted(
                     .object_fit(ObjectFit::Fill),
             )
             .into_any_element(),
-        _ => round(img(image)).size_full().object_fit(ObjectFit::Fill).into_any_element(),
+        _ => animated(round(img(image.clone())).size_full().object_fit(ObjectFit::Fill), &image),
     }
 }
 
@@ -306,6 +313,13 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
             imagesize::ImageType::Bmp => ImageFormat::Bmp,
             imagesize::ImageType::Tiff => ImageFormat::Tiff,
             imagesize::ImageType::Ico => ImageFormat::Ico,
+            // AVIF: decoded below, by the system (GPUI has no format for it).
+            imagesize::ImageType::Heif(imagesize::Compression::Av1) => {
+                let frames = crate::avif::decode(&bytes).context("can't decode AVIF")?;
+                let (w, h) = (frames[0].buffer().width() as f32, frames[0].buffer().height() as f32);
+                let frames = Some(Arc::new(RenderImage::new(frames)));
+                return Ok(Prepared { image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())), padded: None, frames, width: w, height: h });
+            }
             other => bail!("unsupported image format {other:?}"),
         };
         let size = imagesize::blob_size(&bytes).context("can't read image size")?;

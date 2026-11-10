@@ -39,6 +39,27 @@ Drop these when Boa releases include equivalent fixes.
   centered one (css-flexbox §9.6 step 13; also what block layout does with
   `margin: 0 auto` on an overflowing box).
 
+## gpui-pre 0.3.11
+
+- `src/style.rs`, `src/taffy.rs`: full CSS grids. `Style::css_grid` carries a
+  container's template (any track sizes, `repeat()` including `auto-fill` /
+  `auto-fit`, named lines, `grid-template-areas`, auto flow) and
+  `Style::css_grid_item` an item's placement (line numbers, names, spans,
+  `justify-self`); both are converted to taffy's grid types when laid out.
+  GPUI's own grid fields only know equal columns and spans: the Guardian's
+  front page collapsed into one column.
+- `src/style.rs`, `src/taffy.rs`: `Style::content_box`, sizes as CSS
+  content-box sizes (taffy's `box-sizing: content-box`), so percentage widths
+  on padded boxes come out as in browsers.
+- `src/window.rs`: a paint-time scale (`Window::with_paint_scale`). Every
+  primitive painted inside it (quads, shadows, glyphs, emoji, SVGs, images,
+  underlines) and every content mask pushed inside it is mapped about a
+  pivot; glyphs are rasterized at the scaled size. Layout and hit testing
+  are unchanged. It's CSS `transform: scale()`: GPUI could transform only
+  monochrome SVGs.
+- `src/elements/img.rs`: animated images keep playing while the window
+  isn't the focused one (GPUI paused them, which browsers don't).
+
 ## gpui-pre-apple 0.3.11
 
 - `src/text_system.rs`: variable fonts draw the requested weight. When the

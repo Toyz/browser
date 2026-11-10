@@ -2119,7 +2119,11 @@ impl Builder<'_> {
                     let block = self.build_block(child, style.clone(), BlockKind::Normal, link, generated);
                     // Nested flows can't host GPUI subtrees (form controls,
                     // block inline-blocks): those make this one a subtree too.
+                    // Pictures, gradients and masks are drawn by a GPUI
+                    // subtree (the line paints only colors and borders).
+                    let decorated = style.background_url.is_some() || style.gradients.is_some() || style.masked || style.mask_url.is_some();
                     let content = match block.children.as_slice() {
+                        _ if decorated => None,
                         [] => Some(None),
                         [LayoutBox::Paragraph(p)] if !p.objects.iter().any(|o| matches!(o, InlineObject::BlockBox(_))) => {
                             Some(Some(p.clone()))

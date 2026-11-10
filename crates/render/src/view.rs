@@ -1366,10 +1366,10 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
 /// A box's CSS background image, or its mask icon, as an absolutely
 /// positioned layer filling the box.
 fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
-    let lookup = |url: &str| -> Option<(std::sync::Arc<Image>, f32, f32)> {
+    let lookup = |url: &str| -> Option<(std::sync::Arc<Image>, Option<std::sync::Arc<RenderImage>>, f32, f32)> {
         let url = Url::parse(url).ok()?;
         match cx.images.borrow().get(&url)? {
-            ImageState::Ready { image, width, height, .. } => Some((image.clone(), *width, *height)),
+            ImageState::Ready { image, frames, width, height, .. } => Some((image.clone(), frames.clone(), *width, *height)),
             _ => None,
         }
     };
@@ -1415,7 +1415,7 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
 
     if s.masked {
         // A stencil filled with the background color: draw the SVG in that color.
-        let (image, w, h) = lookup(s.mask_url.as_deref()?)?;
+        let (image, _, w, h) = lookup(s.mask_url.as_deref()?)?;
         if image.format != ImageFormat::Svg {
             return None;
         }
@@ -1432,14 +1432,26 @@ fn image_layer(s: &ComputedStyle, cx: &RenderCx) -> Option<AnyElement> {
         );
         return Some(d.child(icon).into_any_element());
     }
-    let (image, w, h) = lookup(s.background_url.as_deref()?)?;
+    let (image, frames, w, h) = lookup(s.background_url.as_deref()?)?;
+    // Decoded here (animations, AVIF): those frames.
+    let image: ImageSource = match frames {
+        Some(frames) => frames.into(),
+        None => image.into(),
+    };
     let (d, size) = layer(s.background_size, s.background_position);
     let fit = match size {
         BgSize::Cover => ObjectFit::Cover,
         BgSize::Contain => ObjectFit::Contain,
         _ => ObjectFit::Fill,
     };
-    let picture = shifted(sized(div(), size, (w, h)), s.background_position).child(img(image).size_full().object_fit(fit));
+    let picture = shifted(sized(div(), size, (w, h)), s.background_position).child(match &image {
+        // An animation needs element state to play (see `picture_fitted`).
+        ImageSource::Render(r) if r.frame_count() > 1 => {
+            let id = ("animation", r.id.0);
+            img(image).size_full().object_fit(fit).id(id).into_any_element()
+        }
+        _ => img(image).size_full().object_fit(fit).into_any_element(),
+    });
     Some(d.child(picture).into_any_element())
 }
 

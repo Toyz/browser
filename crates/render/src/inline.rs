@@ -769,7 +769,9 @@ fn place(
                                                 own,
                                             );
                                             let ratio = f32::from(w - l - r) / f32::from(h - t - b).max(1.0);
-                                            let (picture, padded) = crate::images::filtered(picture, padded, frames, cx.palette.filter.as_deref());
+                                            // Its own `filter` first, then those it's inside.
+                                            let own: Vec<style::Filter> = image.style.filter.iter().flat_map(|f| f.iter().copied()).chain(cx.palette.filter.iter().flat_map(|f| f.iter().copied())).collect();
+                                            let (picture, padded) = crate::images::filtered(picture, padded, frames, (!own.is_empty()).then_some(&own[..]));
                                             crate::images::picture_fitted(picture, &padded, *width, *height, corners, image.style.object_fit, Some(ratio))
                                         }),
                                 )
