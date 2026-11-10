@@ -169,3 +169,19 @@ fn display_and_font_family() {
     );
     assert_eq!(parse("font-family", "ui-monospace, SFMono-Regular, Menlo")[0], Decl::FontFamily(FontFamily::Mono));
 }
+
+#[test]
+fn minmax_tracks_keep_a_length_minimum() {
+    // MDN's layout: sidebars at least 15rem, the article up to 48rem.
+    let d = parse("grid-template-columns", "minmax(240px, 1fr) 32px minmax(0, 768px) 32px minmax(15rem, 2fr)");
+    assert!(d.contains(&Decl::GridTracks(Some(
+        vec![
+            TrackSpec::FrMin(1.0, LenSpec::px(240.0)),
+            TrackSpec::Len(LenSpec::px(32.0)),
+            TrackSpec::Max(LenSpec::px(768.0)),
+            TrackSpec::Len(LenSpec::px(32.0)),
+            TrackSpec::FrMin(2.0, LenSpec::Lin(Lin { rem: 15.0, ..Default::default() })),
+        ]
+        .into()
+    ))), "{d:?}");
+}

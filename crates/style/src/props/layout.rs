@@ -155,9 +155,17 @@ pub(crate) fn parse_tracks<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Vec<Tra
             },
             Token::Number { value: 0.0, .. } => TrackSpec::Len(LenSpec::px(0.0)),
             Token::Function(f) if f.eq_ignore_ascii_case("minmax") => p.parse_nested_block(|p| {
+                // The minimum, when it's a length (`minmax(15rem, 1fr)`).
+                let min: Result<LenSpec, ()> = p.try_parse(|p| match p.next().map_err(|_| ())?.clone() {
+                    Token::Dimension { value, unit, .. } if !unit.eq_ignore_ascii_case("fr") => unit_lin(value, &unit).map(LenSpec::Lin).ok_or(()),
+                    _ => Err(()),
+                });
                 while !p.is_exhausted() && !matches!(p.next()?, Token::Comma) {}
                 Ok(match p.next()?.clone() {
-                    Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("fr") => TrackSpec::Fr(value),
+                    Token::Dimension { value, unit, .. } if unit.eq_ignore_ascii_case("fr") => match min {
+                        Ok(min) => TrackSpec::FrMin(value, min),
+                        Err(()) => TrackSpec::Fr(value),
+                    },
                     Token::Dimension { value, unit, .. } => match unit_lin(value, &unit) {
                         Some(l) => TrackSpec::Max(LenSpec::Lin(l)),
                         None => TrackSpec::Auto,

@@ -704,6 +704,8 @@ pub enum Track {
     Px(f32),
     /// A share of the free space.
     Fr(f32),
+    /// `minmax(<px>, <n>fr)`: a share of the free space, at least this wide.
+    FrMin(f32, f32),
     /// `minmax(<min>, <length>)`: flexible, but no wider than this, px.
     Max(f32),
     /// `auto`, `min-content`, percentages...: sized by its content.
@@ -715,6 +717,8 @@ pub enum Track {
 pub enum TrackSpec {
     Len(LenSpec),
     Fr(f32),
+    /// `minmax(<length>, <n>fr)`.
+    FrMin(f32, LenSpec),
     Max(LenSpec),
     Auto,
 }

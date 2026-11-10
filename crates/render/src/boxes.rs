@@ -1226,7 +1226,7 @@ impl Builder<'_> {
             tracks[col..col + cols].iter().map(|t| match t { Track::Px(v) => *v, _ => 0.0 }).sum::<f32>()
                 + gap * cols.saturating_sub(1) as f32
         };
-        let flexible = |col: usize, cols: usize| tracks[col..col + cols].iter().any(|t| matches!(t, Track::Fr(_) | Track::Max(_)));
+        let flexible = |col: usize, cols: usize| tracks[col..col + cols].iter().any(|t| matches!(t, Track::Fr(_) | Track::FrMin(..) | Track::Max(_)));
         let size = |b: &LayoutBox| -> usize {
             fn count(b: &LayoutBox) -> usize {
                 match b {
@@ -1336,11 +1336,20 @@ impl Builder<'_> {
             let push_cell = |this: &mut Self, c: usize, n: usize, items: Vec<LayoutBox>, cells: &mut Vec<LayoutBox>| {
                 let mut st = ComputedStyle::anonymous(style);
                 st.display = style::Display::Block;
-                let grow: f32 = tracks[c..c + n].iter().map(|t| match t { Track::Fr(f) => *f, Track::Max(_) => 1.0, _ => 0.0 }).sum();
+                // Tracks with a fixed maximum (`minmax(0, 48rem)`) take the
+                // free space first, up to it; `fr` tracks share what's left
+                // (as the grid algorithm grows them: MDN's sidebars took a
+                // third each of the page from its article).
+                const BEFORE_FR: f32 = 1000.0;
+                let grow: f32 = tracks[c..c + n]
+                    .iter()
+                    .map(|t| match t { Track::Fr(f) | Track::FrMin(f, _) => *f, Track::Max(_) => BEFORE_FR, _ => 0.0 })
+                    .sum();
+                let min: f32 = tracks[c..c + n].iter().map(|t| if let Track::FrMin(_, m) = t { *m } else { 0.0 }).sum();
                 if grow > 0.0 {
                     st.flex_grow = grow;
                     st.flex_basis = Length::Px(width_of(c, n));
-                    st.min_width = Length::Px(0.0);
+                    st.min_width = Length::Px(min);
                     if let [Track::Max(max)] = tracks[c..c + n] {
                         st.max_width = Length::Px(max);
                     }

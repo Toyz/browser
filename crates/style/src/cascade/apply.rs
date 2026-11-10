@@ -255,6 +255,10 @@ impl Styler {
                             _ => Track::Auto,
                         },
                         TrackSpec::Fr(f) => Track::Fr(*f),
+                        TrackSpec::FrMin(f, min) => match len(min) {
+                            Length::Px(m) if m > 0.0 => Track::FrMin(*f, m),
+                            _ => Track::Fr(*f),
+                        },
                         TrackSpec::Max(l) => match len(l) {
                             Length::Px(v) => Track::Max(v),
                             _ => Track::Fr(1.0),
