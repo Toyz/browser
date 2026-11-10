@@ -665,7 +665,11 @@ impl Runtime {
         for node in nodes {
             if let Some(c) = dom.canvases.get(&node) {
                 let (width, height) = c.size();
-                out.insert(node, crate::CanvasPixels { width, height, pixels: c.pixels().into() });
+                // (A frame still waiting gives its buffer to this one.)
+                let mut pixels = out.remove(&node).map(|old| old.pixels).unwrap_or_default();
+                pixels.clear();
+                pixels.extend_from_slice(c.pixels());
+                out.insert(node, crate::CanvasPixels { width, height, pixels });
             }
         }
         drop(out);

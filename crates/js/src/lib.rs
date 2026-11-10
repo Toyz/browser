@@ -123,11 +123,12 @@ pub enum FromJs {
     ScrollTo { x: f32, y: f32, smooth: bool },
 }
 
-/// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height`.
+/// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height` (handed
+/// over, so the tab converts them in place).
 pub struct CanvasPixels {
     pub width: u32,
     pub height: u32,
-    pub pixels: Arc<[u8]>,
+    pub pixels: Vec<u8>,
 }
 
 /// Each canvas's newest pixels the tab hasn't taken yet: a newer frame

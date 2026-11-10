@@ -9,6 +9,10 @@ name = "feather"
 path = "src/main.rs"
 
 [dependencies]
+# The global allocator: returns freed memory to the system and fragments
+# less than the platform's (a page's script parse no longer leaves its peak
+# behind).
+mimalloc = { version = "0.1", default-features = false }
 # Web fonts: WOFF/WOFF2 decoding (pure Rust) and reading their family names.
 wuff = "0.2"
 ttf-parser = "0.25"

@@ -545,6 +545,9 @@ impl AssetSource for AppAssets {
     }
 }
 
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     // Icons are embedded SVGs served through the asset source; pages' SVG
     // icons are served alongside them.

@@ -317,15 +317,17 @@ pub fn filtered(
 
 /// A ready picture from premultiplied RGBA pixels (a canvas's), and its
 /// one frame (to drop from the GPU atlas when it's replaced).
-pub fn from_pixels(width: u32, height: u32, pixels: &[u8]) -> Option<(ImageState, Arc<RenderImage>)> {
-    // BGRA with straight alpha, as GPUI draws pictures.
-    let mut bgra = vec![0u8; pixels.len()];
-    for (out, px) in bgra.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>) -> Option<(ImageState, Arc<RenderImage>)> {
+    // BGRA with straight alpha, as GPUI draws pictures (converted in place).
+    for px in pixels.chunks_exact_mut(4) {
         let a = px[3] as u32;
         let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
-        out.copy_from_slice(&[un(px[2]), un(px[1]), un(px[0]), px[3]]);
+        let (r, g, b) = (un(px[0]), un(px[1]), un(px[2]));
+        px[0] = b;
+        px[1] = g;
+        px[2] = r;
     }
-    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
     let frame = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
     let state = ImageState::Ready {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),

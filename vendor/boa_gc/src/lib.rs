@@ -71,7 +71,7 @@ impl Default for GcConfig {
             // large heaps (YouTube) collecting that often was a quarter of
             // all script time.
             threshold: 16 * 1_048_576,
-            used_space_percentage: 35,
+            used_space_percentage: std::env::var("FEATHER_GC_USED").ok().and_then(|v| v.parse().ok()).unwrap_or(35),
         }
     }
 }

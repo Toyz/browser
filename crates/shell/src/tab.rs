@@ -792,7 +792,7 @@ impl Tab {
         let frames = std::mem::take(&mut *host.canvas_frames.lock().unwrap_or_else(|e| e.into_inner()));
         for (node, c) in frames {
             let Ok(url) = Url::parse(&js::canvas_url(node)) else { continue };
-            let Some((state, frame)) = render::images::from_pixels(c.width, c.height, &c.pixels) else { continue };
+            let Some((state, frame)) = render::images::from_pixels(c.width, c.height, c.pixels) else { continue };
             self.images.borrow_mut().insert(url, state);
             if let Some(old) = self.canvas_frames.insert(node, frame) {
                 window.drop_image(old).ok();
