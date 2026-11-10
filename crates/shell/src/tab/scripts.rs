@@ -190,13 +190,39 @@ impl Tab {
 
     /// Mouse up: a click on something that isn't a link still reaches the
     /// page's listeners (links and buttons went through `link_clicked`).
-    pub(super) fn script_mouse_up(&mut self) {
+    pub(super) fn script_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.script_clicked) || self.hovered_link.is_some() {
+            return;
+        }
+        // A click anywhere in a link (a card's picture, its padding) follows
+        // it, unless the page's scripts cancel it (text links come through
+        // `on_link_click`).
+        if let Some(url) = self.click_target().and_then(|t| self.enclosing_link(t)) {
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("click in a link: {url}");
+            }
+            self.link_clicked(move |this, window, cx| this.navigate(url, window, cx), window, cx);
             return;
         }
         if let Some((host, target)) = self.heard_click() {
             host.send(js::ToJs::Click { node: target, reply: None });
         }
+    }
+
+    /// The `<a href>` (or `<area href>`) `node` is in, as a URL.
+    fn enclosing_link(&self, node: NodeId) -> Option<url::Url> {
+        let doc = self.page.as_ref()?.doc.as_ref()?;
+        let mut n = Some(node);
+        while let Some(id) = n {
+            if let Some(e) = doc.element(id)
+                && matches!(&**e.local_name(), "a" | "area")
+                && let Some(href) = e.attr("href")
+            {
+                return doc.resolve_url(href);
+            }
+            n = doc.parent(id);
+        }
+        None
     }
 }
 

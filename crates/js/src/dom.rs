@@ -484,9 +484,22 @@ impl Runtime {
     fn refresh_listening(&mut self) {
         let listening = self.call_global("__listeningIds", &[]);
         let listening = self.node_set(listening);
-        *self.listening.write().unwrap_or_else(|e| e.into_inner()) = listening;
         let measured = self.call_global("__measuredIds", &[]);
-        let measured = self.node_set(measured);
+        let mut measured = self.node_set(measured);
+        // What's clicked is what scripts measure next (a dropdown placed
+        // under its trigger, a tooltip by its target): its box and position
+        // are kept ready, not first asked for (and found missing, at 0,0)
+        // in the click handler. Its parent too (menus position against it).
+        {
+            let dom = self.dom.borrow();
+            for &n in &listening {
+                measured.insert(n);
+                if let Some(p) = dom.doc.parent(n).filter(|&p| dom.doc.element(p).is_some()) {
+                    measured.insert(p);
+                }
+            }
+        }
+        *self.listening.write().unwrap_or_else(|e| e.into_inner()) = listening;
         *self.measured.write().unwrap_or_else(|e| e.into_inner()) = measured;
         let mouse = self.call_global("__mouseIds", &[]);
         let mouse = self.node_set(mouse);

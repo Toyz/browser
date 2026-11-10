@@ -61,7 +61,11 @@ button, input[type=submit], input[type=reset], input[type=button], input[type=im
   background-color: ButtonFace;
   text-align: center;
   cursor: default;
+  /* As Chromium's and Firefox's: a button's size includes its padding
+     and border (\`width: 100%\` buttons fill their menu, not overflow it). */
+  box-sizing: border-box;
 }
+select, input[type=search] { box-sizing: border-box; }
 option, optgroup, datalist { display: none; }
 label { cursor: default; }
 fieldset { margin: 0 2px; padding: 0.35em 0.75em 0.625em; border: 2px groove #c0c0c0; }

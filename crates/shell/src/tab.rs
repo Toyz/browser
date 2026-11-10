@@ -2222,7 +2222,7 @@ impl Render for Tab {
                     if event.click_count == 2 {
                         this.script_mouse("dblclick", event.position, 0, (0.0, 0.0));
                     }
-                    this.script_mouse_up();
+                    this.script_mouse_up(window, cx);
                     this.interaction_changed(window, cx);
                 }),
             )
