@@ -694,7 +694,7 @@ fn layout_reaches_scripts() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(host.measured.read().unwrap().contains(&b));
-    host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1024.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1024.0, 700.0), scroll: (0.0, 0.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(2);
     while !text.contains('|') && std::time::Instant::now() < until {
@@ -734,7 +734,7 @@ fn mouse_events_reach_scripts() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(host.hears_mouse(&[c]) && host.hears_mouse(&[root]));
-    host.send(js::ToJs::Layout { rects: vec![(c, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1000.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(c, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1000.0, 700.0), scroll: (0.0, 0.0) });
     host.send(js::ToJs::Mouse { kind: "mousedown", node: c, x: 50.0, y: 60.0, button: 0, buttons: 1, delta: (0.0, 0.0) });
     host.send(js::ToJs::Mouse { kind: "wheel", node: c, x: 50.0, y: 60.0, button: 0, buttons: 0, delta: (0.0, 120.0) });
     let mut text = String::new();
@@ -838,7 +838,7 @@ fn intersection_observer_follows_layout() {
     // `a` is in view, `b` far below it (even with the margin), `c` not
     // painted (the tab says so: its first entry comes at once, not after a
     // timer guessing it).
-    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], gone: vec![c], viewport: (1024.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: vec![(a, [0.0, 10.0, 300.0, 50.0]), (b, [0.0, 2000.0, 300.0, 50.0])], gone: vec![c], viewport: (1024.0, 700.0), scroll: (0.0, 0.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(1);
     while !text.contains("c=false") && std::time::Instant::now() < until {
@@ -1147,7 +1147,7 @@ fn match_media_evaluates_real_queries() {
     assert_eq!(text_of(&doc, "o"), "1 1 1 1 1 1 1 0 | ");
     // Narrower: the list's answer flips and it says so.
     let host = host.unwrap();
-    host.send(js::ToJs::Layout { rects: Vec::new(), gone: Vec::new(), viewport: (800.0, 700.0) });
+    host.send(js::ToJs::Layout { rects: Vec::new(), gone: Vec::new(), viewport: (800.0, 700.0), scroll: (0.0, 0.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(2);
     while !text.ends_with("false") && std::time::Instant::now() < until {
@@ -1231,4 +1231,42 @@ fn text_codecs_and_base64_are_standard() {
         document.getElementById("o").textContent = out.join(" ");
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "\u{201c}hi\u{201d} é|€ windows-1252 aGn/ hi InvalidCharacterError true");
+}
+
+#[test]
+fn window_scrolling_goes_to_the_tab_and_back() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        window.scrollTo({ top: 500, behavior: "smooth" });
+        window.scrollBy(0, 20);
+        addEventListener("scroll", () => document.getElementById("o").textContent = "scrolled " + scrollY);
+        document.getElementById("o").textContent = [scrollY, pageYOffset, scrollX].join(" ");
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, host) = js::start(doc, opts);
+    // Scripts see where they scrolled at once...
+    assert_eq!(text_of(&doc, "o"), "520 520 0");
+    let host = host.unwrap();
+    // ...the tab was asked to scroll there...
+    let mut asked = Vec::new();
+    while let Ok(msg) = host.updates.try_recv() {
+        if let js::FromJs::ScrollTo { y, smooth, .. } = msg {
+            asked.push((y, smooth));
+        }
+    }
+    assert_eq!(asked, vec![(500.0, true), (520.0, false)]);
+    // ...and where the reader scrolls comes back, with a `scroll` event.
+    host.send(js::ToJs::Layout { rects: Vec::new(), gone: Vec::new(), viewport: (800.0, 700.0), scroll: (0.0, 1200.0) });
+    let mut text = String::new();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while text != "scrolled 1200" && std::time::Instant::now() < until {
+        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
+            text = text_of(&d, "o");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(text, "scrolled 1200");
 }
