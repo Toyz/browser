@@ -919,6 +919,48 @@ fn dom_exception_is_native() {
 }
 
 #[test]
+fn geometry_types_are_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const r = new DOMRect(10, 20, -4, 5), ro = DOMRectReadOnly.fromRect({ width: 3 });
+        r.x = 1;
+        let frozen = true; try { "use strict"; ro.x = 9; } catch (e) {} frozen = ro.x === 0;
+        const p = new DOMPoint(1, 2), q = p.matrixTransform(new DOMMatrix().translate(5, 6).scale(2));
+        const m = new DOMMatrix("translate(10px, 0) rotate(90deg)"), inv = m.inverse().multiply(m);
+        const s = new DOMMatrix([1, 2, 3, 4, 5, 6]); s.translateSelf(1, 1);
+        class Mine extends DOMMatrix {}
+        let bad = ""; try { new DOMMatrix("translate(1em)"); } catch (e) { bad = e.name; }
+        document.getElementById("o").textContent = [
+          r instanceof DOMRectReadOnly, r.left, r.right, r.top, JSON.stringify(ro), frozen,
+          q.x, q.y, q.w, Math.round(m.b), Math.round(m.e), inv.isIdentity, String(s), s.is2D,
+          new DOMMatrix("translateZ(2px)").is2D, new Mine() instanceof DOMMatrix, bad,
+          document.body.getBoundingClientRect() instanceof DOMRect, new WebKitCSSMatrix().isIdentity,
+          DOMMatrix.fromMatrix({ a: 2 }).a, Array.from(new DOMMatrix().toFloat64Array()).length,
+        ].join(" ");
+    </script></body>"##);
+    assert_eq!(
+        text_of(&doc, "o"),
+        r#"true -3 1 20 {"x":0,"y":0,"width":3,"height":0,"top":0,"right":3,"bottom":0,"left":0} true 7 10 1 1 10 true matrix(1, 2, 3, 4, 9, 12) true false true SyntaxError true true 2 16"#
+    );
+}
+
+#[test]
+fn structured_clone_is_native() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        const shared = { n: 1 };
+        const src = { a: [1, , 3], d: new Date(5), r: /x+/gi, m: new Map([[shared, "v"]]), s: new Set([shared]), u: new Uint8Array([1, 2, 3]).subarray(1), self: null, twice: [shared, shared] };
+        src.self = src;
+        const c = structuredClone(src);
+        let fn = ""; try { structuredClone({ f() {} }); } catch (e) { fn = e.name; }
+        document.getElementById("o").textContent = [
+          c !== src, c.self === c, c.a.length, 1 in c.a, c.d instanceof Date && c.d.getTime(), c.r.source + c.r.flags,
+          [...c.m.keys()][0] === [...c.s][0], c.twice[0] === c.twice[1], c.twice[0] !== shared, Array.from(c.u).join(","), c.u.byteOffset, fn,
+          structuredClone(7), structuredClone("s"),
+        ].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true 3 false 5 x+gi true true true 2,3 1 DataCloneError 7 s");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>

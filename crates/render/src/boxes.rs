@@ -3434,6 +3434,11 @@ impl InlineBuilder {
     }
 
     fn push_text(&mut self, raw: &str, style: &ComputedStyle, link: Option<&Arc<Url>>) {
+        // U+FFFC in `text` marks an inline object: the page's own (pasted
+        // into a title, say) shows as U+FFFD, the same length in UTF-8.
+        if raw.contains('\u{FFFC}') {
+            return self.push_text(&raw.replace('\u{FFFC}', "\u{FFFD}"), style, link);
+        }
         // Small capitals, as browsers make them when the font has none:
         // capitals at 0.8 of the size for the lowercase letters.
         if let Some(all) = style.small_caps {
@@ -4273,6 +4278,15 @@ mod tests {
         let c = srcset_candidates("https://m.media-amazon.com/x._SX300_,QL80_.jpg 1x, https://m.media-amazon.com/x._SX600_,QL80_.jpg 2x,plain.png");
         let urls: Vec<_> = c.iter().map(|(u, d)| format!("{u} {}", d.as_deref().unwrap_or("-"))).collect();
         assert_eq!(urls, ["https://m.media-amazon.com/x._SX300_,QL80_.jpg 1x", "https://m.media-amazon.com/x._SX600_,QL80_.jpg 2x", "plain.png -"]);
+    }
+
+    #[test]
+    fn object_replacement_chars_in_text_are_not_objects() {
+        let tree = layout("<p>a \u{FFFC} b <img src=\"m.png\" height=\"12\"></p>");
+        let p = paragraph(&tree.rows[0]);
+        let objects = p.pieces.iter().filter(|piece| matches!(piece.kind, PieceKind::Object(_))).count();
+        assert_eq!((objects, p.objects.len()), (1, 1));
+        assert_eq!(&*p.text, "a \u{FFFD} b \u{FFFC}");
     }
 
     #[test]

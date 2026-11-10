@@ -2421,41 +2421,6 @@
 
   // ---- more of the platform pages expect ---------------------------------
 
-  class DOMRectReadOnly {
-    constructor(x = 0, y = 0, width = 0, height = 0) { Object.assign(this, { x, y, width, height }); }
-    get top() { return Math.min(this.y, this.y + this.height); }
-    get left() { return Math.min(this.x, this.x + this.width); }
-    get right() { return Math.max(this.x, this.x + this.width); }
-    get bottom() { return Math.max(this.y, this.y + this.height); }
-    toJSON() { return { x: this.x, y: this.y, width: this.width, height: this.height, top: this.top, left: this.left, right: this.right, bottom: this.bottom }; }
-    static fromRect(r = {}) { return new this(r.x, r.y, r.width, r.height); }
-  }
-  class DOMRect extends DOMRectReadOnly {}
-  class DOMPoint {
-    constructor(x = 0, y = 0, z = 0, w = 1) { Object.assign(this, { x, y, z, w }); }
-    static fromPoint(p = {}) { return new this(p.x, p.y, p.z, p.w); }
-    matrixTransform(m) { return new DOMPoint(m.a * this.x + m.c * this.y + m.e, m.b * this.x + m.d * this.y + m.f); }
-  }
-  // 2D only.
-  class DOMMatrix {
-    constructor(init) {
-      let v = [1, 0, 0, 1, 0, 0];
-      if (Array.isArray(init) && init.length >= 6) v = init.length === 16 ? [init[0], init[1], init[4], init[5], init[12], init[13]] : init.slice(0, 6);
-      else if (typeof init === "string") { const m = /matrix\(([^)]*)\)/.exec(init); if (m) v = m[1].split(",").map(Number); }
-      [this.a, this.b, this.c, this.d, this.e, this.f] = v;
-      this.is2D = true;
-    }
-    get m11() { return this.a; } get m12() { return this.b; } get m21() { return this.c; } get m22() { return this.d; } get m41() { return this.e; } get m42() { return this.f; }
-    get isIdentity() { return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 && this.e === 0 && this.f === 0; }
-    multiply(o) { const m = this; return new DOMMatrix([m.a * o.a + m.c * o.b, m.b * o.a + m.d * o.b, m.a * o.c + m.c * o.d, m.b * o.c + m.d * o.d, m.a * o.e + m.c * o.f + m.e, m.b * o.e + m.d * o.f + m.f]); }
-    translate(x = 0, y = 0) { return this.multiply(new DOMMatrix([1, 0, 0, 1, x, y])); }
-    scale(x = 1, y = x) { return this.multiply(new DOMMatrix([x, 0, 0, y, 0, 0])); }
-    rotate(deg = 0) { const r = deg * Math.PI / 180, c = Math.cos(r), s = Math.sin(r); return this.multiply(new DOMMatrix([c, s, -s, c, 0, 0])); }
-    inverse() { const { a, b, c, d, e, f } = this; const det = a * d - b * c || 1; return new DOMMatrix([d / det, -b / det, -c / det, a / det, (c * f - d * e) / det, (b * e - a * f) / det]); }
-    transformPoint(p = {}) { return new DOMPoint(p.x || 0, p.y || 0).matrixTransform(this); }
-    toString() { return `matrix(${this.a}, ${this.b}, ${this.c}, ${this.d}, ${this.e}, ${this.f})`; }
-  }
-
   // Ranges: positions in the tree (no layout of their own).
   class StaticRange {
     constructor(init = {}) { Object.assign(this, { startContainer: init.startContainer, startOffset: init.startOffset || 0, endContainer: init.endContainer, endOffset: init.endOffset || 0 }); }
@@ -2508,27 +2473,6 @@
     registerProperty() {},
   };
   class CSSStyleDeclaration {}
-
-  // Deep copies (the structured clone algorithm, minus transfer).
-  function structuredCloneImpl(value, seen = new Map()) {
-    if (value === null || typeof value !== "object") {
-      if (typeof value === "function" || typeof value === "symbol") throw new DOMException("could not be cloned", "DataCloneError");
-      return value;
-    }
-    if (seen.has(value)) return seen.get(value);
-    let out;
-    if (value instanceof Date) out = new Date(value.getTime());
-    else if (value instanceof RegExp) out = new RegExp(value.source, value.flags);
-    else if (value instanceof Map) { out = new Map(); seen.set(value, out); for (const [k, v] of value) out.set(structuredCloneImpl(k, seen), structuredCloneImpl(v, seen)); return out; }
-    else if (value instanceof Set) { out = new Set(); seen.set(value, out); for (const v of value) out.add(structuredCloneImpl(v, seen)); return out; }
-    else if (ArrayBuffer.isView(value)) out = new value.constructor(value);
-    else if (value instanceof ArrayBuffer) out = value.slice(0);
-    else if (typeof Blob !== "undefined" && value instanceof Blob) out = value;
-    else if (Array.isArray(value)) { out = []; seen.set(value, out); value.forEach((v, i) => { out[i] = structuredCloneImpl(v, seen); }); return out; }
-    else { out = {}; seen.set(value, out); for (const k of Object.keys(value)) out[k] = structuredCloneImpl(value[k], seen); return out; }
-    seen.set(value, out);
-    return out;
-  }
 
   // Other tabs aren't ours to talk to: a channel that hears nothing.
   class BroadcastChannel extends EventTarget {
@@ -2601,9 +2545,8 @@
   class NamedNodeMap {}
 
   Object.assign(window, {
-    DOMRect, DOMRectReadOnly, DOMPoint, DOMPointReadOnly: DOMPoint, DOMMatrix, DOMMatrixReadOnly: DOMMatrix,
     Range, StaticRange, Selection, XMLSerializer, CSS: CSSApi, CSSStyleDeclaration,
-    structuredClone: (v) => structuredCloneImpl(v), BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap, FontFace,
+    BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap, FontFace,
     Audio: function Audio(src) { const a = document.createElement("audio"); if (src !== undefined) a.setAttribute("src", src); return a; },
     Option: function Option(text, value, defaultSelected, selected) {
       const o = document.createElement("option");

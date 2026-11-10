@@ -15,14 +15,7 @@ use ring::signature::KeyPair;
 use crate::blob::{array_buffer, bytes_of, view_of};
 use crate::dom::js_value_string;
 
-/// A `DOMException` (the page's class) named `name`.
-fn dom_error(name: &str, message: &str, cx: &mut Context) -> JsError {
-    let class = cx.global_object().get(js_string!("DOMException"), cx).ok().and_then(|c| c.as_constructor());
-    match class.map(|c| c.construct(&[JsString::from(message).into(), JsString::from(name).into()], None, cx)) {
-        Some(Ok(e)) => JsError::from_opaque(e.into()),
-        _ => JsNativeError::error().with_message(format!("{name}: {message}")).into(),
-    }
-}
+use crate::dom_exception::error as dom_error;
 
 fn not_supported(what: &str, cx: &mut Context) -> JsError {
     dom_error("NotSupportedError", &format!("{what} isn't supported"), cx)

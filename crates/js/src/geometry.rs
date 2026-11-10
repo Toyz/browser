@@ -192,18 +192,9 @@ pub(super) fn this_node(d: &Shared, this: &JsValue, cx: &mut Context) -> Option<
     d.borrow().doc.get(id).map(|_| id)
 }
 
-/// A `DOMRect` (the page's class; a plain object before it exists).
+/// A `DOMRect`.
 pub(super) fn dom_rect(r: [f32; 4], cx: &mut Context) -> JsResult<JsValue> {
-    let args = r.map(JsValue::from);
-    let class = cx.global_object().get(js_string!("DOMRect"), cx)?;
-    if let Some(class) = class.as_constructor() {
-        return Ok(class.construct(&args, None, cx)?.into());
-    }
-    let o = JsObject::with_object_proto(cx.intrinsics());
-    for (k, v) in [("x", r[0]), ("y", r[1]), ("width", r[2]), ("height", r[3]), ("left", r[0]), ("top", r[1]), ("right", r[0] + r[2]), ("bottom", r[1] + r[3])] {
-        o.set(JsString::from(k), v, false, cx)?;
-    }
-    Ok(o.into())
+    crate::dom_geometry::rect(r, cx)
 }
 
 fn rect_array(r: Option<[f32; 4]>, cx: &mut Context) -> JsValue {

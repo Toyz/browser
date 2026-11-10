@@ -4,7 +4,7 @@
 use boa_engine::class::{Class, ClassBuilder};
 use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::property::Attribute;
-use boa_engine::{Context, JsData, JsNativeError, JsResult, JsString, JsValue, NativeFunction};
+use boa_engine::{Context, JsData, JsError, JsNativeError, JsResult, JsString, JsValue, NativeFunction};
 use boa_gc::{Finalize, Trace};
 
 use crate::dom::js_value_string;
@@ -88,5 +88,14 @@ pub(crate) fn install(cx: &mut Context) {
     if let Some(class) = cx.get_global_class::<DomException>() {
         let error = cx.intrinsics().constructors().error().prototype();
         class.prototype().set_prototype(Some(error));
+    }
+}
+
+/// A `DOMException` named `name`, to throw.
+pub(crate) fn error(name: &str, message: &str, cx: &mut Context) -> JsError {
+    let e = DomException { name: name.to_owned(), message: message.to_owned() };
+    match DomException::from_data(e, cx) {
+        Ok(o) => JsError::from_opaque(o.into()),
+        Err(_) => JsNativeError::error().with_message(format!("{name}: {message}")).into(),
     }
 }

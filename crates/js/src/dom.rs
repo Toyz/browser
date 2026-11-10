@@ -1814,6 +1814,8 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         Ok(JsObject::from_proto_and_data(Some(proto), boa_engine::builtins::is_html_dda::IsHTMLDDA).into())
     }));
     crate::dom_exception::install(cx);
+    crate::dom_geometry::install(cx);
+    crate::structured_clone::install(cx);
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);

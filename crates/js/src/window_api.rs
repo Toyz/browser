@@ -246,8 +246,7 @@ fn clone_state(state: &JsValue, cx: &mut Context) -> JsValue {
     if state.is_null_or_undefined() {
         return JsValue::null();
     }
-    let clone = cx.global_object().get(js_string!("structuredClone"), cx).ok().and_then(|f| f.as_callable());
-    clone.and_then(|f| f.call(&JsValue::undefined(), std::slice::from_ref(state), cx).ok()).unwrap_or_else(|| state.clone())
+    crate::structured_clone::clone(state, cx).unwrap_or_else(|_| state.clone())
 }
 
 fn history(dom: &Shared, cx: &mut Context) -> JsValue {

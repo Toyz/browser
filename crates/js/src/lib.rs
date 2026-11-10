@@ -26,6 +26,8 @@ mod blob;
 mod aria;
 mod headers;
 mod dom_exception;
+mod dom_geometry;
+mod structured_clone;
 mod window_api;
 mod images;
 mod modules;
