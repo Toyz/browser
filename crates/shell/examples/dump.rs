@@ -50,6 +50,10 @@ fn tree(b: &LayoutBox, depth: usize, max_depth: usize) {
     }
 }
 
+fn image_line(s: &style::ComputedStyle) -> String {
+    format!("w={:?} h={:?} opacity={} visible={} display={:?} pos={:?}", s.width, s.height, s.opacity, s.visible, s.display, s.position)
+}
+
 fn style_line(s: &style::ComputedStyle) -> String {
     format!(
         "display={:?} pos={:?} w={:?} h={:?} minh={:?} maxh={:?} pad={:?} margin={:?} inset={:?} translate={:?} flex={:?}/{:?} lh={:?} fs={} color={:?} weight={}",
@@ -80,11 +84,16 @@ fn by_class(b: &LayoutBox, doc: &page::Document, class: &str, inside: bool, dept
                 println!("{:indent$}P {:?} objects={}", "", p.text.chars().take(40).collect::<String>(), p.objects.len(), indent = depth * 2);
             }
             for o in &p.objects {
-                if let render::boxes::InlineObject::BlockBox(bb) = o {
-                    by_class(&LayoutBox::Block((**bb).clone()), doc, class, inside, depth + 1);
+                match o {
+                    render::boxes::InlineObject::BlockBox(bb) => by_class(&LayoutBox::Block((**bb).clone()), doc, class, inside, depth + 1),
+                    render::boxes::InlineObject::Image(i) if inside => {
+                        println!("{:indent$}inline img {} {}", "", i.src, image_line(&i.style), indent = (depth + 1) * 2)
+                    }
+                    _ => {}
                 }
             }
         }
+        LayoutBox::Image(i) if inside => println!("{:indent$}img {} {}", "", i.src, image_line(&i.style), indent = depth * 2),
         _ => {}
     }
 }

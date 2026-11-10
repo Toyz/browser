@@ -1800,11 +1800,20 @@ fn flatten(dom: &Dom, styles: Vec<(Option<NodeId>, String)>) -> Document {
         }
         // Slots in this shadow tree (not in shadow trees nested in it).
         let mut stack: Vec<NodeId> = src.children(root).to_vec();
+        let tree = format!("{}", node_to_number(host));
         while let Some(n) = stack.pop() {
+            // Which shadow tree it's in: its styles apply here and not in
+            // trees nested inside it (see `scopeSelector` in the prelude).
+            if let Some(e) = copy.element_mut(n) {
+                set_attr(e, "data-feather-in", tree.clone());
+            }
             if is_tag(n, "slot") {
                 let name = src.element(n).and_then(|e| e.attr("name")).unwrap_or("").to_owned();
-                if let Some(nodes) = assigned.remove(&name) {
-                    copy.set_children(n, nodes);
+                match assigned.remove(&name) {
+                    Some(nodes) => copy.set_children(n, nodes),
+                    // Nothing assigned: its fallback content shows, and is
+                    // part of this tree.
+                    None => stack.extend(src.children(n).iter().copied()),
                 }
                 continue;
             }

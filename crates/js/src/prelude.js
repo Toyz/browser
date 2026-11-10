@@ -1500,12 +1500,47 @@
     }
     return [sel.slice(at + 1), ""];
   }
+  // A shadow tree's selector for the flattened page: under its host, and
+  // (unless it styles the host itself or slotted light children) matching
+  // only elements of this tree: an outer component's `.trigger` rules must
+  // not reach the `.trigger` inside a component nested in it.
   function scopeSelector(sel, scope) {
-    sel = sel.trim().replace(/::slotted\(([^)]*)\)/g, " $1");
-    if (sel.startsWith(":host-context(")) { const [arg, rest] = parenArg(sel, ":host-context".length); return arg + " " + scope + rest; }
-    if (sel.startsWith(":host(")) { const [arg, rest] = parenArg(sel, ":host".length); return scope + arg + rest; }
-    if (sel.startsWith(":host")) return scope + sel.slice(5);
-    return scope + " " + sel;
+    sel = sel.trim();
+    const slotted = /::slotted\(/.test(sel);
+    sel = sel.replace(/::slotted\(([^)]*)\)/g, " $1");
+    const inTree = scope.replace("data-feather-host", "data-feather-in");
+    const own = (s) => (slotted ? s : constrainSubject(s, inTree));
+    if (sel.startsWith(":host-context(")) { const [arg, rest] = parenArg(sel, ":host-context".length); return hasCombinator(rest) ? own(arg + " " + scope + rest) : arg + " " + scope + rest; }
+    if (sel.startsWith(":host(")) { const [arg, rest] = parenArg(sel, ":host".length); return hasCombinator(rest) ? own(scope + arg + rest) : scope + arg + rest; }
+    if (sel.startsWith(":host")) { const rest = sel.slice(5); return hasCombinator(rest) ? own(scope + rest) : scope + rest; }
+    return own(scope + " " + sel);
+  }
+  // Is there a combinator at the top level of `s` (outside parentheses)?
+  function hasCombinator(s) {
+    let depth = 0;
+    for (const c of s.trim()) {
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+      else if (depth === 0 && (c === " " || c === ">" || c === "+" || c === "~")) return true;
+    }
+    return false;
+  }
+  // `attr` added to the last compound selector, before a pseudo-element.
+  function constrainSubject(sel, attr) {
+    let depth = 0, start = 0, pseudo = -1;
+    for (let i = 0; i < sel.length; i++) {
+      const c = sel[i];
+      if (c === "(") depth++;
+      else if (c === ")") depth--;
+      else if (depth === 0 && (c === " " || c === ">" || c === "+" || c === "~")) { start = i + 1; pseudo = -1; }
+      else if (depth === 0 && c === ":" && pseudo < 0) {
+        const rest = sel.slice(i).toLowerCase();
+        if (rest.startsWith("::") || /^:(before|after|first-line|first-letter)\b/.test(rest)) pseudo = i;
+      }
+    }
+    if (start >= sel.length) return sel;
+    const at = pseudo >= 0 ? pseudo : sel.length;
+    return sel.slice(0, at) + attr + sel.slice(at);
   }
   function scopeCss(css, scope) {
     css = css.replace(/\/\*[\s\S]*?\*\//g, "");

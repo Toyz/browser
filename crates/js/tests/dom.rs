@@ -547,7 +547,37 @@ fn declarative_shadow_roots_render_and_reach_scripts() {
     assert_eq!(text_of(&doc, "o"), "root shadow / 0");
     // Rendered: the shadow tree with the light span slotted in.
     let rendered = text_of(&doc, "h").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(rendered.starts_with("[data-feather-host=") && rendered.ends_with("p{ color: red } shadow light"), "{rendered}");
+    assert!(
+        rendered.starts_with("[data-feather-host=") && rendered.contains("p[data-feather-in=") && rendered.ends_with("{ color: red } shadow light"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn shadow_styles_stay_in_their_own_tree() {
+    // An outer component's `.t` rule must not style the `.t` inside a
+    // component nested in it (badgedirectory's dropdowns got another
+    // component's `width: 48px`).
+    let doc = run(r##"<body><div id="outer"></div><p id="o"></p><script>
+        const outer = document.getElementById("outer").attachShadow({ mode: "open" });
+        outer.innerHTML = '<style>.t { color: red }</style><span class="t" id="mine">a</span><div id="inner-host"></div>';
+        const inner = outer.getElementById("inner-host").attachShadow({ mode: "open" });
+        inner.innerHTML = '<style>.t { font-weight: bold }</style><span class="t" id="theirs">b</span>';
+        </script></body>"##);
+    let doc_html = js::to_html(&doc);
+    // Each tree's rule names its own tree.
+    let rules: Vec<&str> = doc_html.split('}').filter(|r| r.contains(".t[data-feather-in=")).collect();
+    assert_eq!(rules.len(), 2, "{doc_html}");
+    // The element's start tag, and the tree named in it.
+    let tree_of = |id: &str| {
+        let at = doc_html.find(&format!("id=\"{id}\"")).unwrap();
+        let tag = &doc_html[doc_html[..at].rfind('<').unwrap()..at + doc_html[at..].find('>').unwrap()];
+        tag.split("data-feather-in=\"").nth(1).map(|t| t.split('"').next().unwrap().to_owned())
+    };
+    let (mine, theirs) = (tree_of("mine").unwrap(), tree_of("theirs").unwrap());
+    assert_ne!(mine, theirs);
+    assert!(rules.iter().any(|r| r.contains(&format!("[data-feather-in=\"{mine}\"]")) && r.contains("color: red")));
+    assert!(rules.iter().any(|r| r.contains(&format!("[data-feather-in=\"{theirs}\"]")) && r.contains("font-weight: bold")));
 }
 
 #[test]
