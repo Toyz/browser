@@ -1578,23 +1578,50 @@ pub mod scrolled {
 
     thread_local! {
         static HANDLES: RefCell<HashMap<NodeId, ScrollHandle>> = RefCell::new(HashMap::new());
+        /// Positions scripts asked for that the box can't take yet (not
+        /// rendered, or its content not laid out): (x, y, frames left).
+        static PENDING: RefCell<HashMap<NodeId, (f32, f32, u8)>> = RefCell::new(HashMap::new());
     }
 
+    /// How many frames a script's scroll waits for the box to grow into it.
+    const PENDING_FRAMES: u8 = 30;
+
+    /// `node`'s handle for this frame (applying a pending script scroll:
+    /// GPUI clamps it to the content each layout).
     pub(crate) fn handle(node: NodeId) -> ScrollHandle {
-        HANDLES.with_borrow_mut(|h| h.entry(node).or_default().clone())
+        let h = HANDLES.with_borrow_mut(|h| h.entry(node).or_default().clone());
+        PENDING.with_borrow_mut(|pending| {
+            let Some((x, y, left)) = pending.get_mut(&node) else { return };
+            let max = h.max_offset();
+            if (f32::from(max.x) >= *x && f32::from(max.y) >= *y) || *left == 0 {
+                pending.remove(&node);
+                return;
+            }
+            *left -= 1;
+            h.set_offset(point(-px(*x), -px(*y)));
+        });
+        h
     }
 
     /// A new page: the old one's positions go.
     pub fn forget() {
         HANDLES.with_borrow_mut(HashMap::clear);
+        PENDING.with_borrow_mut(HashMap::clear);
     }
 
-    /// Scroll `node`'s box to (x, y) px (clamped to what it has): whether
-    /// it's a scrolling box.
+    /// Scroll `node`'s box to (x, y) px (clamped to what it has; kept for
+    /// a few frames when it has less, as before its first layout): whether
+    /// the tab should redraw.
     pub fn scroll_to(node: NodeId, x: f32, y: f32) -> bool {
-        let Some(h) = HANDLES.with_borrow(|h| h.get(&node).cloned()) else { return false };
-        let max = h.max_offset();
-        h.set_offset(point(-px(x.clamp(0.0, f32::from(max.x).max(0.0))), -px(y.clamp(0.0, f32::from(max.y).max(0.0)))));
+        let h = HANDLES.with_borrow(|h| h.get(&node).cloned());
+        let max = h.as_ref().map(|h| h.max_offset());
+        let fits = max.is_some_and(|m| f32::from(m.x) >= x && f32::from(m.y) >= y);
+        PENDING.with_borrow_mut(|p| {
+            if fits { p.remove(&node) } else { p.insert(node, (x, y, PENDING_FRAMES)) }
+        });
+        if let (Some(h), Some(max)) = (h, max) {
+            h.set_offset(point(-px(x.clamp(0.0, f32::from(max.x).max(0.0))), -px(y.clamp(0.0, f32::from(max.y).max(0.0)))));
+        }
         true
     }
 
