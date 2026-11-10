@@ -1841,8 +1841,15 @@ impl Builder<'_> {
             }
             _ => content,
         };
+        // A flex row's item that grows or has a basis of its own is as
+        // wide as the row gives it (GitHub's `flex: 100%` layout row), not
+        // sized by its content, unless the row itself is.
+        let sized_by_row = self.in_flex_row
+            && !self.in_shrink
+            && (style.flex_grow > 0.0 || matches!(style.flex_basis, Length::Percent(_)) || matches!(style.flex_basis, Length::Px(v) if v >= 1.0));
         // Sized by its content? Then so are auto-width blocks inside it.
         let shrinks = style.width.is_auto()
+            && !sized_by_row
             && (self.in_flex_row
                 || self.in_shrink
                 || !style.display.is_block_level()
