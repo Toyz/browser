@@ -933,7 +933,10 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         .when(fill, |d| d.w_full())
         // Clipping boxes can shrink below their content (CSS's automatic
         // minimum size is 0 for them: how `text-overflow` gets to show).
-        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible, |d| {
+        // Positioned boxes have no automatic minimum: they're as wide as
+        // their content measures (the estimate made Badge Directory's
+        // one-word labels wider than their text).
+        .when(s.min_width.is_auto() && s.overflow == Overflow::Visible && !matches!(s.position, style::Position::Absolute | style::Position::Fixed), |d| {
             // `min_content` is a border-box width.
             let edges = if content_box(s) { s.horizontal_edges() } else { 0.0 };
             d.min_w(px((block.min_content - edges).max(0.0)))
