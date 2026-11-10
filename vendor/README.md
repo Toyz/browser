@@ -45,6 +45,12 @@ build them directly wrap the node in `Box::new` (or go through `From`).
 
 ## boa_engine 0.22.0
 
+- `src/builtins/intl/number_format/`: `style: "currency"` threw
+  "unimplemented" (so did creating such a formatter: GitHub's pull request
+  list failed to load), and `style: "percent"` printed the bare number.
+  Both are formatted as English writes them: currencies with their ISO
+  4217 digits and symbol, code or name (`$1,234.50`, `-$5.00`, `EUR 2.00`,
+  `3.00 US dollars`), percentages scaled by 100 with `%`.
 - `src/bytecompiler/expression/mod.rs`: compiles the boxed function
   expressions (`&**function`).
 - `src/vm/inline_cache/mod.rs`: an inline cache's entries are allocated

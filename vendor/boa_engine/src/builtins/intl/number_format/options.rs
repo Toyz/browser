@@ -244,6 +244,67 @@ pub(crate) struct Currency {
 }
 
 impl Currency {
+    /// The ISO 4217 code (`USD`).
+    pub(crate) fn code(&self) -> &str {
+        self.inner.as_str()
+    }
+
+    /// `CurrencyDigits`: its minor unit digits (ISO 4217), 2 for most.
+    pub(crate) fn digits(&self) -> u8 {
+        match self.code() {
+            "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF" | "UGX" | "UYI" | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+            "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+            "CLF" | "UYW" => 4,
+            _ => 2,
+        }
+    }
+
+    /// How English writes it before an amount (`$`, `€`, `CA$`; a code and a
+    /// no-break space for those without a symbol), or its plural name.
+    pub(crate) fn marker(&self, display: CurrencyDisplay) -> String {
+        let code = self.code();
+        let symbol = |narrow: bool| -> Option<&'static str> {
+            Some(match code {
+                "USD" => "$",
+                "EUR" => "\u{20ac}",
+                "GBP" => "\u{a3}",
+                "JPY" => "\u{a5}",
+                "INR" => "\u{20b9}",
+                "KRW" => "\u{20a9}",
+                "ILS" => "\u{20aa}",
+                "VND" => "\u{20ab}",
+                "PHP" => "\u{20b1}",
+                "NGN" if narrow => "\u{20a6}",
+                "CNY" => if narrow { "\u{a5}" } else { "CN\u{a5}" },
+                "CAD" => if narrow { "$" } else { "CA$" },
+                "AUD" => if narrow { "$" } else { "A$" },
+                "NZD" => if narrow { "$" } else { "NZ$" },
+                "MXN" => if narrow { "$" } else { "MX$" },
+                "HKD" => if narrow { "$" } else { "HK$" },
+                "BRL" => "R$",
+                "TWD" => if narrow { "$" } else { "NT$" },
+                _ => return None,
+            })
+        };
+        match display {
+            CurrencyDisplay::Symbol => symbol(false).map_or_else(|| format!("{code}\u{a0}"), str::to_owned),
+            CurrencyDisplay::NarrowSymbol => symbol(true).map_or_else(|| format!("{code}\u{a0}"), str::to_owned),
+            CurrencyDisplay::Code => format!("{code}\u{a0}"),
+            CurrencyDisplay::Name => match code {
+                "USD" => "US dollars",
+                "EUR" => "euros",
+                "GBP" => "British pounds",
+                "JPY" => "Japanese yen",
+                "CAD" => "Canadian dollars",
+                "AUD" => "Australian dollars",
+                "CNY" => "Chinese yuan",
+                "INR" => "Indian rupees",
+                _ => code,
+            }
+            .to_owned(),
+        }
+    }
+
     pub(crate) fn to_js_string(self) -> JsString {
         let bytes = self.inner.as_bytes();
         js_string!(&[

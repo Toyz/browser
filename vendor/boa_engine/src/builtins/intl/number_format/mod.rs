@@ -51,6 +51,31 @@ pub(crate) enum FormattedNumber<'a, T> {
     Compact(T),
 }
 
+/// A formatted number with what its style puts around it (`$`, `%`).
+pub(crate) struct Styled<'a, T> {
+    prefix: String,
+    inner: FormattedNumber<'a, T>,
+    suffix: String,
+}
+
+impl<T: Writeable> Writeable for Styled<'_, T> {
+    fn write_to<W: core::fmt::Write + ?Sized>(&self, sink: &mut W) -> core::fmt::Result {
+        sink.write_str(&self.prefix)?;
+        self.inner.write_to(sink)?;
+        sink.write_str(&self.suffix)
+    }
+
+    fn write_to_parts<S: writeable::PartsWrite + ?Sized>(&self, sink: &mut S) -> core::fmt::Result {
+        sink.write_str(&self.prefix)?;
+        self.inner.write_to_parts(sink)?;
+        sink.write_str(&self.suffix)
+    }
+
+    fn writeable_length_hint(&self) -> writeable::LengthHint {
+        self.inner.writeable_length_hint() + self.prefix.len() + self.suffix.len()
+    }
+}
+
 impl<T: Writeable> Writeable for FormattedNumber<'_, T> {
     fn write_to<W: core::fmt::Write + ?Sized>(&self, sink: &mut W) -> core::fmt::Result {
         match self {
@@ -144,14 +169,36 @@ impl NumberFormat {
     pub(crate) fn format<'l>(
         &'l self,
         value: &'l mut Decimal,
-    ) -> FormattedNumber<'l, impl Writeable> {
-        // TODO: Missing support from ICU4X for Percent/Currency/Unit formatting.
+    ) -> Styled<'l, impl Writeable> {
+        // Feather: percent and currency styles, as English writes them
+        // (ICU4X has no currency or percent formatting here).
+        // TODO: Missing support from ICU4X for Unit formatting.
         // TODO: Missing support from ICU4X for Scientific/Engineering notation.
+        let (mut prefix, mut suffix) = (String::new(), String::new());
+        if matches!(self.unit_options, UnitFormatOptions::Percent) {
+            value.absolute.multiply_pow10(2);
+            suffix.push('%');
+        }
 
         self.digit_options.format_fixed_decimal(value);
         value.apply_sign_display(self.sign_display);
 
-        self.formatter.format(value)
+        if let UnitFormatOptions::Currency { currency, display, .. } = &self.unit_options {
+            let marker = currency.marker(*display);
+            if *display == CurrencyDisplay::Name {
+                suffix = format!(" {marker}");
+            } else {
+                // The sign goes before the symbol: `-$5.00`.
+                prefix = match value.sign {
+                    fixed_decimal::Sign::Negative => format!("-{marker}"),
+                    fixed_decimal::Sign::Positive => format!("+{marker}"),
+                    fixed_decimal::Sign::None => marker,
+                };
+                value.sign = fixed_decimal::Sign::None;
+            }
+        }
+
+        Styled { prefix, inner: self.formatter.format(value), suffix }
     }
 }
 
@@ -355,12 +402,13 @@ impl NumberFormat {
         // 15. Let style be numberFormat.[[Style]].
         // 16. If style is "currency", then
         let (min_fractional, max_fractional) = if unit_options.style() == Style::Currency {
-            // TODO: Missing support from ICU4X
+            // Feather: currencies' digits (ISO 4217).
             // a. Let currency be numberFormat.[[Currency]].
             // b. Let cDigits be CurrencyDigits(currency).
             // c. Let mnfdDefault be cDigits.
             // d. Let mxfdDefault be cDigits.
-            return Err(JsNativeError::typ().with_message("unimplemented").into());
+            let UnitFormatOptions::Currency { currency, .. } = &unit_options else { unreachable!() };
+            (currency.digits(), currency.digits())
         } else {
             // 17. Else,
             (

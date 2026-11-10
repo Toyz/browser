@@ -1129,6 +1129,22 @@ fn streams_are_native() {
 }
 
 #[test]
+fn intl_currency_and_percent() {
+    let doc = run(r##"<body><p id="o"></p><script>
+        try {
+        const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+        document.getElementById("o").textContent = [
+          usd.format(1234.5), usd.format(-5), new Intl.NumberFormat("en-US", { style: "currency", currency: "JPY" }).format(1234.5),
+          new Intl.NumberFormat("en-US", { style: "currency", currency: "EUR", currencyDisplay: "code" }).format(2),
+          new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", currencyDisplay: "name" }).format(3),
+          new Intl.NumberFormat("en-US", { style: "percent" }).format(0.256), (12.5).toLocaleString("en-US", { style: "currency", currency: "GBP" }),
+        ].join(" | ");
+        } catch (e) { document.getElementById("o").textContent = "ERR " + e; }
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "$1,234.50 | -$5.00 | \u{a5}1,235 | EUR\u{a0}2.00 | 3.00 US dollars | 26% | \u{a3}12.50");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
