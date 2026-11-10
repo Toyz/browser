@@ -38,3 +38,13 @@ Drop these when Boa releases include equivalent fixes.
   than its flex line gets a zero start auto margin instead of a negative
   centered one (css-flexbox §9.6 step 13; also what block layout does with
   `margin: 0 auto` on an overflowing box).
+
+## gpui-pre-apple 0.3.11
+
+- `src/text_system.rs`: variable fonts draw the requested weight. When the
+  best face for a font has a `wght` axis and the weight asked for isn't its
+  default, `weight_variant` makes (once) an instance at that weight through
+  a CoreText variation descriptor and registers it as a font of its own;
+  `id_for_native_font` tells instances apart by their `wght`. Without it,
+  every weight of a variable web font (Inter, Roboto Flex...) drew as its
+  default one: NASA's 700-weight headline was regular.

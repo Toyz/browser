@@ -1078,7 +1078,7 @@ fn probe_styles() {
             println!("{}{}.{} display={:?} vis={} opacity={} h={:?}", "  ".repeat(level), e.name.local, class.split_whitespace().next().unwrap_or(""), s.display, s.visible, s.opacity, s.height);
         }
         if &*e.name.local == want || class.split_whitespace().any(|c| want.strip_prefix('.') == Some(c)) {
-            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={} pos={:?} z={:?} op={} grad={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible, s.position, s.z_index, s.opacity, s.gradients.is_some());
+            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={} pos={:?} z={:?} op={} grad={} inset={:?} h={:?} ov={:?} font={:?} weight={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible, s.position, s.z_index, s.opacity, s.gradients.is_some(), s.inset, s.height, s.overflow, s.font_names, s.font_weight);
         }
         for &c in doc.children(n) {
             walk(doc, styler, c, &s, want, &path, depth, level + 1);
