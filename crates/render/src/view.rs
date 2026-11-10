@@ -1137,7 +1137,8 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
             .relative()
             .flex()
             .flex_col()
-            .when_some(marker.clone(), |d, marker| {
+            // A hidden item's marker is hidden with it.
+            .when_some(marker.clone().filter(|_| s.visible), |d, marker| {
                 d.child(
                     div()
                         .absolute()
