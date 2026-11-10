@@ -110,6 +110,36 @@ pub(super) fn p_scale<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) 
     Ok(())
 }
 
+/// `transform-origin: <x> <y>? <z>?` (keywords, lengths, percentages).
+pub(super) fn p_transform_origin<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    let pct = |v: f32| LenSpec::Lin(Lin { pct: v, ..Lin::px(0.0) });
+    let mut x = None;
+    let mut y = None;
+    for _ in 0..3 {
+        if p.is_exhausted() {
+            break;
+        }
+        if let Ok(id) = p.try_parse(|p| p.expect_ident_cloned()) {
+            match id.to_ascii_lowercase().as_str() {
+                "left" => x = Some(pct(0.0)),
+                "right" => x = Some(pct(100.0)),
+                "top" => y = Some(pct(0.0)),
+                "bottom" => y = Some(pct(100.0)),
+                "center" => {
+                    if x.is_none() { x = Some(pct(50.0)) } else { y = Some(pct(50.0)) }
+                }
+                _ => return err(p),
+            }
+        } else {
+            let l = parse_len(p)?;
+            if x.is_none() { x = Some(l) } else if y.is_none() { y = Some(l) }
+            // (A third value, z, means nothing in 2D.)
+        }
+    }
+    out.push(Decl::TransformOrigin(x.unwrap_or(pct(50.0)), y.unwrap_or(pct(50.0))));
+    Ok(())
+}
+
 pub(super) fn p_transform<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     use Decl as D;
 {
@@ -271,6 +301,7 @@ pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("box-shadow", p_box_shadow),
     ("rotate", p_rotate),
     ("scale", p_scale),
+    ("transform-origin", p_transform_origin),
     ("transform", p_transform),
     ("translate", p_transform),
     ("opacity", p_opacity),

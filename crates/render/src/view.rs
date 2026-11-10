@@ -894,7 +894,9 @@ fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>
     // `transform: scale()`: everything in it drawn bigger or smaller about
     // its center (an empty decorated box is drawn scaled already, as SVG).
     match block.style.scale {
-        (x, y) if x == y && x != 1.0 && !block.children.is_empty() => Scaled { child: el, scale: x }.into_any_element(),
+        (x, y) if x == y && x != 1.0 && !block.children.is_empty() => {
+            Scaled { child: el, scale: x, origin: block.style.transform_origin }.into_any_element()
+        }
         _ => el,
     }
 }
@@ -904,6 +906,8 @@ fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>
 struct Scaled {
     child: AnyElement,
     scale: f32,
+    /// `transform-origin`, of the box.
+    origin: (CssLength, CssLength),
 }
 
 impl IntoElement for Scaled {
@@ -958,8 +962,14 @@ impl Element for Scaled {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let at = |l: CssLength, size: Pixels| match l {
+            CssLength::Px(v) => px(v),
+            CssLength::Percent(p) => size * (p / 100.0),
+            CssLength::Auto => size / 2.0,
+        };
+        let pivot = bounds.origin + point(at(self.origin.0, bounds.size.width), at(self.origin.1, bounds.size.height));
         let child = &mut self.child;
-        window.with_paint_scale(bounds.center(), self.scale, |window| child.paint(window, cx));
+        window.with_paint_scale(pivot, self.scale, |window| child.paint(window, cx));
     }
 }
 

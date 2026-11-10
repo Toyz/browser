@@ -144,6 +144,9 @@ pub struct ComputedStyle {
     pub svg_paint: Option<Arc<[SvgPaint]>>,
     /// `transform: scale()` / `scale`: (x, y), about the center.
     pub scale: (f32, f32),
+    /// `transform-origin` (x, y): what scaling is about (default the
+    /// center, 50% 50%).
+    pub transform_origin: (Length, Length),
     /// `mask-image` is set: the background is a stencil (usually an icon).
     pub masked: bool,
     /// The mask image's (absolute) URL, if it's one we can fetch.
@@ -268,6 +271,7 @@ impl ComputedStyle {
             aspect_ratio: None,
             text_fill: None,
             scale: (1.0, 1.0),
+            transform_origin: (Length::Percent(50.0), Length::Percent(50.0)),
             shadows: None,
             filter: None,
             transitions: None,

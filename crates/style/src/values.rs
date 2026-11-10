@@ -710,6 +710,8 @@ pub enum ContentItem {
     Attr(std::sync::Arc<str>),
     OpenQuote,
     CloseQuote,
+    /// `url(...)`: a picture (resolved).
+    Image(std::sync::Arc<str>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

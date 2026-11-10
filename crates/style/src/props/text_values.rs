@@ -13,6 +13,12 @@ pub(crate) fn parse_content<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Arc<[C
     }
     let mut items = Vec::new();
     while !p.is_exhausted() {
+        if let Ok(url) = p.try_parse(crate::props::parse_url) {
+            if let Some(url) = url {
+                items.push(ContentItem::Image(url));
+            }
+            continue;
+        }
         match p.next()?.clone() {
             Token::QuotedString(s) => items.push(ContentItem::Str(strip_private_use(&s).into())),
             Token::Ident(id) => match id.to_ascii_lowercase().as_str() {
@@ -32,7 +38,7 @@ pub(crate) fn parse_content<'i>(p: &mut Parser<'i>) -> PResult<'i, Option<Arc<[C
             Token::Delim('/') => {
                 while p.next().is_ok() {}
             }
-            _ => {} // counter(), url(), image-set()...: not supported yet
+            _ => {} // counter(), image-set()...: not supported yet
         }
     }
     Ok(Some(items.into()))

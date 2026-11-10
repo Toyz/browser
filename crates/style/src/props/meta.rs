@@ -75,6 +75,7 @@ pub const META: &[Meta] = &[
     prop(&["max-height", "max-block-size"], false, |s, src| s.max_height = src.max_height),
     prop(&["min-height", "min-block-size"], false, |s, src| s.min_height = src.min_height),
     prop(&["opacity"], false, |s, src| s.opacity = src.opacity),
+    prop(&["transform-origin"], false, |s, src| s.transform_origin = src.transform_origin),
     prop(&["vertical-align"], false, |s, src| s.vertical_align = src.vertical_align),
     prop(&["filter", "-webkit-filter"], false, |s, src| s.filter = src.filter.clone()),
     prop(&["object-fit"], false, |s, src| s.object_fit = src.object_fit),

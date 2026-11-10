@@ -969,6 +969,7 @@ impl Builder<'_> {
                     ContentItem::Attr(name) => text.push_str(element.attr(name).unwrap_or("")),
                     ContentItem::OpenQuote => text.push('“'),
                     ContentItem::CloseQuote => text.push('”'),
+                    ContentItem::Image(_) => {}
                 }
             }
             (!text.is_empty()).then_some((text, ps))
@@ -997,6 +998,9 @@ impl Builder<'_> {
         };
         let before_box = as_box(&mut before, 1).or(before_box);
         let after_box = as_box(&mut after, 2).or(after_box);
+        // A picture (`content: url(...)`), where nothing else made a box.
+        let before_box = before_box.or_else(|| self.pictured(id, style, Pseudo::Before, 1));
+        let after_box = after_box.or_else(|| self.pictured(id, style, Pseudo::After, 2));
         Generated { before, after, before_box, after_box }
     }
 
@@ -1486,6 +1490,40 @@ impl Builder<'_> {
             pseudo: None,
         };
         place(self, block, c);
+    }
+
+    /// A `::before`/`::after` showing a picture (`content: url(logo.png)`):
+    /// a box of its own (styled as the pseudo-element) holding the image.
+    fn pictured(&mut self, id: NodeId, style: &ComputedStyle, which: Pseudo, n: u8) -> Option<Block> {
+        let ps = self.styler.compute_pseudo(self.doc, id, style, which)?;
+        if ps.display == Display::None || !ps.visible {
+            return None;
+        }
+        let url = ps.content.as_deref()?.iter().find_map(|i| match i {
+            ContentItem::Image(u) => Url::parse(u).ok(),
+            _ => None,
+        })?;
+        let mut ps = ps;
+        if ps.display == Display::Inline {
+            ps.display = Display::InlineBlock;
+        }
+        // The picture itself: its natural size, in the box.
+        let mut pic = ComputedStyle::initial();
+        pic.display = Display::Block;
+        let image = LayoutBox::Image(ImageBox {
+            id: self.next_id(),
+            node: None,
+            style: Arc::new(pic),
+            src: Arc::new(url),
+            density: 1.0,
+            attr_width: None,
+            attr_height: None,
+            alt: None,
+            link: None,
+            anchors: Vec::new(),
+            mono: None,
+        });
+        Some(Block { pseudo: Some((id, n)), ..self.synthetic_block(ps, BlockKind::Normal, vec![image]) })
     }
 
     fn synthetic_block(&mut self, style: ComputedStyle, kind: BlockKind, children: Vec<LayoutBox>) -> Block {
