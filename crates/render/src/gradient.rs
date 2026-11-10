@@ -205,19 +205,40 @@ impl GradientFill {
         // box, so a tile part-way across a round box (a loading shimmer
         // sliding over an avatar) came out as a pill. Draw the layer as one
         // box-sized picture instead.
+        // A repeating pattern's tiles are painted one by one, each rounded
+        // only at the box corners it reaches (exact when the tiles are at
+        // least the radius, as checkerboards' are).
         let at_box = sx.abs() < 0.5 && sy.abs() < 0.5 && (f32::from(block.width) - bw).abs() < 0.5 && (f32::from(block.height) - bh).abs() < 0.5;
-        if !at_box && radii != Corners::default() {
-            if let Some(layer) = composed(&image, (sx, sy), (f32::from(block.width), f32::from(block.height)), (rx, ry), (bw, bh), scale, window) {
+        let rounded = radii != Corners::default();
+        let largest = [radii.top_left, radii.top_right, radii.bottom_right, radii.bottom_left].into_iter().fold(px(0.), Pixels::max);
+        let tiles_cover = block.width.min(block.height) >= largest;
+        if rounded && !at_box && !((rx || ry) && tiles_cover) {
+            let hard = g.repeating || g.stops.windows(2).any(|w| matches!((w[0].pos, w[1].pos), (Some(a), Some(b)) if a == b));
+            if let Some(layer) = composed(&image, (sx, sy), (f32::from(block.width), f32::from(block.height)), (rx, ry), (bw, bh), scale, hard, window) {
                 window.paint_image(bounds, bounds, radii, layer, 0, false).ok();
             }
             return;
         }
+        let near = |a: Pixels, b: Pixels| (a - b).abs() < px(0.5);
+        let corners_of = |at: Bounds<Pixels>| -> Corners<Pixels> {
+            if !rounded {
+                return radii;
+            }
+            let v = at.intersect(&bounds);
+            let (l, t, r, b) = (near(v.left(), bounds.left()), near(v.top(), bounds.top()), near(v.right(), bounds.right()), near(v.bottom(), bounds.bottom()));
+            Corners {
+                top_left: if l && t { radii.top_left } else { px(0.) },
+                top_right: if r && t { radii.top_right } else { px(0.) },
+                bottom_right: if r && b { radii.bottom_right } else { px(0.) },
+                bottom_left: if l && b { radii.bottom_left } else { px(0.) },
+            }
+        };
         let mut y = sy;
         while y < bh {
             let mut x = sx;
             while x < bw {
                 let at = Bounds::new(bounds.origin + point(px(x), px(y)), block);
-                window.paint_image(bounds, at, radii, image.clone(), 0, false).ok();
+                window.paint_image(bounds, at, corners_of(at), image.clone(), 0, false).ok();
                 if !rx {
                     break;
                 }
@@ -242,6 +263,8 @@ fn composed(
     repeat: (bool, bool),
     size: (f32, f32),
     scale: f32,
+    // Hard-edged (stripes, checks): sampled at the box's full resolution.
+    hard: bool,
     window: &mut Window,
 ) -> Option<Arc<RenderImage>> {
     thread_local! {
@@ -258,7 +281,8 @@ fn composed(
     if tw == 0 || th == 0 {
         return None;
     }
-    let fit = |v: f32| (v * scale).ceil().clamp(1.0, 128.0) as u32;
+    let cap = if hard { 2048.0 } else { 128.0 };
+    let fit = |v: f32| (v * scale).ceil().clamp(1.0, cap) as u32;
     let (cw, ch) = (fit(size.0), fit(size.1));
     // The offset as it was rounded for the key, so cached frames match it.
     let offset = (key.1 as f32 / 64.0 * size.0, key.2 as f32 / 64.0 * size.1);

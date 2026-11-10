@@ -1094,6 +1094,13 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         BlockKind::TableCell => base
             .flex()
             .flex_col()
+            // `vertical-align` places the content in the row's height
+            // (middle by default, from the rows; baseline as top).
+            .map(|d| match block.style.vertical_align {
+                style::VerticalAlign::Middle => d.justify_center(),
+                style::VerticalAlign::Bottom | style::VerticalAlign::TextBottom => d.justify_end(),
+                _ => d,
+            })
             .map(|d| match block.cell {
                 // Column-shared sizing (see `layout_table`) so rows line up.
                 Some(cell) => d
