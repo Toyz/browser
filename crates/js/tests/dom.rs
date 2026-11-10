@@ -1298,6 +1298,27 @@ fn location_navigator_and_console_are_native() {
 }
 
 #[test]
+fn web_storage_is_native_with_named_properties() {
+    let doc = html::parse_scripted(
+        r##"<body><p id="o"></p><script>
+        localStorage.clear();
+        localStorage.setItem("a", 1);
+        localStorage.b = "two";
+        sessionStorage["c"] = "three";
+        const before = [localStorage.length, localStorage.getItem("a"), localStorage.b, localStorage.key(0), "a" in localStorage, "zz" in localStorage, Object.keys(localStorage).join("+"), localStorage.getItem("zz")];
+        delete localStorage.a;
+        localStorage.removeItem("b");
+        document.getElementById("o").textContent = [...before, localStorage.length, sessionStorage.getItem("c"), typeof localStorage.setItem, JSON.stringify(Object.entries(sessionStorage))].join(" ");
+        </script></body>"##,
+        Url::parse("https://storage.example/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 77 };
+    let (doc, _host) = js::start(doc, opts);
+    assert_eq!(text_of(&doc, "o"), r#"2 1 two a true false a+b  0 three function [["c","three"]]"#);
+}
+
+#[test]
 fn history_is_native_with_state_and_popstate() {
     let doc = html::parse_scripted(
         r##"<body><p id="o"></p><script>

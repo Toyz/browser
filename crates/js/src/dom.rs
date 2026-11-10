@@ -980,6 +980,16 @@ pub(crate) fn set_url(d: &Shared, href: &str, mode: u8) -> JsResult<Url> {
     Ok(url)
 }
 
+/// The page's address.
+pub(crate) fn url_of(dom: &Dom) -> Url {
+    dom.doc.url.clone()
+}
+
+/// The tab's session (for `sessionStorage`).
+pub(crate) fn session_of(dom: &Dom) -> u64 {
+    dom.session
+}
+
 /// Milliseconds since the page started (`performance.now()`).
 pub(crate) fn now_ms(d: &Shared) -> f64 {
     d.borrow().started.elapsed().as_secs_f64() * 1000.0
@@ -1838,6 +1848,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     }));
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom, cx);
+    crate::web_storage::install(&obj, dom, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 

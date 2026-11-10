@@ -1810,26 +1810,6 @@
   // Timers are native (timers.rs).
   const { setTimeout, setInterval, clearTimeout, requestAnimationFrame, requestIdleCallback } = N.timers;
 
-  // Web storage: the data lives in Rust (localStorage on disk per origin,
-  // sessionStorage per tab); `storage.key = value` works too.
-  const storage = (kind) => {
-    const api = {
-      getItem: (k) => N.storage(kind, "get", String(k), ""),
-      setItem: (k, v) => { N.storage(kind, "set", String(k), String(v)); },
-      removeItem: (k) => { N.storage(kind, "remove", String(k), ""); },
-      clear: () => { N.storage(kind, "clear", "", ""); },
-      key: (i) => { const keys = N.storage(kind, "keys", "", ""); return keys && keys[i] !== undefined ? keys[i] : null; },
-      get length() { const keys = N.storage(kind, "keys", "", ""); return keys ? keys.length : 0; },
-    };
-    return new Proxy(api, {
-      get(t, k) { if (k in t || typeof k !== "string") return t[k]; const v = t.getItem(k); return v === null ? undefined : v; },
-      set(t, k, v) { t.setItem(k, v); return true; },
-      deleteProperty(t, k) { t.removeItem(k); return true; },
-      has(t, k) { return k in t || t.getItem(k) !== null; },
-      ownKeys() { return N.storage(kind, "keys", "", "") || []; },
-      getOwnPropertyDescriptor(t, k) { const v = t.getItem(k); return v === null ? undefined : { value: v, enumerable: true, configurable: true, writable: true }; },
-    });
-  };
 
   // A small URL implementation (enough for the common uses).
   // URL and URLSearchParams are native classes (web_url.rs).
@@ -2257,7 +2237,7 @@
         addEventListener() {}, removeEventListener() {},
       };
     })(),
-    localStorage: storage("local"), sessionStorage: storage("session"),
+    localStorage: N.localStorage, sessionStorage: N.sessionStorage,
     matchMedia,
     getComputedStyle: computedStyleOf,
     MutationObserver, MutationRecord: class MutationRecord {},

@@ -20,6 +20,7 @@ mod web_url;
 mod cssom;
 mod dom;
 mod timers;
+mod web_storage;
 mod window_api;
 mod images;
 mod modules;
