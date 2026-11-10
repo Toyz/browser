@@ -48,3 +48,10 @@ Drop these when Boa releases include equivalent fixes.
   `id_for_native_font` tells instances apart by their `wght`. Without it,
   every weight of a variable web font (Inter, Roboto Flex...) drew as its
   default one: NASA's 700-weight headline was regular.
+
+## gpui-component 0.9.0
+
+- `src/input/input.rs`, `src/input/textarea.rs`: `caret_color()` on `Input`
+  and `Textarea`, used instead of the theme's caret when projecting the
+  editor style. Fields in web pages are drawn in the page's colors; with the
+  app in dark mode the theme's caret was white, invisible in a white field.

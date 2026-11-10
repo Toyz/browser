@@ -138,8 +138,11 @@ impl Tab {
                 let field = match &self.forms.fields[&node] {
                     Field::Line(state) => PlaceholderColor {
                         color: placeholder,
+                        // The page's text color: the app theme's caret is
+                        // light in dark mode, invisible in a white field.
                         child: Input::new(state)
                             .appearance(false)
+                            .caret_color(fg)
                             .px_0()
                             .disabled(control.disabled)
                             .text_color(fg)
@@ -150,6 +153,7 @@ impl Tab {
                     .into_any_element(),
                     Field::Area(state) => Textarea::new(state)
                         .appearance(false)
+                        .caret_color(fg)
                         .disabled(control.disabled)
                         .h_full()
                         .into_any_element(),

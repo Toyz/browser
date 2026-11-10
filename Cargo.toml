@@ -53,4 +53,5 @@ boa_ast = { path = "vendor/boa_ast" }
 boa_gc = { path = "vendor/boa_gc" }
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-component = { path = "vendor/gpui-component" }
 taffy = { path = "vendor/taffy" }
