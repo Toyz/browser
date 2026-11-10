@@ -26,6 +26,7 @@ html = { path = "crates/html" }
 style = { path = "crates/style" }
 render = { path = "crates/render" }
 js = { path = "crates/js" }
+avif = { path = "crates/avif" }
 
 [profile.dev.package."*"]
 # Dependencies (GPUI, the parser) are painfully slow unoptimized; our code stays debuggable.

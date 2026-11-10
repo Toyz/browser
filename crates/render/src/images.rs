@@ -390,7 +390,7 @@ pub fn prepare(bytes: Vec<u8>) -> Result<Prepared> {
             imagesize::ImageType::Ico => ImageFormat::Ico,
             // AVIF: decoded below, by the system (GPUI has no format for it).
             imagesize::ImageType::Heif(imagesize::Compression::Av1) => {
-                let frames = crate::avif::decode(&bytes).context("can't decode AVIF")?;
+                let frames = avif::decode(&bytes).context("can't decode AVIF")?;
                 let (w, h) = (frames[0].buffer().width() as f32, frames[0].buffer().height() as f32);
                 let frames = Some(Arc::new(RenderImage::new(frames)));
                 return Ok(Prepared { image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())), padded: None, frames, width: w, height: h });

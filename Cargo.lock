@@ -587,6 +587,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "avif"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "libavif-sys",
+]
+
+[[package]]
 name = "avif-serialize"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4304,6 +4312,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "avif",
  "boa_engine",
  "boa_gc",
  "chrono",
@@ -6622,11 +6631,11 @@ name = "render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "avif",
  "gpui-kit",
  "html",
  "image",
  "imagesize 0.13.0",
- "libavif-sys",
  "net",
  "page",
  "percent-encoding",

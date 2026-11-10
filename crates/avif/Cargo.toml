@@ -1,0 +1,11 @@
+[package]
+name = "avif"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# AVIF (still and animated), on every platform: libavif with libaom, built
+# from source (needs CMake; NASM too on x86).
+libavif-sys = { version = "0.17", default-features = false, features = ["codec-aom"] }
+image = { version = "0.25", default-features = false }

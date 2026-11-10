@@ -558,21 +558,33 @@ impl Picture {
 pub fn decode_picture(bytes: &[u8]) -> Option<Picture> {
     use image::AnimationDecoder;
     use std::io::Cursor;
-    let frames: Option<Vec<image::Frame>> = match image::guess_format(bytes).ok()? {
+    let frames: Option<Vec<image::Frame>> = if is_avif(bytes) {
+        // AVIF: through libavif (still or animated).
+        avif::decode(bytes)
+    } else {
+        match image::guess_format(bytes).ok()? {
         image::ImageFormat::Gif => image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?.into_frames().collect_frames().ok(),
         image::ImageFormat::WebP => {
             let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
             if decoder.has_animation() { decoder.into_frames().collect_frames().ok() } else { None }
         }
         _ => None,
+        }
     };
-    let frames: Vec<(Arc<Pixmap>, u32)> = match frames.filter(|f| f.len() > 1) {
+    let frames: Vec<(Arc<Pixmap>, u32)> = match frames.filter(|f| f.len() > 1 || is_avif(bytes)) {
         Some(frames) => frames
             .into_iter()
             .filter_map(|f| {
                 let (num, den) = f.delay().numer_denom_ms();
                 let ms = (num / den.max(1)).max(20);
-                Some((Arc::new(premultiplied(f.into_buffer())?), ms))
+                // (libavif's frames are BGRA, as GPUI wants them.)
+                let mut buffer = f.into_buffer();
+                if is_avif(bytes) {
+                    for px in buffer.pixels_mut() {
+                        px.0.swap(0, 2);
+                    }
+                }
+                Some((Arc::new(premultiplied(buffer)?), ms))
             })
             .collect(),
         None => vec![(Arc::new(decode_image(bytes)?), 0)],
@@ -582,6 +594,11 @@ pub fn decode_picture(bytes: &[u8]) -> Option<Picture> {
     }
     let total_ms = frames.iter().map(|(_, ms)| ms).sum();
     Some(Picture { frames, total_ms, started: std::time::Instant::now() })
+}
+
+/// An AVIF file (`ftyp` box with an `avif`/`avis` brand)?
+fn is_avif(bytes: &[u8]) -> bool {
+    bytes.len() > 12 && &bytes[4..8] == b"ftyp" && matches!(&bytes[8..12], b"avif" | b"avis")
 }
 
 pub fn decode_image(bytes: &[u8]) -> Option<Pixmap> {

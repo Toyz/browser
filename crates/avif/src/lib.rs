@@ -1,4 +1,5 @@
-//! AVIF pictures, still and animated, decoded with libavif (libaom's AV1
+//! AVIF pictures, still and animated, decoded with libavif (for the
+//! renderer and for canvases) (libaom's AV1
 //! decoder; both built from source by `libavif-sys`, with CMake).
 //!
 //! libavif is C: the unsafe calls are kept to two small owners, [`Decoder`]
