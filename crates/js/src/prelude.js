@@ -944,6 +944,8 @@
   }
   // getBoundingClientRect, clientWidth, offsetTop...: geometry.rs.
   N.geometry(Element.prototype);
+  // ariaCurrent, ariaLabel, role...: their attributes (aria.rs).
+  N.aria(Element.prototype);
   mixin(Element, ParentMixin, ChildMixin);
   function insertAdjacent(el, where, id) {
     switch (String(where).toLowerCase()) {

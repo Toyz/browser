@@ -23,6 +23,7 @@ mod timers;
 mod web_storage;
 mod crypto;
 mod blob;
+mod aria;
 mod window_api;
 mod images;
 mod modules;

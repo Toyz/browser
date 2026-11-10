@@ -848,6 +848,17 @@ fn computed_styles_see_cssom_rules() {
 }
 
 #[test]
+fn aria_properties_reflect_their_attributes() {
+    let doc = run(r##"<body><a id="a" aria-label="x" role="link">t</a><p id="o"></p><script>
+        const a = document.getElementById("a");
+        const before = [a.ariaLabel, a.role, a.ariaCurrent];
+        a.ariaCurrent = "true"; a.ariaLabel = null; a.ariaValueNow = 5;
+        document.getElementById("o").textContent = [...before, a.getAttribute("aria-current"), a.hasAttribute("aria-label"), a.getAttribute("aria-valuenow")].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "x link  true false 5");
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
