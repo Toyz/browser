@@ -263,5 +263,4 @@ pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
     ("flex-basis", p_flex_basis),
     ("flex", p_flex),
     ("grid-template-areas", p_grid_template_areas),
-    ("grid-template", p_grid_template),
 ];

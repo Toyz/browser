@@ -131,6 +131,14 @@ fn grid_templates() {
     assert!(d.contains(&Decl::GridTracks(Some(
         vec![TrackSpec::Len(LenSpec::Lin(Lin { rem: 12.25, ..Default::default() })), TrackSpec::Fr(1.0)].into()
     ))));
+    // The shorthand gives both track lists in full too (Primer's
+    // ActionList items: areas with a row size, then the columns).
+    let full = parse("grid-template", "\"spacer leadingAction leadingVisual content\"min-content/min-content min-content min-content minmax(0,auto)");
+    let rows = full.iter().find_map(|d| match d { Decl::GridTemplateFull { rows: true, value } => Some(value.clone()), _ => None });
+    let cols = full.iter().find_map(|d| match d { Decl::GridTemplateFull { rows: false, value } => Some(value.clone()), _ => None });
+    assert_eq!(rows.flatten().map(|t| t.entries.len()), Some(1), "{full:?}");
+    assert_eq!(cols.flatten().map(|t| t.entries.len()), Some(4), "{full:?}");
+    assert!(full.iter().any(|d| matches!(d, Decl::GridAreas(Some(a)) if a[0].len() == 4)), "{full:?}");
     let areas = parse("grid-template-areas", "'a a' 'b c'");
     let Decl::GridAreas(Some(rows)) = &areas[0] else { panic!("{areas:?}") };
     assert_eq!(rows.len(), 2);

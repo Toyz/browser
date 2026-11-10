@@ -30,6 +30,64 @@ pub(super) fn p_template_columns<'i>(name: &str, p: &mut Parser<'i>, out: &mut V
     })
 }
 
+/// `grid-template`: `<rows> / <columns>`, or area strings each with an
+/// optional row size, then `/ <columns>`. The summary (areas, the older
+/// tracks) as before, then both track lists in full.
+pub(super) fn p_template<'i>(name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
+    both(name, p, out, super::flex_grid::p_grid_template, |_, p, out| {
+        if p.try_parse(|p| p.expect_ident_matching("none")).is_ok() {
+            out.push(Decl::GridTemplateFull { rows: true, value: None });
+            out.push(Decl::GridTemplateFull { rows: false, value: None });
+            return Ok(());
+        }
+        // Split at the top-level `/`; note the row sizes beside area strings.
+        let mut seg_start = p.position();
+        let mut segments: Vec<String> = Vec::new();
+        let mut sizes: Vec<String> = Vec::new();
+        let (mut strings, mut sized) = (false, true);
+        loop {
+            let before = p.position();
+            match p.next() {
+                Err(_) => {
+                    segments.push(p.slice_from(seg_start).to_owned());
+                    break;
+                }
+                Ok(Token::Delim('/')) if segments.is_empty() => {
+                    segments.push(p.slice(seg_start..before).to_owned());
+                    seg_start = p.position();
+                }
+                Ok(Token::QuotedString(_)) if segments.is_empty() => {
+                    if !sized {
+                        sizes.push("auto".into());
+                    }
+                    (strings, sized) = (true, false);
+                }
+                Ok(Token::SquareBracketBlock) => {}
+                Ok(_) if segments.is_empty() && strings => {
+                    sizes.push(p.slice_from(before).trim().to_owned());
+                    sized = true;
+                }
+                Ok(_) => {}
+            }
+        }
+        if strings && !sized {
+            sizes.push("auto".into());
+        }
+        let list = |text: &str| -> PResult<'i, Option<GridTemplateSpec>> {
+            let mut q = Parser::new(text);
+            parse_template(&mut q)
+        };
+        let rows = if strings { sizes.join(" ") } else { segments[0].clone() };
+        if !rows.trim().is_empty() {
+            out.push(Decl::GridTemplateFull { rows: true, value: list(&rows)?.map(Arc::new) });
+        }
+        if let Some(columns) = segments.get(1).filter(|c| !c.trim().is_empty()) {
+            out.push(Decl::GridTemplateFull { rows: false, value: list(columns)?.map(Arc::new) });
+        }
+        Ok(())
+    })
+}
+
 pub(super) fn p_template_rows<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     let value = parse_template(p)?;
     out.push(Decl::GridTemplateFull { rows: true, value: value.map(Arc::new) });
@@ -241,6 +299,7 @@ fn parse_track<'i>(p: &mut Parser<'i>) -> PResult<'i, TrackSizeSpec> {
 }
 
 pub(super) const PROPERTIES: &[(&str, ParseFn)] = &[
+    ("grid-template", p_template),
     ("grid-template-columns", p_template_columns),
     ("grid-template-rows", p_template_rows),
     ("grid-auto-columns", p_auto_tracks),
