@@ -18,9 +18,13 @@ behavior are checked for exact equivalence (see "parser parity" below).
    property is a named parse function in a table, looked up by name.
    Margins, padding and borders are explicit families. Verified by
    parser parity on 39 real stylesheets (36,919 rules, byte-identical).
-2. **Property metadata**: whether a property inherits and its initial
-   value live in the registry, not in hard-coded lists in the cascade
-   (`apply_wide`'s `INHERITED`).
+   The shared value parsers are split the same way (`length`, `color`,
+   `image`, `layout`, `text_values`, `timing`, `border`, with `decl` for
+   the declaration types): `props/mod.rs` went from 2,057 lines to 235.
+2. **Property metadata** (done): `props/meta.rs` lists, per property,
+   whether it inherits and which computed fields it owns; the cascade's
+   `inherit`/`initial`/`unset` handling is a lookup in it, and a test checks
+   `ComputedStyle::inherit` copies exactly the inherited ones.
 3. **Lossless values**: parse into what CSS specifies and resolve late,
    against the box. Known losses: grid track lists (`max()`, `calc()`,
    `minmax(auto, …)` become `Auto`), lengths with units we don't keep,

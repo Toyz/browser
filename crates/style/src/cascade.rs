@@ -1336,100 +1336,20 @@ fn finalize(s: &mut ComputedStyle) {
 }
 
 fn apply_wide(s: &mut ComputedStyle, parent: &ComputedStyle, name: &str, wide: Wide) {
-    const INHERITED: &[&str] = &[
-        "color", "font", "font-size", "font-weight", "font-style", "font-family", "line-height", "pointer-events", "cursor",
-        "text-align", "text-transform", "white-space", "visibility", "list-style", "list-style-type",
-    ];
+    let Some((inherits, copy)) = crate::props::meta::lookup(name) else { return };
     let initial = ComputedStyle::initial();
-    let inherits = INHERITED.contains(&name);
     let src = match wide {
         Wide::Inherit => parent,
         Wide::Initial => &initial,
         Wide::Unset if inherits => parent,
         Wide::Unset => &initial,
     };
-    match name {
-        "color" => s.color = src.color,
-        "font" => {
-            s.font_size = src.font_size;
-            s.font_weight = src.font_weight;
-            s.italic = src.italic;
-            s.font_family = src.font_family;
-            s.font_names = src.font_names.clone();
-            s.line_height = src.line_height;
-        }
-        "font-size" => s.font_size = src.font_size,
-        "font-weight" => s.font_weight = src.font_weight,
-        "font-style" => s.italic = src.italic,
-        "font-family" => {
-            s.font_family = src.font_family;
-            s.font_names = src.font_names.clone();
-        }
-        "line-height" => s.line_height = src.line_height,
-        "text-align" => s.text_align = src.text_align,
-        "text-transform" => s.text_transform = src.text_transform,
-        "white-space" => s.white_space = src.white_space,
-        "visibility" => s.visible = src.visible,
-        "list-style" | "list-style-type" => s.list_style = src.list_style,
-        "display" => s.display = src.display,
-        "position" => s.position = src.position,
-        "width" => s.width = src.width,
-        "height" => s.height = src.height,
-        "max-width" => s.max_width = src.max_width,
-        "min-width" => s.min_width = src.min_width,
-        "max-height" => s.max_height = src.max_height,
-        "min-height" => s.min_height = src.min_height,
-        "opacity" => s.opacity = src.opacity,
-        "gap" | "grid-gap" => {
-            s.row_gap = src.row_gap;
-            s.column_gap = src.column_gap;
-        }
-        "row-gap" | "grid-row-gap" => s.row_gap = src.row_gap,
-        "column-gap" | "grid-column-gap" => s.column_gap = src.column_gap,
-        "align-items" => s.align_items = src.align_items,
-        "align-self" => s.align_self = src.align_self,
-        "align-content" => s.align_content = src.align_content,
-        "justify-content" => s.justify_content = src.justify_content,
-        "flex-direction" => s.flex_direction = src.flex_direction,
-        "flex-wrap" => s.flex_wrap = src.flex_wrap,
-        "flex-grow" => s.flex_grow = src.flex_grow,
-        "flex-shrink" => s.flex_shrink = src.flex_shrink,
-        "flex-basis" => s.flex_basis = src.flex_basis,
-        "flex" => {
-            s.flex_grow = src.flex_grow;
-            s.flex_shrink = src.flex_shrink;
-            s.flex_basis = src.flex_basis;
-        }
-        "cursor" => s.cursor = src.cursor,
-        "pointer-events" => s.pointer_events_none = src.pointer_events_none,
-        "object-fit" => s.object_fit = src.object_fit,
-        "text-overflow" => s.text_ellipsis = src.text_ellipsis,
-        "-webkit-line-clamp" | "line-clamp" => s.line_clamp = src.line_clamp,
-        "text-decoration" | "text-decoration-line" => {
-            s.underline = parent.underline || src.underline;
-            s.strikethrough = parent.strikethrough || src.strikethrough;
-        }
-        n if n.starts_with("margin") => s.margin = src.margin,
-        n if n.starts_with("padding") => s.padding = src.padding,
-        n if n.starts_with("background") => {
-            s.background = src.background;
-            s.background_image = src.background_image;
-            s.gradients = src.gradients.clone();
-        }
-        // Each border property resets just itself (`border-radius: inherit`
-        // used to wipe the whole border).
-        n if n.contains("radius") => s.border_radius = src.border_radius,
-        n if n.ends_with("-color") && n.starts_with("border") => s.border_color = src.border_color,
-        n if n.ends_with("-style") && n.starts_with("border") => s.border_style = src.border_style,
-        n if n.ends_with("-width") && n.starts_with("border") => s.border_width = src.border_width,
-        n if n.starts_with("border-collapse") || n.starts_with("border-spacing") || n.starts_with("border-image") => {}
-        n if n.starts_with("border") => {
-            s.border_width = src.border_width;
-            s.border_style = src.border_style;
-            s.border_color = src.border_color;
-        }
-        n if n.starts_with("overflow") => s.overflow = src.overflow,
-        _ => {}
+    copy(s, src);
+    // Decorations aren't inherited, but a parent's still draw under the
+    // child's text: `text-decoration: none` doesn't remove them.
+    if matches!(name, "text-decoration" | "text-decoration-line") {
+        s.underline |= parent.underline;
+        s.strikethrough |= parent.strikethrough;
     }
 }
 
@@ -1618,6 +1538,33 @@ mod tests {
         assert_eq!(style_of(&doc, &s, "em").width, Length::Px(22.0));
         assert_eq!(style_of(&doc, &s, "i").width, Length::Px(33.0));
         assert_eq!(style_of(&doc, &s, "div").color, Color::Rgba(0xff0000ff));
+    }
+
+    #[test]
+    fn inherit_copies_exactly_the_inherited_properties() {
+        // A parent with every inherited property set to something other
+        // than its initial value.
+        let (doc, s) = styled(
+            "<div><p>x</p></div>",
+            "div { color: red; font: italic bold 20px/30px serif; text-align: center; text-transform: uppercase; \
+             white-space: pre; visibility: hidden; list-style: square; cursor: pointer; pointer-events: none; \
+             -webkit-text-fill-color: blue }",
+        );
+        let parent = style_of(&doc, &s, "div");
+        let inherited = ComputedStyle::inherit(&parent);
+        let mut from_table = ComputedStyle::initial();
+        for m in crate::props::meta::META.iter().filter(|m| m.inherited) {
+            (m.copy)(&mut from_table, &parent);
+        }
+        // What inherits without being a property of its own.
+        from_table.underline = parent.underline;
+        from_table.strikethrough = parent.strikethrough;
+        from_table.dark = parent.dark;
+        from_table.query_container = parent.query_container;
+        from_table.custom = parent.custom.clone();
+        from_table.svg_paint = parent.svg_paint.clone();
+        from_table.text_gradient = parent.text_gradient.clone();
+        assert_eq!(inherited, from_table);
     }
 
     #[test]
