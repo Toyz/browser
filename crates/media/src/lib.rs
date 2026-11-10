@@ -2,7 +2,15 @@
 //! Matroska, Ogg, MP3, FLAC, WAV) demuxed by symphonia; H.264 video decoded
 //! by openh264 (built from source) to RGBA frames; audio (AAC, Vorbis, MP3,
 //! FLAC, PCM) decoded by symphonia to interleaved `f32` samples. Each
-//! output carries its presentation time, seconds.
+//! output carries its presentation time, seconds. [`Player`] plays one:
+//! pictures shown when due, sound through the default device.
+
+mod audio;
+mod player;
+mod source;
+
+pub use player::{Command, Event, Player};
+pub use source::{Feeder, Growing, growing};
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -57,6 +65,8 @@ struct VideoTrack {
     id: u32,
     time_base: Option<TimeBase>,
     decoder: openh264::decoder::Decoder,
+    /// The parameter sets (SPS, PPS), as Annex B.
+    sets: Vec<u8>,
     /// Bytes in each NAL unit's length prefix (`avcC`).
     length_size: usize,
     /// Times of packets sent but not yet out (decoders reorder B-frames;
@@ -114,6 +124,33 @@ fn avc_config(avcc: &[u8]) -> Option<(Vec<u8>, usize)> {
     Some((annex_b, length_size))
 }
 
+/// An H.264 decoder primed with the stream's parameter sets.
+fn h264_decoder(sets: &[u8]) -> Result<openh264::decoder::Decoder> {
+    // No flush per decode: B-frames come out after the frames they
+    // reference, so the decoder must keep them.
+    let config = openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush);
+    let mut decoder = openh264::decoder::Decoder::with_api_config(openh264::OpenH264API::from_source(), config).map_err(|e| anyhow!("openh264: {e}"))?;
+    if !sets.is_empty() {
+        decoder.decode(sets).ok();
+    }
+    Ok(decoder)
+}
+
+/// Whether a packet (length-prefixed NAL units) starts a picture decodable
+/// on its own (an IDR slice).
+fn is_keyframe(data: &[u8], length_size: usize) -> bool {
+    let mut at = 0;
+    while at + length_size < data.len() {
+        let len = data[at..at + length_size].iter().fold(0usize, |n, &b| (n << 8) | usize::from(b));
+        at += length_size;
+        if data[at] & 0x1f == 5 {
+            return true;
+        }
+        at += len;
+    }
+    false
+}
+
 /// Length-prefixed NAL units as Annex B (start codes).
 fn to_annex_b(data: &[u8], length_size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() + 16);
@@ -140,7 +177,12 @@ fn rgba_of(yuv: &openh264::decoder::DecodedYUV<'_>) -> (u32, u32, Vec<u8>) {
 impl Demuxer {
     /// Open a whole file (`hint`: its extension or MIME subtype, if known).
     pub fn open(bytes: Vec<u8>, hint: Option<&str>) -> Result<Self> {
-        let source = MediaSourceStream::new(Box::new(Cursor::new(bytes)), MediaSourceStreamOptions::default());
+        Self::open_source(Box::new(Cursor::new(bytes)), hint)
+    }
+
+    /// Open a file that may still be arriving (see [`Growing`]).
+    pub fn open_source(source: Box<dyn symphonia::core::io::MediaSource>, hint: Option<&str>) -> Result<Self> {
+        let source = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
         let mut h = Hint::new();
         if let Some(ext) = hint {
             h.with_extension(ext);
@@ -154,23 +196,22 @@ impl Demuxer {
         for track in reader.tracks() {
             match &track.codec_params {
                 Some(CodecParameters::Video(p)) if video.is_none() && p.codec == CODEC_ID_H264 => {
-                    // No flush per decode: B-frames come out after the frames
-                    // they reference, so the decoder must keep them.
-                    let config = openh264::decoder::DecoderConfig::new().flush_after_decode(openh264::decoder::Flush::NoFlush);
-                    let mut decoder = openh264::decoder::Decoder::with_api_config(openh264::OpenH264API::from_source(), config)
-                        .map_err(|e| anyhow!("openh264: {e}"))?;
                     let config = p.extra_data.iter().find(|e| e.id == VIDEO_EXTRA_DATA_ID_AVC_DECODER_CONFIG).and_then(|e| avc_config(&e.data));
-                    let length_size = match config {
-                        Some((sets, n)) => {
-                            decoder.decode(&sets).ok();
-                            n
-                        }
-                        None => 4,
-                    };
+                    let (sets, length_size) = config.unwrap_or((Vec::new(), 4));
+                    let decoder = h264_decoder(&sets)?;
                     info.has_video = true;
                     info.width = u32::from(p.width.unwrap_or(0));
                     info.height = u32::from(p.height.unwrap_or(0));
-                    video = Some(VideoTrack { id: track.id, time_base: track.time_base, decoder, length_size, pending: BinaryHeap::new(), flushed: Vec::new(), ended: false });
+                    video = Some(VideoTrack {
+                        id: track.id,
+                        time_base: track.time_base,
+                        decoder,
+                        sets,
+                        length_size,
+                        pending: BinaryHeap::new(),
+                        flushed: Vec::new(),
+                        ended: false,
+                    });
                 }
                 Some(CodecParameters::Audio(p)) if audio.is_none() => {
                     if let Ok(decoder) = symphonia::default::get_codecs().make_audio_decoder(p, &AudioDecoderOptions::default()) {
@@ -258,20 +299,57 @@ impl Demuxer {
     /// Go to (about) `time` seconds: the next outputs are from the
     /// keyframe at or before it.
     pub fn seek(&mut self, time: f64) -> Result<()> {
-        let track_id = self.video.as_ref().map(|v| v.id).or(self.audio.as_ref().map(|a| a.id));
-        let time = Time::try_from_secs_f64(time.max(0.0)).ok_or_else(|| anyhow!("bad time"))?;
-        self.reader.seek(SeekMode::Accurate, SeekTo::Time { time, track_id })?;
+        // Pictures decode from a keyframe: the last one at or before.
+        let from = match self.keyframe_before(time)? {
+            Some(k) => k,
+            None => time,
+        };
+        self.seek_raw(from)?;
         if let Some(v) = &mut self.video {
             v.pending.clear();
             v.flushed.clear();
             v.ended = false;
-            // Drop held pictures from before the jump.
-            v.decoder.flush_remaining().ok();
+            // A fresh decoder: nothing held from before the jump.
+            v.decoder = h264_decoder(&v.sets)?;
         }
         if let Some(a) = &mut self.audio {
             a.decoder.reset();
         }
         Ok(())
+    }
+
+    fn seek_raw(&mut self, time: f64) -> Result<()> {
+        let track_id = self.video.as_ref().map(|v| v.id).or(self.audio.as_ref().map(|a| a.id));
+        let time = Time::try_from_secs_f64(time.max(0.0)).ok_or_else(|| anyhow!("bad time"))?;
+        self.reader.seek(SeekMode::Accurate, SeekTo::Time { time, track_id })?;
+        Ok(())
+    }
+
+    /// The time of the last keyframe at or before `t`: looking back from
+    /// it further and further (containers here don't say where they are).
+    fn keyframe_before(&mut self, t: f64) -> Result<Option<f64>> {
+        let Some((id, time_base, length_size)) = self.video.as_ref().map(|v| (v.id, v.time_base, v.length_size)) else { return Ok(None) };
+        for back in [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0] {
+            let from = (t - back).max(0.0);
+            self.seek_raw(from)?;
+            let mut found = None;
+            while let Some(p) = self.reader.next_packet()? {
+                if p.track_id != id {
+                    continue;
+                }
+                let pts = seconds(time_base, p.pts);
+                if pts > t + 0.0005 {
+                    break;
+                }
+                if is_keyframe(&p.data, length_size) {
+                    found = Some(pts);
+                }
+            }
+            if found.is_some() || from == 0.0 {
+                return Ok(found);
+            }
+        }
+        Ok(None)
     }
 }
 
