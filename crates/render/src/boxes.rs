@@ -165,6 +165,17 @@ impl Block {
     }
 
     /// The box itself (ignoring its layout mode) survives being sliced.
+    /// Is an absolutely positioned box among its children (looking `depth`
+    /// levels down)?
+    fn positions_inside(&self, depth: u8) -> bool {
+        self.children.iter().any(|c| match c {
+            LayoutBox::Block(b) => {
+                matches!(b.style.position, style::Position::Absolute) || (depth > 1 && b.positions_inside(depth - 1))
+            }
+            _ => false,
+        })
+    }
+
     fn sliceable_box(&self) -> bool {
         let s = &self.style;
         // `min-height: 100vh` page wrappers: the content is taller anyway.
@@ -180,8 +191,10 @@ impl Block {
             && s.height.is_auto()
             && min_height_ok
             && s.max_height.is_auto()
-            // Clipping a box as tall as its content cuts nothing off.
-            && (s.overflow == Overflow::Visible || (s.height.is_auto() && s.max_height.is_auto()))
+            // Clipping a box as tall as its content cuts nothing off, unless
+            // something in it is absolutely positioned: that's what the clip
+            // is for (NASA's hero photo ran out of its slide).
+            && (s.overflow == Overflow::Visible || (s.height.is_auto() && s.max_height.is_auto() && !self.positions_inside(4)))
             && s.opacity >= 1.0
             && s.position != style::Position::Absolute
             && s.position != style::Position::Fixed

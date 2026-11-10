@@ -226,7 +226,7 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
         .pt(px(row.space_before))
         .pl(px(row.indent_left))
         .pr(px(row.indent_right))
-        .child(render_box(
+        .child(in_flow(
             &row.content,
             cx,
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
@@ -283,6 +283,17 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
                     }),
             )
             .into_any_element();
+        // A raised split container (Stripe's `z-index: 2` header): each
+        // slice paints at its place in the stacking order.
+        let raised_wrapper = matches!(s.position, style::Position::Relative | style::Position::Sticky) && s.z_index.is_some_and(|z| z > 0);
+        if std::env::var_os("FEATHER_DEBUG_Z").is_some() && s.z_index.is_some() {
+            eprintln!("z wrapper: {:?} z={:?} pos={:?} raised={raised_wrapper}", wrapper.node, s.z_index, s.position);
+        }
+        if raised_wrapper && STACKING.with(|st| st.get().1) == 0 {
+            let rank = 1 + s.z_index.unwrap_or(0).clamp(0, (1 << Z_BITS) - 2) as usize;
+            let priority = rank << (Z_BITS * (CONTEXT_LEVELS - 1));
+            inner = ClippedDeferred { child: Some(inner), priority }.into_any_element();
+        }
     }
     inner
 }
@@ -618,36 +629,48 @@ fn stacking_context(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some() || block.style.opacity < 1.0)
 }
 
-/// Draw `b` (built by `build`) in the deferred layer at its `z_priority`,
-/// unless it's inside a deferred stacking context (drawn in place there),
-/// or deferrals already nest too deep (GPUI allows 10).
+/// Draw `b` (built by `build`) in the deferred layer, in its place in the
+/// stacking order: positioned boxes paint over in-flow content in
+/// `z-index` order, within the stacking context they're in.
+///
+/// GPUI orders deferred draws by one number (stably: ties keep tree
+/// order), so a box's priority spells out its path through nested
+/// stacking contexts, 12 bits per level, outermost first: a context's
+/// contents sort among themselves, and with everything outside it as the
+/// context does. `None` (drawn in place) past `CONTEXT_LEVELS` contexts or
+/// 8 nested deferrals (GPUI allows 10).
 fn deferred(b: &LayoutBox, context: bool, build: impl FnOnce() -> AnyElement) -> Option<AnyElement> {
-    if DEFERRED_DEPTH.with(|d| d.get()) > 0 || DEFER_LEVELS.with(|d| d.get()) >= 8 {
+    let (base, level) = STACKING.with(|s| s.get());
+    if level >= CONTEXT_LEVELS || DEFER_LEVELS.with(|d| d.get()) >= 8 {
         return None;
+    }
+    let priority = base + (z_rank(b) << (Z_BITS * (CONTEXT_LEVELS - 1 - level)));
+    if std::env::var_os("FEATHER_DEBUG_Z").is_some()
+        && let LayoutBox::Block(block) = b
+    {
+        eprintln!("z: {:?} z={:?} level={level} context={context} priority={priority:x}", block.node, block.style.z_index);
     }
     DEFER_LEVELS.with(|d| d.set(d.get() + 1));
     if context {
-        DEFERRED_DEPTH.with(|d| d.set(d.get() + 1));
+        STACKING.with(|s| s.set((priority, level + 1)));
     }
     let el = build();
-    if context {
-        DEFERRED_DEPTH.with(|d| d.set(d.get() - 1));
-    }
+    STACKING.with(|s| s.set((base, level)));
     DEFER_LEVELS.with(|d| d.set(d.get() - 1));
-    Some(ClippedDeferred { child: Some(el), priority: z_priority(b) }.into_any_element())
+    Some(ClippedDeferred { child: Some(el), priority }.into_any_element())
 }
 
-/// The deferred-draw priority of a positioned box: positioned boxes paint
-/// over in-flow content in `z-index` order (ties in tree order: the draw
-/// list is sorted stably, and the fixed layer is drawn after the page).
-/// One order for the page: stacking contexts nested in others are
-/// flattened into it.
-fn z_priority(b: &LayoutBox) -> usize {
+const Z_BITS: u32 = 12;
+const CONTEXT_LEVELS: u32 = 5;
+
+/// A positioned box's place among its context's: `z-index` (auto: 0), 1
+/// up (0 is the context's own content), at most 2^12 - 1.
+fn z_rank(b: &LayoutBox) -> usize {
     let z = match b {
         LayoutBox::Block(block) => block.style.z_index.unwrap_or(0),
         _ => 0,
     };
-    1 + z.clamp(0, 1_000_000) as usize
+    1 + z.clamp(0, (1 << Z_BITS) - 2) as usize
 }
 
 /// A relatively positioned (or sticky) box with a positive `z-index`: it
@@ -1496,9 +1519,9 @@ fn behind(b: &LayoutBox) -> bool {
 }
 
 thread_local! {
-    /// How many deferred stacking contexts the box being built is inside
-    /// (in one, positioned descendants are drawn in place).
-    static DEFERRED_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The deferred stacking context the box being built is in: its draw
+    /// priority and how many contexts deep it is (see `deferred`).
+    static STACKING: std::cell::Cell<(usize, u32)> = const { std::cell::Cell::new((0, 0)) };
     /// How many deferred boxes, of any kind, it's inside.
     static DEFER_LEVELS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
