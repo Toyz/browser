@@ -190,6 +190,11 @@ impl StyleData {
             .collect();
 
         let base = doc.base_url();
+        Self::parse_sources(&sources, &base, fetch)
+    }
+
+    fn parse_sources(sources: &[StyleSource], base: &Url, fetch: &(dyn Fn(&Url) -> Option<String> + Sync)) -> Self {
+        let base = base.clone();
         let sheets: Vec<Vec<Stylesheet>> = std::thread::scope(|scope| {
             let handles: Vec<_> = sources
                 .iter()
@@ -198,9 +203,9 @@ impl StyleData {
                     scope.spawn(move || {
                         let media = source_media(source);
                         let mut sheets = match source {
-                            StyleSource::Inline { css, .. } => load_sheet(css, base, media, fetch, 0),
+                            StyleSource::Inline { css, .. } => parsed_sheets(css, base, media, fetch),
                             StyleSource::External { url, .. } => match fetch(url) {
-                                Some(css) => load_sheet(&css, url, media, fetch, 0),
+                                Some(css) => parsed_sheets(&css, url, media, fetch),
                                 None => Vec::new(),
                             },
                         };

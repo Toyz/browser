@@ -425,13 +425,15 @@ fn read_document(url: &Url, mut response: ureq::http::Response<ureq::Body>) -> R
     })
 }
 
-/// In-memory cache for subresources (stylesheets, images): navigating around
-/// one site shouldn't re-download the same CSS and logos every time.
+/// In-memory cache for text subresources (stylesheets, scripts): navigating
+/// around one site shouldn't re-download the same CSS and bundles every
+/// time. Images aren't kept: the page keeps them decoded (raw, they were
+/// every image twice over).
 mod cache {
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex, OnceLock};
 
-    const MAX_BYTES: usize = 96 * 1024 * 1024;
+    const MAX_BYTES: usize = 32 * 1024 * 1024;
 
     #[derive(Default)]
     struct Cache {
@@ -450,8 +452,11 @@ mod cache {
     }
 
     pub fn put(url: &str, body: Arc<Vec<u8>>) {
+        if super::is_picture(&body) {
+            return;
+        }
         let mut c = cache().lock().unwrap();
-        if body.len() > MAX_BYTES / 8 || c.entries.contains_key(url) {
+        if body.len() > MAX_BYTES / 2 || c.entries.contains_key(url) {
             return;
         }
         c.bytes += body.len();
@@ -464,6 +469,16 @@ mod cache {
             }
         }
     }
+}
+
+/// Does `body` start like a picture (PNG, JPEG, GIF, WebP, AVIF, ICO)?
+fn is_picture(body: &[u8]) -> bool {
+    body.starts_with(b"\x89PNG")
+        || body.starts_with(&[0xff, 0xd8, 0xff])
+        || body.starts_with(b"GIF8")
+        || (body.len() > 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP")
+        || (body.len() > 12 && &body[4..8] == b"ftyp" && matches!(&body[8..12], b"avif" | b"avis"))
+        || body.starts_with(&[0, 0, 1, 0])
 }
 
 /// Fetch a subresource as text (stylesheets), through the cache. `None` on failure.
@@ -689,5 +704,17 @@ mod tests {
         assert_eq!(parse_input("/tmp/a b.html").unwrap().as_str(), "file:///tmp/a%20b.html");
         assert_eq!(parse_input("localhost:8080").unwrap().as_str(), "https://localhost:8080/");
         assert!(parse_input("   ").is_err());
+    }
+}
+
+#[cfg(test)]
+mod picture_tests {
+    #[test]
+    fn pictures_are_told_from_text() {
+        assert!(super::is_picture(b"\x89PNG\r\n\x1a\n...."));
+        assert!(super::is_picture(b"GIF89a......"));
+        assert!(super::is_picture(b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(!super::is_picture(b"body { color: red }"));
+        assert!(!super::is_picture(b"(function(){})()"));
     }
 }

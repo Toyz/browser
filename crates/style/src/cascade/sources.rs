@@ -72,6 +72,43 @@ pub(super) fn source_media(s: &StyleSource) -> &str {
 }
 
 /// Parse a sheet and (recursively) the sheets it `@import`s, imports first.
+/// A stylesheet's text parsed (with its `@import`s), shared by every
+/// styling of every document that has it: scripts adding a `<style>`
+/// re-styles the page with the other sheets' parse, and the tab and the
+/// page's scripts (getComputedStyle) share one parse.
+pub(super) fn parsed_sheets(css: &str, base: &Url, media: &str, fetch: &(dyn Fn(&Url) -> Option<String> + Sync)) -> Vec<Stylesheet> {
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Parsed = std::collections::HashMap<u64, (Arc<Vec<Stylesheet>>, u64)>;
+    static PARSED: OnceLock<Mutex<(Parsed, u64)>> = OnceLock::new();
+    const KEEP: usize = 1024;
+    let key = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (css, base.as_str(), media).hash(&mut h);
+        h.finish()
+    };
+    let cache = PARSED.get_or_init(Default::default);
+    {
+        let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.1 += 1;
+        let now = c.1;
+        if let Some((sheets, used)) = c.0.get_mut(&key) {
+            *used = now;
+            return (**sheets).clone();
+        }
+    }
+    let sheets = load_sheet(css, base, media, fetch, 0);
+    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if c.0.len() >= KEEP
+        && let Some(oldest) = c.0.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| *k)
+    {
+        c.0.remove(&oldest);
+    }
+    let now = c.1;
+    c.0.insert(key, (Arc::new(sheets.clone()), now));
+    sheets
+}
+
 pub(super) fn load_sheet(
     css: &str,
     base: &Url,

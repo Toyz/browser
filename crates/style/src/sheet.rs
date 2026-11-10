@@ -47,7 +47,7 @@ pub struct FontFace {
 /// `@keyframes` frames: (offset 0..=1, declarations), in source order.
 pub type Keyframes = Vec<(f32, Arc<[Decl]>)>;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Stylesheet {
     pub rules: Vec<StyleRule>,
     /// `@keyframes name { ... }`.
