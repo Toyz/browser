@@ -28,11 +28,31 @@ pub(crate) struct Geometry {
     /// Measured, and the tab says it didn't paint them (off screen, no box).
     pub unpainted: HashSet<NodeId>,
     pub viewport: (f32, f32),
+    /// A layout was forced mid-task (see [`reflow`]): `rects` are from
+    /// before it except for the elements asked about since (`fresh`),
+    /// until the tab's next layout message.
+    stale: bool,
+    fresh: HashSet<NodeId>,
+    /// Recent forced layouts: when each ended and how long it waited.
+    forced: std::collections::VecDeque<(Instant, Duration)>,
+    /// A forced layout went unanswered (a tab in the background doesn't
+    /// paint): no more until the tab sends a layout.
+    force_paused: bool,
 }
 
 impl Default for Geometry {
     fn default() -> Self {
-        Self { rects: HashMap::new(), measured: HashSet::new(), painted: HashSet::new(), unpainted: HashSet::new(), viewport: (1280.0, 800.0) }
+        Self {
+            rects: HashMap::new(),
+            measured: HashSet::new(),
+            painted: HashSet::new(),
+            unpainted: HashSet::new(),
+            viewport: (1280.0, 800.0),
+            stale: false,
+            fresh: HashSet::new(),
+            forced: Default::default(),
+            force_paused: false,
+        }
     }
 }
 
@@ -40,6 +60,9 @@ impl Geometry {
     /// A layout from the tab: whether the viewport changed size.
     pub fn apply(&mut self, rects: &[(NodeId, [f32; 4])], gone: &[NodeId], viewport: (f32, f32)) -> bool {
         let resized = std::mem::replace(&mut self.viewport, viewport) != viewport;
+        self.stale = false;
+        self.fresh.clear();
+        self.force_paused = false;
         for &(n, r) in rects {
             self.rects.insert(n, r);
             self.painted.insert(n);
@@ -77,20 +100,79 @@ fn locate(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
 }
 
 /// Where `node` is: the tab's rect for it. The first time it's asked about,
-/// the tab is told to keep it a box (a new layout), and asked where it is.
+/// the tab is told to keep it a box (a new layout), and asked where it is
+/// (and again after a forced layout).
 pub(crate) fn measure(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
     let ask = {
         let mut dom = d.borrow_mut();
         let new = dom.geometry.measured.insert(node);
         if new {
-            dom.changed();
+            dom.mark_dirty();
         }
-        new && !dom.geometry.rects.contains_key(&node)
+        let g = &mut dom.geometry;
+        (new && !g.rects.contains_key(&node)) || (g.stale && g.fresh.insert(node))
     };
     if ask && let Some(r) = locate(d, node) {
         d.borrow_mut().geometry.rects.insert(node, r);
     }
     d.borrow().geometry.rects.get(&node).copied()
+}
+
+/// How long forced layouts may hold scripts up in any second: a page
+/// reading layout after every change in a loop waits for the tab only so
+/// much (past that, answers are from the last layout, as before).
+const FORCE_BUDGET: Duration = Duration::from_millis(100);
+/// How long a forced layout may hold up the script.
+const FORCE_WAIT: Duration = Duration::from_millis(400);
+
+/// Forced layouts are experimental (`FEATHER_REFLOW=1`): they fix pages
+/// that read layout right after changing it (Wikipedia's toolbar), but
+/// YouTube's results page loads differently with them (scrolled, icons
+/// missing) for reasons not yet found.
+fn reflow_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("FEATHER_REFLOW").is_some())
+}
+
+/// A synchronous reflow, as browsers do when scripts read layout: if the
+/// DOM changed since the tab last saw it (or `node` is new to measuring),
+/// send it now and wait for the tab to lay it out and paint, so what's
+/// read next is of the DOM as it is. (Vector's toolbar removes a class
+/// and reads widths; MDN scrolls its sidebar to an item it just found.)
+pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
+    let tab = {
+        let mut dom = d.borrow_mut();
+        let new = !dom.geometry.measured.contains(&node);
+        let forced = &mut dom.geometry.forced;
+        while forced.front().is_some_and(|(t, _)| t.elapsed() > Duration::from_secs(1)) {
+            forced.pop_front();
+        }
+        let due = forced.iter().map(|(_, d)| *d).sum::<Duration>() < FORCE_BUDGET;
+        if !dom.laid_out || dom.geometry.force_paused || !((dom.dirty && dom.changed_near(node)) || new) || !due || !reflow_enabled() {
+            return;
+        }
+        dom.geometry.measured.insert(node);
+        dom.tab.clone()
+    };
+    let t = Instant::now();
+    let doc = super::snapshot(d, cx);
+    let (tx, rx) = std::sync::mpsc::channel();
+    if tab.send_blocking(FromJs::Document(std::sync::Arc::new(doc))).is_err() || tab.send_blocking(FromJs::AfterLayout(tx)).is_err() {
+        return;
+    }
+    let laid_out = rx.recv_timeout(FORCE_WAIT).is_ok();
+    let mut dom = d.borrow_mut();
+    dom.geometry.forced.push_back((Instant::now(), t.elapsed()));
+    if laid_out {
+        dom.geometry.stale = true;
+        dom.geometry.fresh.clear();
+    } else {
+        dom.geometry.force_paused = true;
+    }
+    if dom.debug {
+        let tag = dom.doc.element(node).map(|e| e.name.local.to_string()).unwrap_or_default();
+        eprintln!("js: forced layout for {node:?} <{tag}>: {} in {:?}", if laid_out { "laid out" } else { "timed out" }, t.elapsed());
+    }
 }
 
 /// Where `node` is painted now: its own box if it has ever had one (not
@@ -211,7 +293,10 @@ fn method(d: &Shared, name: &str, f: Method, cx: &mut Context) -> JsObject {
     // garbage-collected values.
     let native = unsafe {
         NativeFunction::from_closure(move |this, _, cx| match this_node(&d, this, cx) {
-            Some(n) => f(&d, n, cx),
+            Some(n) => {
+                reflow(&d, n, cx);
+                f(&d, n, cx)
+            }
             None => Ok(JsValue::undefined()),
         })
     };
@@ -317,7 +402,10 @@ fn arg_method(d: &Shared, name: &str, f: ArgMethod, cx: &mut Context) -> JsObjec
     // garbage-collected values.
     let native = unsafe {
         NativeFunction::from_closure(move |this, a, cx| match this_node(&d, this, cx) {
-            Some(n) => f(&d, n, a, cx),
+            Some(n) => {
+                reflow(&d, n, cx);
+                f(&d, n, a, cx)
+            }
             None => Ok(JsValue::undefined()),
         })
     };

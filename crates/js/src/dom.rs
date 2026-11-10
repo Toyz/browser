@@ -94,9 +94,61 @@ pub(crate) fn runnable(e: &ElementData) -> bool {
 
 impl Dom {
     /// The document changed: send it, and recompute styles asked of it.
+    /// The DOM changed, somewhere (for a forced layout: possibly anything).
     pub(crate) fn changed(&mut self) {
+        self.mark_dirty();
+        self.touched_all = true;
+    }
+
+    /// The DOM changed at `n` (its attributes, text or children).
+    pub(crate) fn changed_at(&mut self, n: NodeId) {
+        self.mark_dirty();
+        if self.touched.len() < 256 {
+            self.touched.insert(n);
+        } else {
+            self.touched_all = true;
+        }
+    }
+
+    /// The tab needs a new snapshot (nothing scripts read changed).
+    pub(crate) fn mark_dirty(&mut self) {
         self.dirty = true;
         self.generation += 1;
+    }
+
+    /// `n`'s parent for layout: a shadow root's is its host.
+    fn layout_parent(&self, n: NodeId) -> Option<NodeId> {
+        self.doc.parent(n).or_else(|| self.hosts.get(&n).copied())
+    }
+
+    /// Whether what changed since the last snapshot can move or resize
+    /// `n`: it, an ancestor or a descendant changed.
+    pub(crate) fn changed_near(&self, n: NodeId) -> bool {
+        if self.touched_all {
+            return true;
+        }
+        let mut chain = HashSet::new();
+        let mut at = Some(n);
+        while let Some(x) = at {
+            if self.touched.contains(&x) {
+                return true;
+            }
+            chain.insert(x);
+            at = self.layout_parent(x);
+        }
+        self.touched.iter().any(|&t| {
+            let mut at = self.layout_parent(t);
+            while let Some(x) = at {
+                if x == n {
+                    return true;
+                }
+                if chain.contains(&x) {
+                    return false;
+                }
+                at = self.layout_parent(x);
+            }
+            false
+        })
     }
 }
 
@@ -117,6 +169,13 @@ pub(crate) fn page(cx: &Context) -> Shared {
 
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
+}
+
+/// Node sets the tab reads (shared with it).
+pub(crate) struct Published {
+    listening: Arc<RwLock<HashSet<NodeId>>>,
+    measured: Arc<RwLock<HashSet<NodeId>>>,
+    mouse: Arc<RwLock<HashSet<NodeId>>>,
 }
 
 pub(crate) struct Dom {
@@ -153,6 +212,14 @@ pub(crate) struct Dom {
     started: Instant,
     /// To the tab (`locate`'s questions, scrolling).
     tab: async_channel::Sender<FromJs>,
+    /// What the tab reads between snapshots: elements with listeners,
+    /// measured ones, ones with mouse listeners.
+    published: Published,
+    /// When the tab was last sent the DOM.
+    last_sent: Instant,
+    /// Where the DOM changed since then (`touched_all`: anywhere).
+    touched: HashSet<NodeId>,
+    touched_all: bool,
     /// Canvases with drawing recorded since their pixels were last sent.
     canvases_dirty: bool,
     /// Drawing recorded on each canvas since it was last replayed.
@@ -202,15 +269,9 @@ pub(crate) struct Runtime {
     /// `take_input`), still to be handled in order.
     backlog: std::collections::VecDeque<ToJs>,
     updates: async_channel::Sender<FromJs>,
-    listening: Arc<RwLock<HashSet<NodeId>>>,
-    /// Elements scripts read the geometry of (the tab reports their boxes).
-    measured: Arc<RwLock<HashSet<NodeId>>>,
-    /// Elements with mouse listeners.
-    mouse_listening: Arc<RwLock<HashSet<NodeId>>>,
     opts: Options,
     modules: Rc<crate::modules::WebModules>,
     hooks: Rc<Hooks>,
-    last_sent: Instant,
     flush_at: Option<Instant>,
     /// When scripts started: past the first-paint budget (the tab shows
     /// what it has), the initial scripts' progress is sent as it happens.
@@ -258,6 +319,10 @@ impl Runtime {
             dark: opts.dark,
             started: Instant::now(),
             tab: updates.clone(),
+            published: Published { listening: listening.clone(), measured: measured.clone(), mouse: mouse_listening.clone() },
+            last_sent: Instant::now(),
+            touched: HashSet::new(),
+            touched_all: false,
             scroll: (0.0, 0.0),
             laid_out: false,
             geometry: Default::default(),
@@ -285,7 +350,7 @@ impl Runtime {
             eprintln!("js prelude failed: {e}");
         }
         crate::abort::link(&mut cx);
-        let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, listening, measured, mouse_listening, opts, modules, hooks, last_sent: Instant::now(), flush_at: None, started: Instant::now() };
+        let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         rt.refresh_listening();
         rt
@@ -568,76 +633,13 @@ impl Runtime {
         }
     }
 
-    /// The DOM as it is now, as the page renders it: shadow trees flattened
-    /// into their hosts (for the first paint and the tab).
+    /// The DOM as it is now, as the page renders it (see [`snapshot`]).
     pub fn snapshot_doc(&mut self) -> Document {
-        self.refresh_listening();
-        let adopted = self.call_global("__adoptedSheets", &[]);
-        let adopted = node_texts(adopted, &mut self.cx);
-        // Canvases drawn on get their bitmaps (and so their address in the
-        // document); the pixels go to the tab at the next flush.
-        if std::mem::take(&mut self.dom.borrow_mut().canvases_dirty) {
-            context2d::draw_pending(&self.dom);
-        }
-        let cssom = self.call_global("__cssomStyles", &[]);
-        let cssom: Vec<(NodeId, String)> = node_texts(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
-        let mut dom = self.dom.borrow_mut();
-        dom.dirty = false;
-        self.last_sent = Instant::now();
-        let mut doc = flatten(&dom, adopted);
-        // Canvases show their pixels, sent alongside (`CanvasFrame`).
-        for &node in dom.canvases.keys() {
-            if let Some(e) = doc.element_mut(node) {
-                set_attr(e, "src", canvas_url(node));
-            }
-        }
-        // <style> elements scripts filled through the CSSOM (CSS-in-JS).
-        for (style, css) in cssom {
-            if doc.get(style).is_some() {
-                let text = doc.create_text(css);
-                doc.set_children(style, vec![text]);
-            }
-        }
-        doc
+        snapshot(&self.dom, &mut self.cx)
     }
 
     fn refresh_listening(&mut self) {
-        let listening = self.call_global("__listeningIds", &[]);
-        let listening = self.node_set(listening);
-        let mut measured = self.dom.borrow().geometry.measured.clone();
-        // What's clicked is what scripts measure next (a dropdown placed
-        // under its trigger, a tooltip by its target): its box and position
-        // are kept ready, not first asked for (and found missing, at 0,0)
-        // in the click handler. Its parent too (menus position against it).
-        {
-            let dom = self.dom.borrow();
-            for &n in &listening {
-                measured.insert(n);
-                if let Some(p) = dom.doc.parent(n).filter(|&p| dom.doc.element(p).is_some()) {
-                    measured.insert(p);
-                }
-            }
-        }
-        *self.listening.write().unwrap_or_else(|e| e.into_inner()) = listening;
-        *self.measured.write().unwrap_or_else(|e| e.into_inner()) = measured;
-        let mouse = self.call_global("__mouseIds", &[]);
-        let mouse = self.node_set(mouse);
-        *self.mouse_listening.write().unwrap_or_else(|e| e.into_inner()) = mouse;
-    }
-
-    fn node_set(&mut self, ids: JsValue) -> HashSet<NodeId> {
-        let mut set = HashSet::new();
-        if let Some(arr) = ids.as_object().and_then(|o| JsArray::from_object(o).ok()) {
-            let len = arr.length(&mut self.cx).unwrap_or(0);
-            for i in 0..len {
-                if let Ok(v) = arr.get(i, &mut self.cx)
-                    && let Some(n) = v.as_number()
-                {
-                    set.insert(node_from_number(n));
-                }
-            }
-        }
-        set
+        refresh_listening(&self.dom, &mut self.cx);
     }
 
     /// Send the tab the DOM if it changed (at most every `SNAPSHOT_EVERY`).
@@ -663,7 +665,7 @@ impl Runtime {
         if let Some(form) = submit {
             // The tab reads the fields from the DOM it has: send that first.
             self.dom.borrow_mut().changed();
-            self.last_sent = Instant::now() - SNAPSHOT_EVERY;
+            self.dom.borrow_mut().last_sent = Instant::now() - SNAPSHOT_EVERY;
             self.flush_doc();
             self.updates.send_blocking(FromJs::Submit(form)).ok();
             return;
@@ -708,7 +710,7 @@ impl Runtime {
             self.flush_at = None;
             return;
         }
-        let ready = self.last_sent + SNAPSHOT_EVERY;
+        let ready = self.dom.borrow().last_sent + SNAPSHOT_EVERY;
         if Instant::now() < ready {
             self.flush_at = Some(ready);
             return;
@@ -725,7 +727,7 @@ impl Runtime {
     pub fn event_loop(&mut self) {
         // Whatever the first paint missed.
         self.dom.borrow_mut().changed();
-        self.last_sent = Instant::now() - SNAPSHOT_EVERY;
+        self.dom.borrow_mut().last_sent = Instant::now() - SNAPSHOT_EVERY;
         self.flush();
         loop {
             self.settle();
@@ -1147,7 +1149,9 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let text = arg_string(a, 1, cx)?;
         let mut dom = d.borrow_mut();
         let Some(n) = arg_node(&dom, a, 0) else { return Ok(JsValue::undefined()) };
-        dom.changed();
+        // A text node's change is its element's.
+        let at = if dom.doc.element(n).is_none() { dom.layout_parent(n).unwrap_or(n) } else { n };
+        dom.changed_at(at);
         match dom.doc.data_mut(n) {
             Some(NodeData::Text(t)) | Some(NodeData::Comment(t)) => *t = text,
             _ => {
@@ -1191,7 +1195,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         if let Some(e) = dom.doc.element_mut(n) {
             let name = attr_name(e, raw);
             set_attr(e, &name, value);
-            dom.changed();
+            dom.changed_at(n);
         }
         Ok(JsValue::undefined())
     }));
@@ -1204,7 +1208,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             let before = e.attrs.len();
             e.attrs.retain(|at| &*at.name.local != name.as_str());
             if e.attrs.len() != before {
-                dom.changed();
+                dom.changed_at(n);
             }
         }
         Ok(JsValue::undefined())
@@ -1269,16 +1273,16 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             }
             queue_scripts(&mut dom, m);
         }
-        dom.changed();
+        dom.changed_at(parent);
         Ok(JsValue::undefined())
     }));
     add("remove", 1, Box::new(|d, a, _| {
         let mut dom = d.borrow_mut();
         if let Some(n) = arg_node(&dom, a, 0)
-            && dom.doc.parent(n).is_some()
+            && let Some(parent) = dom.doc.parent(n)
         {
             dom.doc.detach(n);
-            dom.changed();
+            dom.changed_at(parent);
         }
         Ok(JsValue::undefined())
     }));
@@ -1451,7 +1455,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let root = dom.doc.create(NodeData::Fragment);
         dom.shadows.insert(host, root);
         dom.hosts.insert(root, host);
-        dom.changed();
+        dom.changed_at(host);
         Ok(JsValue::from(node_to_number(root)))
     }));
     // [host, root, host, root...]: the shadow roots that exist (declarative
@@ -1584,7 +1588,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             if let Some(e) = dom.doc.element_mut(n) {
                 set_attr(e, "value", v);
             }
-            dom.changed();
+            dom.changed_at(n);
         }
         Ok(JsValue::undefined())
     }));
@@ -2186,4 +2190,96 @@ fn forget_canvases(dom: &mut Dom, drawn: &HashSet<NodeId>) {
         dom.canvases.remove(&n);
         dom.canvas_used.remove(&n);
     }
+}
+
+/// Call a global function the prelude defines (`undefined` if it throws).
+fn call_global(d: &Shared, name: &str, args: &[JsValue], cx: &mut Context) -> JsValue {
+    let global = cx.global_object();
+    let f = global.get(JsString::from(name), cx).ok().and_then(|f| f.as_callable());
+    let Some(f) = f else { return JsValue::undefined() };
+    match f.call(&JsValue::undefined(), args, cx) {
+        Ok(v) => v,
+        Err(e) => {
+            if d.borrow().debug {
+                eprintln!("js error in {name}: {e}");
+            }
+            JsValue::undefined()
+        }
+    }
+}
+
+fn node_set(ids: JsValue, cx: &mut Context) -> HashSet<NodeId> {
+    let mut set = HashSet::new();
+    if let Some(arr) = ids.as_object().and_then(|o| JsArray::from_object(o).ok()) {
+        let len = arr.length(cx).unwrap_or(0);
+        for i in 0..len {
+            if let Ok(v) = arr.get(i, cx)
+                && let Some(n) = v.as_number()
+            {
+                set.insert(node_from_number(n));
+            }
+        }
+    }
+    set
+}
+
+/// Tell the tab which elements scripts listen on and measure.
+pub(crate) fn refresh_listening(d: &Shared, cx: &mut Context) {
+    let listening = call_global(d, "__listeningIds", &[], cx);
+    let listening = node_set(listening, cx);
+    let mut measured = d.borrow().geometry.measured.clone();
+    // What's clicked is what scripts measure next (a dropdown placed
+    // under its trigger, a tooltip by its target): its box and position
+    // are kept ready, not first asked for (and found missing, at 0,0)
+    // in the click handler. Its parent too (menus position against it).
+    {
+        let dom = d.borrow();
+        for &n in &listening {
+            measured.insert(n);
+            if let Some(p) = dom.doc.parent(n).filter(|&p| dom.doc.element(p).is_some()) {
+                measured.insert(p);
+            }
+        }
+    }
+    let mouse = call_global(d, "__mouseIds", &[], cx);
+    let mouse = node_set(mouse, cx);
+    let dom = d.borrow();
+    *dom.published.listening.write().unwrap_or_else(|e| e.into_inner()) = listening;
+    *dom.published.measured.write().unwrap_or_else(|e| e.into_inner()) = measured;
+    *dom.published.mouse.write().unwrap_or_else(|e| e.into_inner()) = mouse;
+}
+
+/// The DOM as it is now, as the page renders it: shadow trees flattened
+/// into their hosts (for the first paint and the tab).
+pub(crate) fn snapshot(d: &Shared, cx: &mut Context) -> Document {
+    refresh_listening(d, cx);
+    let adopted = call_global(d, "__adoptedSheets", &[], cx);
+    let adopted = node_texts(adopted, cx);
+    // Canvases drawn on get their bitmaps (and so their address in the
+    // document); the pixels go to the tab at the next flush.
+    if std::mem::take(&mut d.borrow_mut().canvases_dirty) {
+        context2d::draw_pending(d);
+    }
+    let cssom = call_global(d, "__cssomStyles", &[], cx);
+    let cssom: Vec<(NodeId, String)> = node_texts(cssom, cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
+    let mut dom = d.borrow_mut();
+    dom.dirty = false;
+    dom.last_sent = Instant::now();
+    dom.touched.clear();
+    dom.touched_all = false;
+    let mut doc = flatten(&dom, adopted);
+    // Canvases show their pixels, sent alongside (`CanvasFrame`).
+    for &node in dom.canvases.keys() {
+        if let Some(e) = doc.element_mut(node) {
+            set_attr(e, "src", canvas_url(node));
+        }
+    }
+    // <style> elements scripts filled through the CSSOM (CSS-in-JS).
+    for (style, css) in cssom {
+        if doc.get(style).is_some() {
+            let text = doc.create_text(css);
+            doc.set_children(style, vec![text]);
+        }
+    }
+    doc
 }

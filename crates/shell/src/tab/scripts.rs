@@ -47,6 +47,7 @@ impl Tab {
                             }
                         }
                         js::FromJs::CanvasFrames => this.canvas_frames(window, cx),
+                        js::FromJs::AfterLayout(reply) => this.wait_for_layout(reply, cx),
                         js::FromJs::Traverse(delta) => {
                             if delta < 0 {
                                 this.go_back(window, cx)
@@ -71,6 +72,7 @@ impl Tab {
         if let Some(path) = std::env::var_os("FEATHER_DUMP_DOM") {
             std::fs::write(path, js::to_html(&doc)).ok();
         }
+        self.doc_gen += 1;
         let Some(page) = &mut self.page else { return };
         let sheets_changed = page.doc.as_ref().is_none_or(|old| loader::style_key(old) != loader::style_key(&doc));
         page.title = doc.title();

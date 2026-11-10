@@ -139,6 +139,9 @@ pub enum FromJs {
     ElementScroll(NodeId, std::sync::mpsc::Sender<Option<[f32; 4]>>),
     /// `el.scrollTop = y` and friends: scroll its box to (x, y).
     ScrollElement { node: NodeId, x: f32, y: f32 },
+    /// Answer once the document sent before this is laid out and painted
+    /// (a script reading layout waits for it: a forced layout).
+    AfterLayout(std::sync::mpsc::Sender<()>),
 }
 
 /// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height` (handed

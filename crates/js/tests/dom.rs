@@ -727,18 +727,26 @@ fn layout_reaches_scripts() {
     host.send(js::ToJs::Layout { rects: vec![(b, [10.0, 20.0, 300.0, 150.0])], gone: Vec::new(), viewport: (1024.0, 700.0), scroll: (0.0, 0.0) });
     let mut text = String::new();
     let until = std::time::Instant::now() + Duration::from_secs(2);
-    while !text.contains('|') && std::time::Instant::now() < until {
-        if let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
-            text = text_of(&d, "o");
+    // (As the tab: a forced layout is answered once "painted".)
+    let mut take = |text: &mut String| {
+        while let Ok(msg) = host.updates.try_recv() {
+            match msg {
+                js::FromJs::Document(d) => *text = text_of(&d, "o"),
+                js::FromJs::AfterLayout(reply) => {
+                    reply.send(()).ok();
+                }
+                _ => {}
+            }
         }
+    };
+    while !text.contains('|') && std::time::Instant::now() < until {
+        take(&mut text);
         std::thread::sleep(Duration::from_millis(20));
     }
     // Laid out after observe(): reported as the initial size, then again as a
     // change from the 0x0 the script saw (pages often skip the first callback).
     std::thread::sleep(Duration::from_millis(100));
-    while let Ok(js::FromJs::Document(d)) = host.updates.try_recv() {
-        text = text_of(&d, "o");
-    }
+    take(&mut text);
     assert_eq!(text, "300x150,300x150 | 10,20 300 1024");
 }
 

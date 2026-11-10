@@ -128,6 +128,14 @@ pub struct Tab {
     bounds_frame: Rc<std::cell::Cell<u64>>,
     /// The painted frame `note_unpainted` last looked at.
     bounds_checked: u64,
+    /// Documents scripts sent (numbered), the one the layout is of, and
+    /// the painted frame it was installed at.
+    doc_gen: u64,
+    installed_gen: u64,
+    installed_frame: u64,
+    /// Scripts waiting for a document to be laid out and painted (a
+    /// forced layout): the reply, and the document it waits for.
+    after_layout: Vec<(std::sync::mpsc::Sender<()>, u64)>,
     bounds_seen: Rc<std::cell::RefCell<HashMap<NodeId, u64>>>,
     layout_sent: HashMap<NodeId, [f32; 4]>,
     /// Measured elements painted in an earlier frame but not the latest,
@@ -269,6 +277,10 @@ impl Tab {
             measured_bounds: Rc::default(),
             bounds_frame: Rc::default(),
             bounds_checked: 0,
+            doc_gen: 0,
+            installed_gen: 0,
+            installed_frame: 0,
+            after_layout: Vec::new(),
             bounds_seen: Rc::default(),
             layout_sent: HashMap::new(),
             layout_gone: Vec::new(),
@@ -627,6 +639,38 @@ impl Tab {
         // The page being replaced isn't kept for Back.
         self.page_ix = self.history_ix;
         self.show(url, true, window, cx);
+    }
+
+    /// A script waits for the document it just sent to be laid out (a
+    /// forced layout): answered by `answer_after_layout`.
+    pub(super) fn wait_for_layout(&mut self, reply: std::sync::mpsc::Sender<()>, cx: &mut Context<Self>) {
+        if self.page.as_ref().and_then(|p| p.scripts.as_ref()).is_none() {
+            reply.send(()).ok();
+            return;
+        }
+        self.after_layout.push((reply, self.doc_gen));
+        cx.notify();
+    }
+
+    /// Scripts waiting for a layout whose document is now laid out, and
+    /// painted since (`note_unpainted` has the painted boxes): go on.
+    fn answer_after_layout(&mut self, window: &mut Window) {
+        if self.after_layout.is_empty() {
+            return;
+        }
+        let painted = self.bounds_checked > self.installed_frame;
+        let installed = self.installed_gen;
+        self.after_layout.retain(|(reply, wanted)| {
+            if painted && installed >= *wanted {
+                reply.send(()).ok();
+                return false;
+            }
+            true
+        });
+        // Nothing else may ask for the frames it's waiting on.
+        if !self.after_layout.is_empty() {
+            window.request_animation_frame();
+        }
     }
 
     /// The frame that just finished: measured elements it didn't paint
@@ -1495,10 +1539,10 @@ impl Tab {
         self._restyle = Some(cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(delay).await;
             // The newest DOM and styles, as of now.
-            let Ok(Some((doc, styles))) = this.update(cx, |this, _| {
+            let Ok(Some((doc, styles, doc_gen))) = this.update(cx, |this, _| {
                 this.restyle_busy = true;
                 let page = this.page.as_ref()?;
-                Some((page.doc.clone()?, page.styles.clone()?))
+                Some((page.doc.clone()?, page.styles.clone()?, this.doc_gen))
             }) else {
                 this.update(cx, |this, _| this.restyle_busy = false).ok();
                 return;
@@ -1550,6 +1594,8 @@ impl Tab {
                     .flatten();
                 page.layout = Arc::new(layout);
                 page.signature = signature;
+                this.installed_gen = doc_gen;
+                this.installed_frame = this.bounds_frame.get();
                 this.layout_keep = kept;
                 this.element_state = state;
                 if same_shape {
@@ -1634,6 +1680,8 @@ impl Tab {
                 let until = std::time::Instant::now() + Duration::from_millis(job.wait);
                 while std::time::Instant::now() < until {
                     cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    // At a display's rate: scripts waiting on a layout (a
+                    // forced one) wait for frames.
                     cx.background_executor().timer(Duration::from_millis(100)).await;
                 }
             }
@@ -1866,7 +1914,7 @@ impl Tab {
                 cx.background_executor().timer(Duration::from_millis(400)).await;
                 for _ in 0..6 {
                     cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
-                    cx.background_executor().timer(Duration::from_millis(16)).await;
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
                 }
                 cx.update(|window, cx| {
                     window.draw(cx).clear(cx);
@@ -2447,6 +2495,7 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
+        self.answer_after_layout(window);
         self.atlas_drops.extend(render::images::take_evicted());
         for old in self.atlas_drops.drain(..) {
             window.drop_image(old).ok();
