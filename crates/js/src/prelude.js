@@ -1322,12 +1322,107 @@
     toDataURL() { return "data:,"; }
     toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
+  // <video>/<audio>: the whole API, in the state of a media element
+  // with nothing it can play (there's no playback yet). Players read and
+  // listen to all of it; a missing `textTracks` threw in the Guardian's,
+  // and took the rest of its page's effects down with it.
+  class TimeRanges {
+    get length() { return 0; }
+    start() { throw new DOMException("Index out of range", "IndexSizeError"); }
+    end() { throw new DOMException("Index out of range", "IndexSizeError"); }
+  }
+  class TextTrack extends EventTarget {
+    constructor(kind = "", label = "", language = "") {
+      super();
+      Object.assign(this, { kind, label, language, id: "", mode: "disabled", inBandMetadataTrackDispatchType: "" });
+      this.cues = []; this.activeCues = [];
+      this.oncuechange = null;
+    }
+    addCue(cue) { this.cues.push(cue); }
+    removeCue(cue) { const i = this.cues.indexOf(cue); if (i >= 0) this.cues.splice(i, 1); }
+  }
+  class MediaTrackList extends EventTarget {
+    constructor() { super(); this._tracks = []; this.onaddtrack = null; this.onremovetrack = null; this.onchange = null; }
+    get length() { return this._tracks.length; }
+    item(i) { return this._tracks[i] || null; }
+    getTrackById(id) { return this._tracks.find((t) => t.id === id) || null; }
+    [Symbol.iterator]() { return this._tracks[Symbol.iterator](); }
+    _add(track) {
+      const i = this._tracks.length;
+      this._tracks.push(track);
+      Object.defineProperty(this, i, { get: () => this._tracks[i], configurable: true });
+      const ev = new Event("addtrack"); ev.track = track;
+      this.dispatchEvent(ev);
+    }
+  }
   class HTMLMediaElement extends HTMLElement {
-    play() { return Promise.resolve(); }
+    _media() {
+      return this.__media || (this.__media = {
+        textTracks: new MediaTrackList(), audioTracks: new MediaTrackList(), videoTracks: new MediaTrackList(),
+        currentTime: 0, volume: 1, muted: null, playbackRate: 1, defaultPlaybackRate: 1,
+      });
+    }
+    get textTracks() { return this._media().textTracks; }
+    get audioTracks() { return this._media().audioTracks; }
+    get videoTracks() { return this._media().videoTracks; }
+    addTextTrack(kind, label, language) {
+      const t = new TextTrack(kind, label, language);
+      this._media().textTracks._add(t);
+      return t;
+    }
+    get buffered() { return new TimeRanges(); }
+    get played() { return new TimeRanges(); }
+    get seekable() { return new TimeRanges(); }
+    get currentSrc() { return ""; }
+    get currentTime() { return this._media().currentTime; }
+    set currentTime(v) { this._media().currentTime = Number(v) || 0; }
+    get duration() { return NaN; }
+    get paused() { return true; }
+    get ended() { return false; }
+    get seeking() { return false; }
+    get error() { return null; }
+    get readyState() { return 0; }
+    get networkState() { return this.getAttribute("src") || this.querySelector("source") ? 3 : 0; }
+    get volume() { return this._media().volume; }
+    set volume(v) {
+      v = Number(v);
+      if (!(v >= 0 && v <= 1)) throw new DOMException("Volume out of range", "IndexSizeError");
+      this._media().volume = v;
+      this.dispatchEvent(new Event("volumechange"));
+    }
+    get muted() { const m = this._media().muted; return m === null ? this.hasAttribute("muted") : m; }
+    set muted(v) { this._media().muted = !!v; this.dispatchEvent(new Event("volumechange")); }
+    get playbackRate() { return this._media().playbackRate; }
+    set playbackRate(v) { this._media().playbackRate = Number(v); this.dispatchEvent(new Event("ratechange")); }
+    get defaultPlaybackRate() { return this._media().defaultPlaybackRate; }
+    set defaultPlaybackRate(v) { this._media().defaultPlaybackRate = Number(v); }
+    get srcObject() { return this._media().srcObject || null; }
+    set srcObject(v) { this._media().srcObject = v; }
+    play() { return Promise.reject(new DOMException("The element has no supported sources.", "NotSupportedError")); }
     pause() {}
     load() {}
+    fastSeek(t) { this.currentTime = t; }
     canPlayType() { return ""; }
+    captureStream() { throw new DOMException("Not supported", "NotSupportedError"); }
+    setMediaKeys() { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+    get mediaKeys() { return null; }
   }
+  Object.assign(HTMLMediaElement, { NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3, HAVE_NOTHING: 0, HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 });
+  Object.assign(HTMLMediaElement.prototype, { NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3, HAVE_NOTHING: 0, HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 });
+  reflect(HTMLMediaElement, [
+    ["src", "src", "url"], ["preload", "preload"], ["autoplay", "autoplay", "bool"], ["loop", "loop", "bool"],
+    ["controls", "controls", "bool"], ["defaultMuted", "muted", "bool"], ["crossOrigin", "crossorigin"],
+  ]);
+  class HTMLVideoElement extends HTMLMediaElement {
+    get videoWidth() { return 0; }
+    get videoHeight() { return 0; }
+    getVideoPlaybackQuality() { return { creationTime: N.now(), droppedVideoFrames: 0, totalVideoFrames: 0, corruptedVideoFrames: 0 }; }
+    requestVideoFrameCallback() { return 0; }
+    cancelVideoFrameCallback() {}
+    requestPictureInPicture() { return Promise.reject(new DOMException("Not supported", "NotSupportedError")); }
+  }
+  reflect(HTMLVideoElement, [["poster", "poster", "url"], ["playsInline", "playsinline", "bool"], ["width", "width", "num"], ["height", "height", "num"]]);
+  class HTMLAudioElement extends HTMLMediaElement {}
   class HTMLIFrameElement extends HTMLElement {
     get contentWindow() { return null; }
     get contentDocument() { return null; }
@@ -1368,7 +1463,7 @@
     a: HTMLAnchorElement, img: HTMLImageElement, script: HTMLScriptElement, link: HTMLLinkElement, style: HTMLStyleElement,
     input: HTMLInputElement, textarea: HTMLTextAreaElement, select: HTMLSelectElement, option: HTMLOptionElement,
     button: HTMLButtonElement, form: HTMLFormElement, template: HTMLTemplateElement, canvas: HTMLCanvasElement,
-    video: HTMLMediaElement, audio: HTMLMediaElement, iframe: HTMLIFrameElement,
+    video: HTMLVideoElement, audio: HTMLAudioElement, iframe: HTMLIFrameElement,
     div: HTMLDivElement, span: HTMLSpanElement, p: HTMLParagraphElement,
     h1: HTMLHeadingElement, h2: HTMLHeadingElement, h3: HTMLHeadingElement, h4: HTMLHeadingElement, h5: HTMLHeadingElement, h6: HTMLHeadingElement,
     ul: HTMLUListElement, ol: HTMLOListElement, li: HTMLLIElement, table: HTMLTableElement, tr: HTMLTableRowElement, td: HTMLTableCellElement, th: HTMLTableCellElement,
@@ -2151,7 +2246,7 @@
     CDATASection, ProcessingInstruction, DocumentType, Attr,
     HTMLAnchorElement, HTMLImageElement, Image, HTMLScriptElement, HTMLLinkElement, HTMLStyleElement, HTMLInputElement,
     HTMLTextAreaElement, HTMLSelectElement, HTMLOptionElement, HTMLButtonElement, HTMLFormElement,
-    HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement: HTMLMediaElement, HTMLAudioElement: HTMLMediaElement,
+    HTMLTemplateElement, HTMLCanvasElement, HTMLMediaElement, HTMLVideoElement, HTMLAudioElement, TextTrack, TimeRanges,
     HTMLIFrameElement, HTMLDivElement, HTMLSpanElement, SVGElement, SVGSVGElement, SVGPathElement, SVGGElement,
     HTMLParagraphElement, HTMLHeadingElement, HTMLUListElement, HTMLOListElement, HTMLLIElement, HTMLTableElement,
     HTMLTableRowElement, HTMLTableCellElement, HTMLLabelElement, HTMLPictureElement, HTMLSourceElement, HTMLSlotElement,

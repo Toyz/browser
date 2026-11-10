@@ -264,6 +264,11 @@ pub fn request_streaming(
     if !on_head(&head) {
         return Ok(head);
     }
+    // No body to read (or decode: a HEAD response says `content-encoding:
+    // gzip` for a body it doesn't send, and decoding nothing fails).
+    if req.method.eq_ignore_ascii_case("HEAD") || matches!(head.status, 204 | 205 | 304) {
+        return Ok(head);
+    }
     use std::io::Read as _;
     let mut reader = response.body_mut().with_config().limit(MAX_BODY_BYTES).reader();
     let mut buf = vec![0u8; 16 * 1024];

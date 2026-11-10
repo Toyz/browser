@@ -1074,7 +1074,7 @@ fn probe_styles() {
         let class = e.attr("class").unwrap_or("");
         let path = format!("{path} > {}{}", e.name.local, class.split_whitespace().next().map(|c| format!(".{c}")).unwrap_or_default());
         if &*e.name.local == want || class.split_whitespace().any(|c| want.strip_prefix('.') == Some(c)) {
-            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background);
+            println!("{path}\n   tree={:?} display={:?} width={:?} max_width={:?} margin={:?} padding={:?} bg={:?} color={:?} vis={}", doc.tree_of(n), s.display, s.width, s.max_width, s.margin, s.padding, s.background, s.color, s.visible);
         }
         for &c in doc.children(n) {
             walk(doc, styler, c, &s, want, &path);
@@ -1095,4 +1095,18 @@ fn inline_styles_with_semicolons_in_values() {
         document.getElementById("o").textContent = [d.style.background, d.style.content, d.style.color, d.style.length, d.style.getPropertyValue("width")].join(" | ");
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), r#"url("data:image/svg+xml;utf8,<svg/>") no-repeat | ";" | red | 4 | 10px"#);
+}
+
+#[test]
+fn media_elements_have_their_api() {
+    let doc = run(r##"<body><video id="v" src="a.mp4" muted></video><p id="o"></p><script>
+        const v = document.getElementById("v");
+        const added = [];
+        v.textTracks.addEventListener("addtrack", (e) => added.push(e.track.kind));
+        v.addTextTrack("captions", "English", "en");
+        const out = [v instanceof HTMLVideoElement, v instanceof HTMLMediaElement, v.textTracks.length, v.textTracks[0].kind, added.join(),
+          v.paused, v.readyState, isNaN(v.duration), v.muted, v.buffered.length, v.videoWidth];
+        v.play().catch((e) => { out.push(e.name); document.getElementById("o").textContent = out.join(" "); });
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "true true 1 captions captions true 0 true true 0 0 NotSupportedError");
 }

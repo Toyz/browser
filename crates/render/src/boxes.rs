@@ -1517,7 +1517,7 @@ impl Builder<'_> {
     ) {
         let mut markup = String::new();
         let current = color_hex(style.color);
-        serialize_svg(self.doc, id, &current, true, &mut markup);
+        serialize_svg(self.doc, id, &SvgPaintCx { current_color: &current, vars: &style.custom }, true, &mut markup);
         // CSS paint (`svg { fill: none; stroke: currentColor }`) beats the
         // root's attributes, and its children inherit it.
         if let Some(paint) = &style.svg_paint
@@ -1786,7 +1786,9 @@ impl Builder<'_> {
         // plain blocks of bands; see `template_grid`.
         // Grids placing items by name, by row, or by both column lines are
         // laid out as real CSS grids (whole: they don't split into rows).
-        let kind = if kind == BlockKind::Grid && needs_real_grid(&children) {
+        let real = kind == BlockKind::Grid
+            && (needs_real_grid(&children) || (content_sized_grid(&style) && boxes_in(&children, SMALL_GRID) < SMALL_GRID));
+        let kind = if real {
             Arc::make_mut(&mut style).taffy_grid = true;
             kind
         } else if kind == BlockKind::Grid && (style.grid_areas.is_some() || style.grid_tracks.is_some()) {
@@ -2246,6 +2248,11 @@ fn needs_real_grid(children: &[LayoutBox]) -> bool {
 
 /// How many boxes `b` holds, counting up to `limit`.
 fn box_count(b: &Block, limit: usize) -> usize {
+    boxes_in(&b.children, limit)
+}
+
+/// How many boxes `children` hold, counting up to `limit`.
+fn boxes_in(children: &[LayoutBox], limit: usize) -> usize {
     fn walk(b: &LayoutBox, n: &mut usize, limit: usize) {
         if *n >= limit {
             return;
@@ -2258,11 +2265,34 @@ fn box_count(b: &Block, limit: usize) -> usize {
         }
     }
     let mut n = 0;
-    for c in &b.children {
+    for c in children {
         walk(c, &mut n, limit);
     }
     n
 }
+
+/// A grid whose tracks the row-based layout can't size: named areas, or
+/// tracks sized by their content (`auto`, `min-content`, `fit-content()`),
+/// where the explicit columns can also be fewer than the areas define.
+fn content_sized_grid(s: &ComputedStyle) -> bool {
+    use style::{TemplateEntry, TrackSize};
+    let content = |t: &TrackSize| match t {
+        TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent | TrackSize::FitContent(_) => true,
+        TrackSize::MinMax(_, max) => matches!(**max, TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent),
+        _ => false,
+    };
+    s.grid_areas.is_some()
+        || s.grid_template_columns.as_ref().is_some_and(|t| {
+            t.entries.iter().any(|e| match e {
+                TemplateEntry::Track(t) => content(t),
+                TemplateEntry::Repeat { tracks, .. } => tracks.iter().any(content),
+            })
+        })
+}
+
+/// Up to this many boxes, a grid the row-based layout can't size is laid
+/// out as a real grid; bigger ones (page layouts) stay splittable into rows.
+const SMALL_GRID: usize = 300;
 
 /// How far `vertical-align` raises an inline element's baseline, px.
 fn baseline_shift(s: &ComputedStyle) -> f32 {
@@ -2701,7 +2731,7 @@ fn svg_fragment(svg: &str, frag: &str) -> Option<String> {
 
 /// Inline what a `<use>` points at (sprite icons), since the renderer
 /// draws a standalone document and can't follow references out of it.
-fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: &mut String) -> bool {
+fn resolve_use(doc: &Document, e: &page::ElementData, cx: &SvgPaintCx, out: &mut String) -> bool {
     let Some(href) = e.attrs.iter().find(|a| &*a.name.local == "href").map(|a| a.value.to_string()) else { return false };
     let size = |name: &str| e.attr(name).map(|v| format!(" {name}=\"{v}\"")).unwrap_or_default();
     let place = format!("{}{}{}{}", size("x"), size("y"), size("width"), size("height"));
@@ -2710,7 +2740,7 @@ fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: 
             return false;
         };
         let mut inner = String::new();
-        serialize_svg(doc, target, current_color, false, &mut inner);
+        serialize_svg(doc, target, cx, false, &mut inner);
         if inner.starts_with("<symbol") {
             format!("<svg{}</svg>", &inner["<symbol".len()..inner.len() - "</symbol>".len()])
         } else {
@@ -2728,7 +2758,7 @@ fn resolve_use(doc: &Document, e: &page::ElementData, current_color: &str, out: 
         let Some(fetch) = TEXT_FETCHER.get() else { return false };
         let Some(text) = fetch(&sheet) else { return false };
         let Some(snippet) = svg_fragment(&text, &frag) else { return false };
-        snippet.replace("currentColor", current_color)
+        snippet.replace("currentColor", cx.current_color)
     };
     // Position it where the <use> was (x/y/width/height go on the nested svg).
     if let Some(rest) = fragment.strip_prefix("<svg") {
@@ -2839,12 +2869,72 @@ fn hex_color(v: &str) -> Option<Color> {
     }
 }
 
-fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, out: &mut String) {
+/// What attribute values in a serialized SVG resolve against: the color
+/// `currentColor` is, and the custom properties `var()` reads (presentation
+/// attributes are CSS values: `fill="var(--masthead-nav-link-text)"`).
+struct SvgPaintCx<'a> {
+    current_color: &'a str,
+    vars: &'a std::collections::HashMap<Arc<str>, Arc<str>>,
+}
+
+impl SvgPaintCx<'_> {
+    fn value(&self, raw: &str) -> String {
+        let raw = if raw.contains("var(") { substitute_vars(raw, self.vars, 0) } else { raw.to_owned() };
+        if raw.trim().eq_ignore_ascii_case("currentcolor") { self.current_color.to_owned() } else { raw.replace("currentColor", self.current_color) }
+    }
+}
+
+/// `var(--name)` / `var(--name, fallback)` replaced by the property's value
+/// (the fallback, else nothing, when it's not set).
+fn substitute_vars(text: &str, vars: &std::collections::HashMap<Arc<str>, Arc<str>>, depth: u8) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("var(") {
+        out.push_str(&rest[..at]);
+        let body_start = at + 4;
+        // The matching `)`.
+        let mut level = 1;
+        let mut end = None;
+        for (i, ch) in rest[body_start..].char_indices() {
+            match ch {
+                '(' => level += 1,
+                ')' => {
+                    level -= 1;
+                    if level == 0 {
+                        end = Some(body_start + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let body = &rest[body_start..end];
+        let (name, fallback) = match body.split_once(',') {
+            Some((n, f)) => (n.trim(), Some(f.trim())),
+            None => (body.trim(), None),
+        };
+        let value = vars.get(name).map(|v| v.to_string()).or(fallback.map(str::to_owned)).unwrap_or_default();
+        if depth < 8 && value.contains("var(") {
+            out.push_str(&substitute_vars(&value, vars, depth + 1));
+        } else {
+            out.push_str(value.trim());
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn serialize_svg(doc: &Document, id: NodeId, cx: &SvgPaintCx, root: bool, out: &mut String) {
     match &doc.node(id).data {
         NodeData::Text(t) => escape_xml(t, out),
         NodeData::Element(e) => {
             let name = &*e.name.local;
-            if name == "use" && resolve_use(doc, e, current_color, out) {
+            if name == "use" && resolve_use(doc, e, cx, out) {
                 return;
             }
             out.push('<');
@@ -2872,17 +2962,12 @@ fn serialize_svg(doc: &Document, id: NodeId, current_color: &str, root: bool, ou
                 out.push_str(prefix);
                 out.push_str(local);
                 out.push_str("=\"");
-                let value = if attr.value.eq_ignore_ascii_case("currentcolor") {
-                    current_color.to_owned()
-                } else {
-                    attr.value.replace("currentColor", current_color)
-                };
-                escape_xml(&value, out);
+                escape_xml(&cx.value(&attr.value), out);
                 out.push('"');
             }
             out.push('>');
             for &child in doc.children(id) {
-                serialize_svg(doc, child, current_color, false, out);
+                serialize_svg(doc, child, cx, false, out);
             }
             out.push_str("</");
             out.push_str(name);
@@ -3522,6 +3607,18 @@ mod tests {
             LayoutBox::Paragraph(p) => p,
             other => panic!("expected paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn svg_attribute_vars_resolve() {
+        let vars: std::collections::HashMap<Arc<str>, Arc<str>> =
+            [("--fg".into(), "#fff".into()), ("--alias".into(), "var(--fg)".into())].into_iter().collect();
+        let cx = SvgPaintCx { current_color: "#123456", vars: &vars };
+        assert_eq!(cx.value("var(--fg)"), "#fff");
+        assert_eq!(cx.value("var(--alias)"), "#fff");
+        assert_eq!(cx.value("var(--missing, red)"), "red");
+        assert_eq!(cx.value("currentColor"), "#123456");
+        assert_eq!(cx.value("url(#g) var(--fg)"), "url(#g) #fff");
     }
 
     fn texts(tree: &LayoutTree) -> Vec<String> {
