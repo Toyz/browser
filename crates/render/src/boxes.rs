@@ -611,6 +611,8 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         fixed: Vec::new(),
         hoisted: Vec::new(),
         avail: styler.env().width,
+        in_flex_row: false,
+        in_shrink: false,
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
@@ -679,6 +681,11 @@ struct Builder<'a> {
     /// max-widths on the way down. `auto-fill` grids pick their column
     /// count from it (layout proper happens later, in GPUI).
     avail: f32,
+    /// The box being built is in a flex row (an item of it).
+    in_flex_row: bool,
+    /// The box being built is in a box sized by its content (inline-level,
+    /// floated, positioned, or a flex row's item, with `width: auto`).
+    in_shrink: bool,
 }
 
 /// The content width of a box with `style` in a containing block `avail`
@@ -1585,8 +1592,33 @@ impl Builder<'_> {
             }
             _ => content,
         };
+        // Sized by its content? Then so are auto-width blocks inside it.
+        let shrinks = style.width.is_auto()
+            && (self.in_flex_row
+                || self.in_shrink
+                || !style.display.is_block_level()
+                || style.float != Float::None
+                || matches!(style.position, style::Position::Absolute | style::Position::Fixed));
+        let flex_row = kind == BlockKind::Flex && matches!(style.flex_direction, style::FlexDirection::Row | style::FlexDirection::RowReverse);
+        let outer_context = (self.in_flex_row, self.in_shrink);
+        (self.in_flex_row, self.in_shrink) = (flex_row, shrinks);
         self.build_children(id, &style, &mut c, link, blockify);
+        (self.in_flex_row, self.in_shrink) = outer_context;
         self.avail = outer_avail;
+        // A flex row sized by its content has no space to share out: items
+        // with a ~0 basis (`flex: 1 1 0.000000001px`, YouTube's buttons)
+        // are as wide as their content, as browsers size them. (GPUI sized
+        // the row from the bases, and the Subscribe button shrank to its
+        // padding.)
+        if flex_row && shrinks {
+            for child in &mut c.children {
+                if let LayoutBox::Block(b) = child
+                    && matches!(b.style.flex_basis, Length::Px(v) if v < 1.0)
+                {
+                    Arc::make_mut(&mut b.style).flex_basis = Length::Auto;
+                }
+            }
+        }
         if let Some((text, st)) = &generated.after {
             c.inline.push_text(text, st, link);
         }
