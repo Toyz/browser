@@ -525,6 +525,20 @@ pub struct Row {
     pub edges: Vec<WrapperEdge>,
 }
 
+impl Row {
+    /// The elements this row is made of, most specific first: its content's
+    /// element, then the containers around it, innermost first. Used to find
+    /// "the same place" in a rebuilt layout.
+    pub fn anchors(&self) -> Vec<NodeId> {
+        let content = match &self.content {
+            LayoutBox::Block(b) => b.node,
+            LayoutBox::Paragraph(p) => p.spans.iter().find_map(|s| s.style.node),
+            LayoutBox::Image(i) => i.node,
+        };
+        content.into_iter().chain(self.wrappers.iter().rev().filter_map(|w| w.node)).collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct WrapperEdge {
     /// Above the wrapper's box (its top margin), on the row that starts it.
@@ -1686,6 +1700,7 @@ impl Builder<'_> {
         } else {
             kind
         };
+        round_corner_children(&style, &kind, &mut children);
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         let element = self.doc.element(id);
         let tag_is_heading =
@@ -2047,6 +2062,61 @@ impl Builder<'_> {
                     c.push(LayoutBox::Block(block));
                 }
             }
+        }
+    }
+}
+
+/// A rounded box that clips its content: GPUI clips to rectangles, so the
+/// children in its corners (a card's picture at the top, its footer at the
+/// bottom) get its inner corner radius themselves, or they paint square
+/// over its curve.
+fn round_corner_children(style: &ComputedStyle, kind: &BlockKind, children: &mut [LayoutBox]) {
+    if style.overflow == Overflow::Visible || !matches!(kind, BlockKind::Normal) && !matches!(kind, BlockKind::Flex if style.flex_direction == style::FlexDirection::Column) {
+        return;
+    }
+    let radius = |i: usize| match style.border_radius[i] {
+        Length::Px(r) => Some(r),
+        _ => None,
+    };
+    let b = style.border_width;
+    let inner = |i: usize, a: f32, c: f32| radius(i).map(|r| (r - a.max(c)).max(0.0)).filter(|r| *r > 0.0);
+    let top = (inner(0, b.left, b.top), inner(1, b.right, b.top));
+    let bottom = (inner(3, b.left, b.bottom), inner(2, b.right, b.bottom));
+    if top == (None, None) && bottom == (None, None) {
+        return;
+    }
+    let flush = |side: f32| side == 0.0;
+    let in_flow = |c: &LayoutBox| !crate::view::is_out_of_flow(c);
+    // A child flush against the box's edges, the full width.
+    let fits = |b: &Block| {
+        let s = &b.style;
+        s.width.is_auto() || matches!(s.width, Length::Percent(p) if p >= 99.0)
+    } && b.style.margin.left.px_or_zero() == 0.0
+        && b.style.margin.right.px_or_zero() == 0.0;
+    if flush(style.padding.top.px_or_zero()) && flush(style.padding.left.px_or_zero()) && flush(style.padding.right.px_or_zero())
+        && let Some(LayoutBox::Block(first)) = children.iter_mut().find(|c| in_flow(c))
+        && fits(first)
+        && first.style.margin.top.px_or_zero() == 0.0
+    {
+        let s = Arc::make_mut(&mut first.style);
+        if let Some(r) = top.0.filter(|_| s.border_radius[0] == Length::Px(0.0)) {
+            s.border_radius[0] = Length::Px(r);
+        }
+        if let Some(r) = top.1.filter(|_| s.border_radius[1] == Length::Px(0.0)) {
+            s.border_radius[1] = Length::Px(r);
+        }
+    }
+    if flush(style.padding.bottom.px_or_zero()) && flush(style.padding.left.px_or_zero()) && flush(style.padding.right.px_or_zero())
+        && let Some(LayoutBox::Block(last)) = children.iter_mut().rev().find(|c| in_flow(c))
+        && fits(last)
+        && last.style.margin.bottom.px_or_zero() == 0.0
+    {
+        let s = Arc::make_mut(&mut last.style);
+        if let Some(r) = bottom.0.filter(|_| s.border_radius[3] == Length::Px(0.0)) {
+            s.border_radius[3] = Length::Px(r);
+        }
+        if let Some(r) = bottom.1.filter(|_| s.border_radius[2] == Length::Px(0.0)) {
+            s.border_radius[2] = Length::Px(r);
         }
     }
 }

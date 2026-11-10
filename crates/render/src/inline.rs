@@ -55,7 +55,7 @@ impl InlineFlow {
         Self {
             id: ElementId::NamedInteger("inline".into(), para.id as u64),
             para,
-            cx: cx.clone(),
+            cx: RenderCx { round_clip: crate::view::current_round_clip(), ..cx.clone() },
             state: Rc::default(),
             blocks: Vec::new(),
             leaf: None,
@@ -751,7 +751,15 @@ fn place(
                                 .child(
                                     crate::view::transform::image(image, cx)
                                         .unwrap_or_else(|| {
-                                            crate::images::picture_fitted(picture, padded, *width, *height, [px(0.); 4], image.style.object_fit)
+                                            let corners = crate::view::clipped_corners(
+                                                &image.style,
+                                                Some(f32::from(w - l - r)),
+                                                Some(f32::from(h - t - b)),
+                                                cx.round_clip,
+                                                [px(0.); 4],
+                                            );
+                                            let ratio = f32::from(w - l - r) / f32::from(h - t - b).max(1.0);
+                                            crate::images::picture_fitted(picture, padded, *width, *height, corners, image.style.object_fit, Some(ratio))
                                         }),
                                 )
                                 .into_any_element(),

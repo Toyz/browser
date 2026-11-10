@@ -50,6 +50,9 @@ pub struct CaptureJob {
     /// every `interval` ms (`out-f1.png`...), to see what loading looks like.
     pub frames: usize,
     pub interval: u64,
+    /// With `--frames`: scroll the page this many px before each frame
+    /// (`--frame-scroll`), to watch it while scrolling.
+    pub frame_scroll: f32,
     /// Click here (window coordinates) before capturing, then let it settle.
     pub click: Option<(f32, f32)>,
     /// Type this into the omnibox before capturing (suggestions, autocomplete).
@@ -93,6 +96,7 @@ impl Args {
         let mut wait = 0;
         let mut frames = 0;
         let mut interval = 100;
+        let mut frame_scroll = 0.0;
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
             match arg.as_str() {
@@ -113,6 +117,7 @@ impl Args {
                 }
                 "--frames" => frames = it.next().and_then(|n| n.parse().ok()).unwrap_or(10),
                 "--interval" => interval = it.next().and_then(|n| n.parse().ok()).unwrap_or(100),
+                "--frame-scroll" => frame_scroll = it.next().and_then(|n| n.parse().ok()).unwrap_or(0.0),
                 "--wait" => wait = it.next().and_then(|n| n.parse().ok()).unwrap_or(0),
                 "--wheel" => wheel = it.next().and_then(|n| n.parse().ok()),
                 "--click" => {
@@ -145,7 +150,7 @@ impl Args {
                 other => eprintln!("ignoring unknown argument {other:?}"),
             }
         }
-        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel, wait, frames, interval });
+        args.capture = screenshot.map(|path| CaptureJob { path, pages, scroll, row, resize, mouse, bench, typing, click, keys, swipe, wheel, wait, frames, interval, frame_scroll });
         if args.capture.is_some() && !cfg!(feature = "screenshot") {
             eprintln!("--screenshot needs a build with `--features screenshot`; ignoring");
             args.capture = None;

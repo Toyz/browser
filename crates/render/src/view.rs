@@ -148,6 +148,9 @@ pub struct RenderCx {
     /// Bumped whenever an image finishes loading (cached inline layouts with
     /// images in them must be redone: their sizes may have changed).
     pub images_generation: u64,
+    /// The rounded clipping box text being built sits in (see
+    /// `ROUND_CLIP`), for its inline images, painted after it's built.
+    pub round_clip: Option<(f32, f32, f32)>,
     /// Bumped when web fonts arrive (every cached text layout is stale).
     pub fonts_generation: u64,
     pub on_link_click: LinkClick,
@@ -553,7 +556,40 @@ trait Pipe: Sized {
 }
 impl<T> Pipe for T {}
 
+thread_local! {
+    /// The nearest rounded box that clips its content (`overflow: hidden`
+    /// with `border-radius`): (corner radius, width, height), px. GPUI clips
+    /// to rectangles, so an image filling it rounds its own corners instead
+    /// (avatars: a round frame around a square picture).
+    static ROUND_CLIP: Cell<Option<(f32, f32, f32)>> = const { Cell::new(None) };
+}
+
+/// A rounded, clipping box of fixed size: its radius and size.
+fn round_clip(s: &ComputedStyle) -> Option<(f32, f32, f32)> {
+    if s.overflow == Overflow::Visible {
+        return None;
+    }
+    let (CssLength::Px(w), CssLength::Px(h)) = (s.width, s.height) else { return None };
+    let (w, h) = if s.border_box { (w - s.horizontal_edges(), h - s.vertical_edges()) } else { (w, h) };
+    let r = match s.border_radius[0] {
+        CssLength::Px(r) => r,
+        CssLength::Percent(p) => p / 100.0 * w.min(h),
+        _ => return None,
+    };
+    (r > 0.0).then_some((r, w, h))
+}
+
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    if let Some(clip) = round_clip(&block.style) {
+        let outer = ROUND_CLIP.replace(Some(clip));
+        let el = render_block_unclipped(block, cx, margin, in_flow);
+        ROUND_CLIP.set(outer);
+        return el;
+    }
+    render_block_unclipped(block, cx, margin, in_flow)
+}
+
+fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
     // `translateX(-130%)` on a box whose size only layout knows (a shimmer
     // stretched by `inset: 0`): shifted once it's laid out.
     let later = later_translate(&block.style);
@@ -808,6 +844,25 @@ fn invisible(s: &ComputedStyle) -> ComputedStyle {
 
 /// The image's picture: its `src` once that's loaded, until then the one
 /// the element showed before.
+/// The rounded clipping box being rendered into, if any.
+pub(crate) fn current_round_clip() -> Option<(f32, f32, f32)> {
+    ROUND_CLIP.get()
+}
+
+/// Corners for an image `w`x`h` (px, when known) with style `s`: its own
+/// radius, else that of a rounded clipping box it fills.
+pub(crate) fn clipped_corners(s: &ComputedStyle, w: Option<f32>, h: Option<f32>, clip: Option<(f32, f32, f32)>, own: [Pixels; 4]) -> [Pixels; 4] {
+    // As big as the box or bigger (a 22px picture in an 18px frame): the
+    // box's corners cut it.
+    let fills = |len: CssLength, clip: f32, size: Option<f32>| {
+        matches!(len, CssLength::Percent(p) if p >= 99.0) || size.is_some_and(|v| v >= clip - 1.0)
+    };
+    match clip {
+        Some((r, cw, ch)) if own.iter().all(|c| *c == px(0.)) && fills(s.width, cw, w) && fills(s.height, ch, h) => [px(r); 4],
+        _ => own,
+    }
+}
+
 pub(crate) fn shown_image(i: &ImageBox, cx: &RenderCx) -> Option<ImageState> {
     let state = cx.images.borrow().get(&*i.src).cloned();
     let Some(node) = i.node else { return state };
@@ -874,7 +929,16 @@ fn render_image(i: &ImageBox, cx: &RenderCx, margin: Edges<CssLength>) -> AnyEle
                 (CssLength::Percent(p), Some(w), Some(h)) => px(p / 100.0 * w.min(h)),
                 _ => radius(r),
             });
-            transform::image(i, cx).unwrap_or_else(|| crate::images::picture_fitted(&image, &padded, width, height, corners, s.object_fit))
+            // Filling a rounded box that clips it: rounded like that box.
+            let clip = ROUND_CLIP.get();
+            let corners = clipped_corners(s, box_w, box_h, clip, corners);
+            // The box's shape (for drawing a rounded `cover` picture).
+            let ratio = match (s.width, s.height) {
+                (CssLength::Px(w), CssLength::Px(h)) if h > 0.0 => Some(w / h),
+                _ => clip.map(|(_, w, h)| w / h.max(1.0)),
+            };
+            transform::image(i, cx)
+                .unwrap_or_else(|| crate::images::picture_fitted(&image, &padded, width, height, corners, s.object_fit, ratio))
         }
         // Alt text stands in for a broken image (not one still loading:
         // that's blank, so it doesn't flash).

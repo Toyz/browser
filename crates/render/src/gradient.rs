@@ -19,27 +19,20 @@ pub struct GradientFill {
     size: BgSize,
     repeat: BgRepeat,
     position: style::BgPos,
-    radii: Corners<Pixels>,
+    /// `border-radius` as specified (percentages resolve against the box
+    /// when it's painted: `50%` makes a circle).
+    radius: [CssLength; 4],
     /// Per layer (top first): paints under the border too (`background-clip:
     /// border-box` with a border to show through).
     border_box: Vec<bool>,
     border: style::Edges<f32>,
-    outer_radii: Corners<Pixels>,
     palette: Palette,
 }
 
 impl GradientFill {
     pub fn new(s: &ComputedStyle, palette: &Palette) -> Option<GradientFill> {
         let layers = s.gradients.clone().filter(|_| !s.masked)?;
-        let radius = |i: usize, a: f32, b: f32| match s.border_radius[i] {
-            CssLength::Px(r) => px((r - a.max(b)).max(0.0)),
-            _ => px(0.0),
-        };
         let bw = s.border_width;
-        let outer = |i: usize| match s.border_radius[i] {
-            CssLength::Px(r) => px(r),
-            _ => px(0.0),
-        };
         // Borders paint over the background: only a see-through one shows it.
         let bc = s.border_color;
         let has_border = bw.top + bw.right + bw.bottom + bw.left > 0.0
@@ -51,19 +44,34 @@ impl GradientFill {
         Some(GradientFill {
             border_box,
             border: bw,
-            outer_radii: Corners { top_left: outer(0), top_right: outer(1), bottom_right: outer(2), bottom_left: outer(3) },
             layers,
             size: s.background_size,
             repeat: s.background_repeat,
             position: s.background_position,
-            radii: Corners {
-                top_left: radius(0, bw.left, bw.top),
-                top_right: radius(1, bw.right, bw.top),
-                bottom_right: radius(2, bw.right, bw.bottom),
-                bottom_left: radius(3, bw.left, bw.bottom),
-            },
+            radius: s.border_radius,
             palette: palette.clone(),
         })
+    }
+
+    /// The corner radii of the border box `outer`, and of the padding box
+    /// inside its borders.
+    fn corner_radii(&self, outer: Size<Pixels>) -> (Corners<Pixels>, Corners<Pixels>) {
+        let shorter = f32::from(outer.width).min(f32::from(outer.height));
+        let r = |i: usize| match self.radius[i] {
+            CssLength::Px(r) => r,
+            CssLength::Percent(p) => shorter * p / 100.0,
+            _ => 0.0,
+        };
+        let b = self.border;
+        let outer = Corners { top_left: px(r(0)), top_right: px(r(1)), bottom_right: px(r(2)), bottom_left: px(r(3)) };
+        let inner = |i: usize, a: f32, c: f32| px((r(i) - a.max(c)).max(0.0));
+        let inner = Corners {
+            top_left: inner(0, b.left, b.top),
+            top_right: inner(1, b.right, b.top),
+            bottom_right: inner(2, b.right, b.bottom),
+            bottom_left: inner(3, b.left, b.bottom),
+        };
+        (outer, inner)
     }
 }
 
@@ -127,17 +135,18 @@ impl Element for GradientFill {
         if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
             return;
         }
+        let b = self.border;
+        let outer = Bounds::new(
+            bounds.origin - point(px(b.left), px(b.top)),
+            size(bounds.size.width + px(b.left + b.right), bounds.size.height + px(b.top + b.bottom)),
+        );
+        let (outer_radii, radii) = self.corner_radii(outer.size);
         // Bottom layer first.
         for (i, layer) in self.layers.iter().enumerate().rev() {
             if self.border_box.get(i).copied().unwrap_or(false) {
-                let b = self.border;
-                let outer = Bounds::new(
-                    bounds.origin - point(px(b.left), px(b.top)),
-                    size(bounds.size.width + px(b.left + b.right), bounds.size.height + px(b.top + b.bottom)),
-                );
-                self.paint_layer(layer, outer, self.outer_radii, window);
+                self.paint_layer(layer, outer, outer_radii, window);
             } else {
-                self.paint_layer(layer, bounds, self.radii, window);
+                self.paint_layer(layer, bounds, radii, window);
             }
         }
     }

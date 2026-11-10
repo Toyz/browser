@@ -1150,6 +1150,20 @@ impl Tab {
                 let again = std::mem::take(&mut this.restyle_queued);
                 let Some(page) = &mut this.page else { return };
                 let same_shape = page.layout.rows.len() == layout.rows.len();
+                // Where the view is, by what's there (row numbers mean other
+                // things once rows come and go).
+                let top = this.list_state.logical_scroll_top();
+                let anchor = page.layout.rows.get(top.item_ix).map(|r| r.anchors()).unwrap_or_default();
+                let anchored = (!same_shape)
+                    .then(|| {
+                        anchor.iter().enumerate().find_map(|(depth, node)| {
+                            let ix = layout.rows.iter().position(|r| r.anchors().first() == Some(node))?;
+                            // The same row: same offset into it. A container it
+                            // was in: its start.
+                            Some(ListOffset { item_ix: ix, offset_in_item: if depth == 0 { top.offset_in_item } else { px(0.) } })
+                        })
+                    })
+                    .flatten();
                 page.layout = Arc::new(layout);
                 page.signature = signature;
                 this.element_state = state;
@@ -1160,14 +1174,17 @@ impl Tab {
                         this.list_state.remeasure_items(ix..ix + 1);
                     }
                 } else {
-                    // Keep roughly the same place in the page.
-                    let top = this.list_state.logical_scroll_top();
+                    // Keep the same place in the page: the row with the same
+                    // element, else the same row number from its start (an
+                    // offset into some other row could land past its end,
+                    // a blank screen until the next layout).
                     let rows = page.layout.rows.len();
                     this.reset_rows(rows);
-                    this.list_state.scroll_to(ListOffset {
+                    let to = anchored.unwrap_or(ListOffset {
                         item_ix: top.item_ix.min(rows.saturating_sub(1)),
-                        offset_in_item: top.offset_in_item,
+                        offset_in_item: if top.item_ix == 0 { top.offset_in_item } else { px(0.) },
                     });
+                    this.list_state.scroll_to(to);
                 }
                 this.load_images(cx);
                 this.sync_keyframes(window);
@@ -1203,6 +1220,13 @@ impl Tab {
             let record_frames = async |cx: &mut AsyncWindowContext| {
                 for frame in 0..job.frames {
                     let path = job.frame_path(frame);
+                    if job.frame_scroll != 0.0 {
+                        this.update(cx, |this, cx| {
+                            this.list_state.scroll_by(px(job.frame_scroll));
+                            cx.notify();
+                        })
+                        .ok();
+                    }
                     cx.update(|window, cx| {
                         window.draw(cx).clear(cx);
                         if let Err(err) = capture::save_frame(window, &path) {
@@ -1498,6 +1522,7 @@ impl Tab {
             images: self.images.clone(),
             shown_images: self.shown_images.clone(),
             images_generation: self.images_generation,
+            round_clip: None,
             fonts_generation: self.fonts_generation,
             track_hover,
             wants_bounds: {

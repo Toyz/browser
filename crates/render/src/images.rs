@@ -72,10 +72,52 @@ pub fn picture(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32
 /// The same with rounded corners (top-left, top-right, bottom-right,
 /// bottom-left).
 pub fn picture_rounded(image: &Arc<Image>, padded: &Option<Arc<RenderImage>>, width: f32, height: f32, corners: [Pixels; 4]) -> AnyElement {
-    picture_fitted(image, padded, width, height, corners, style::ObjectFit::Fill)
+    picture_fitted(image, padded, width, height, corners, style::ObjectFit::Fill, None)
 }
 
 /// The same, fitted per CSS `object-fit` (cropped by `cover`).
+/// The middle of a padded raster (see [`Prepared::padded`]) that
+/// `object-fit: cover` shows in a box of aspect `ratio` (width / height),
+/// cached per picture and ratio.
+fn cover_crop(padded: &Arc<RenderImage>, ratio: f32) -> Option<Arc<RenderImage>> {
+    thread_local! {
+        static CROPS: RefCell<HashMap<(usize, u32), Arc<RenderImage>>> = RefCell::default();
+    }
+    let key = (Arc::as_ptr(padded) as usize, (ratio * 1000.0).round() as u32);
+    if let Some(hit) = CROPS.with_borrow(|c| c.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let size = padded.size(0);
+    let (pw, ph) = (size.width.0 as u32, size.height.0 as u32);
+    if pw < 3 || ph < 3 || !ratio.is_finite() || ratio <= 0.0 {
+        return None;
+    }
+    // Without the 1px border the padding added.
+    let (w, h) = (pw - 2, ph - 2);
+    let (cw, ch) = if (w as f32 / h as f32) > ratio {
+        (((h as f32) * ratio).round().max(1.0) as u32, h)
+    } else {
+        (w, ((w as f32) / ratio).round().max(1.0) as u32)
+    };
+    let (x0, y0) = (1 + (w - cw.min(w)) / 2, 1 + (h - ch.min(h)) / 2);
+    let bytes = padded.as_bytes(0)?;
+    let mut out = image::RgbaImage::new(cw, ch);
+    for y in 0..ch {
+        for x in 0..cw {
+            let i = (((y0 + y) * pw + (x0 + x)) * 4) as usize;
+            out.put_pixel(x, y, image::Rgba([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]));
+        }
+    }
+    let cropped = Arc::new(RenderImage::new(vec![image::Frame::new(out)]));
+    CROPS.with_borrow_mut(|c| {
+        if c.len() > 256 {
+            c.clear();
+        }
+        c.insert(key, cropped.clone());
+    });
+    Some(cropped)
+}
+
 pub fn picture_fitted(
     image: &Arc<Image>,
     padded: &Option<Arc<RenderImage>>,
@@ -83,8 +125,20 @@ pub fn picture_fitted(
     height: f32,
     corners: [Pixels; 4],
     fit: style::ObjectFit,
+    // The box's width / height, when known.
+    box_ratio: Option<f32>,
 ) -> AnyElement {
     let round = |i: Img| i.rounded_tl(corners[0]).rounded_tr(corners[1]).rounded_br(corners[2]).rounded_bl(corners[3]);
+    // A rounded `cover` picture: GPUI rounds the scaled-up picture, whose
+    // corners are outside the box (so they never show). Draw the part
+    // `cover` shows instead, rounded to the box.
+    if fit == style::ObjectFit::Cover
+        && corners.iter().any(|c| *c > px(0.))
+        && let (Some(p), Some(ratio)) = (padded, box_ratio)
+        && let Some(cropped) = cover_crop(p, ratio)
+    {
+        return round(img(cropped)).size_full().object_fit(ObjectFit::Fill).into_any_element();
+    }
     let fit = match fit {
         style::ObjectFit::Fill => None,
         style::ObjectFit::Contain => Some(ObjectFit::Contain),
