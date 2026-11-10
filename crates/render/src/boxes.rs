@@ -1810,6 +1810,31 @@ impl Builder<'_> {
         } else {
             kind
         };
+        // A box sized by its content (absolutely positioned, inline-block,
+        // floated, with no width of its own) holding an image sized in
+        // percentages of it: a cycle, which CSS breaks by sizing the box as
+        // if the percentages were `auto` (the image's natural size), so they
+        // come to the same. Resolved against nothing, the image was 0x0
+        // (Badge Directory's <loom-image>: `img { width: 100%; height: 100% }`
+        // in an absolutely positioned host, every badge on its canvases).
+        let shrink_to_fit = style.width.is_auto()
+            && (matches!(style.position, style::Position::Absolute | style::Position::Fixed)
+                || matches!(style.display, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid)
+                || style.float != Float::None
+                || style.fit_width);
+        if shrink_to_fit {
+            for child in &mut children {
+                if let LayoutBox::Image(i) = child
+                    && matches!(i.style.width, Length::Percent(_))
+                {
+                    let st = Arc::make_mut(&mut i.style);
+                    st.width = Length::Auto;
+                    if style.height.is_auto() && matches!(st.height, Length::Percent(_)) {
+                        st.height = Length::Auto;
+                    }
+                }
+            }
+        }
         round_corner_children(&style, &kind, &mut children);
         let (min_content, max_content) = block_intrinsic(&style, &kind, &children);
         let element = self.doc.element(id);
