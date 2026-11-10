@@ -1238,11 +1238,7 @@ pub(crate) fn shown_image(i: &ImageBox, cx: &RenderCx) -> Option<ImageState> {
     let state = cx.images.borrow().get(&*i.src).cloned();
     let Some(node) = i.node else { return state };
     if matches!(state, Some(ImageState::Ready { .. })) {
-        let before = cx.shown_images.borrow_mut().insert(node, i.src.clone());
-        // A canvas's old frames aren't wanted again.
-        if let Some(old) = before.filter(|old| old.scheme() == "data" && **old != *i.src) {
-            cx.images.borrow_mut().remove(&*old);
-        }
+        cx.shown_images.borrow_mut().insert(node, i.src.clone());
         return state;
     }
     let before = cx.shown_images.borrow().get(&node).cloned()?;

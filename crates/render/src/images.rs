@@ -315,6 +315,28 @@ pub fn filtered(
     (plain.into(), Some(padded))
 }
 
+/// A ready picture from premultiplied RGBA pixels (a canvas's), and its
+/// one frame (to drop from the GPU atlas when it's replaced).
+pub fn from_pixels(width: u32, height: u32, pixels: &[u8]) -> Option<(ImageState, Arc<RenderImage>)> {
+    // BGRA with straight alpha, as GPUI draws pictures.
+    let mut bgra = vec![0u8; pixels.len()];
+    for (out, px) in bgra.chunks_exact_mut(4).zip(pixels.chunks_exact(4)) {
+        let a = px[3] as u32;
+        let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
+        out.copy_from_slice(&[un(px[2]), un(px[1]), un(px[0]), px[3]]);
+    }
+    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
+    let frame = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+    let state = ImageState::Ready {
+        image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+        padded: None,
+        frames: Some(frame.clone()),
+        width: width as f32,
+        height: height as f32,
+    };
+    Some((state, frame))
+}
+
 /// Images for the current page, filled in as they arrive.
 pub type ImageStore = Rc<RefCell<HashMap<Url, ImageState>>>;
 

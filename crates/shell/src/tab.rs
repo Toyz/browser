@@ -151,6 +151,11 @@ pub struct Tab {
     /// The rows each sticky box and container spans, for the layout (by
     /// address) they were found in.
     sticky_rows: std::cell::RefCell<(usize, HashMap<NodeId, (usize, usize)>)>,
+    /// Each canvas's current frame (replaced ones leave the GPU atlas).
+    canvas_frames: HashMap<NodeId, Arc<RenderImage>>,
+    /// Pictures to take out of the GPU atlas at the next render (which has
+    /// the window to do it with).
+    atlas_drops: Vec<Arc<RenderImage>>,
     /// A smooth scroll in progress: (from, to, started), px of the page.
     scroll_animation: Option<(f32, f32, std::time::Instant)>,
     layout_scheduled: Rc<std::cell::Cell<bool>>,
@@ -275,6 +280,8 @@ impl Tab {
             layout_viewport_sent: (0.0, 0.0),
             layout_scroll_sent: (0.0, 0.0),
             scroll_animation: None,
+            canvas_frames: HashMap::new(),
+            atlas_drops: Vec::new(),
             sticky_rows: Default::default(),
             layout_scheduled: Rc::default(),
             hover_blocks: HashSet::new(),
@@ -557,6 +564,7 @@ impl Tab {
             self.image_queue.borrow_mut().clear();
         }
         self.shown_images.borrow_mut().clear();
+        self.atlas_drops.extend(self.canvas_frames.drain().map(|(_, f)| f));
         self.page = Some(page);
         self.page_gen += 1;
         // Work for the previous page must not land on this one.
@@ -775,6 +783,34 @@ impl Tab {
                 })
             })
             .collect()
+    }
+
+    /// Canvases' new pixels: each shown as its picture from the next
+    /// frame, the last one dropped from the GPU atlas.
+    pub(super) fn canvas_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
+        let frames = std::mem::take(&mut *host.canvas_frames.lock().unwrap_or_else(|e| e.into_inner()));
+        for (node, c) in frames {
+            let Ok(url) = Url::parse(&js::canvas_url(node)) else { continue };
+            let Some((state, frame)) = render::images::from_pixels(c.width, c.height, &c.pixels) else { continue };
+            self.images.borrow_mut().insert(url, state);
+            if let Some(old) = self.canvas_frames.insert(node, frame) {
+                window.drop_image(old).ok();
+            }
+        }
+        // Canvases no longer in the page (replaced by new ones) go.
+        if let Some(doc) = self.page.as_ref().and_then(|p| p.doc.as_ref()) {
+            let gone: Vec<NodeId> = self.canvas_frames.keys().filter(|n| doc.get(**n).is_none()).copied().collect();
+            for n in gone {
+                if let Some(old) = self.canvas_frames.remove(&n) {
+                    window.drop_image(old).ok();
+                }
+                if let Ok(url) = Url::parse(&js::canvas_url(n)) {
+                    self.images.borrow_mut().remove(&url);
+                }
+            }
+        }
+        cx.notify();
     }
 
     /// Lay out a few more rows the list hasn't measured yet, between
@@ -1201,6 +1237,8 @@ impl Tab {
                 .map(|u| (u, true))
                 .chain(page.layout.images.iter().map(|(u, rows)| (u, rows.iter().any(|r| near.contains(r)))))
                 .take(MAX_IMAGES)
+                // Canvases' pixels come from their scripts, not the network.
+                .filter(|(url, _)| url.scheme() != "feather-canvas")
                 .filter(|(url, _)| loader::may_load(&page.url, url));
             for (url, visible) in wanted {
                 match store.get(&**url) {
@@ -2383,6 +2421,9 @@ impl Render for Tab {
             }
         }
         self.note_unpainted(cx);
+        for old in self.atlas_drops.drain(..) {
+            window.drop_image(old).ok();
+        }
         self.measure_ahead(window);
         self.step_scroll_animation(window);
         self.animation_frame(window);

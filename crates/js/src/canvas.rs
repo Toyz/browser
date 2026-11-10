@@ -108,7 +108,12 @@ impl Canvas {
         (self.pixmap.width(), self.pixmap.height())
     }
 
-    /// The pixels as a PNG `data:` URL.
+    /// The pixels, premultiplied RGBA.
+    pub fn pixels(&self) -> &[u8] {
+        self.pixmap.data()
+    }
+
+    /// The pixels as a PNG `data:` URL (`canvas.toDataURL()`).
     pub fn data_url(&mut self) -> Arc<str> {
         if let Some(url) = &self.url {
             return url.clone();
@@ -523,8 +528,68 @@ fn single_or(stops: Vec<(f32, Color)>, f: impl FnOnce(Vec<(f32, Color)>) -> Fill
 }
 
 /// Decode an image (for drawImage), cached by URL.
+/// A picture to draw on a canvas: its frames (one, unless it's animated)
+/// and how long each shows, ms.
+pub struct Picture {
+    frames: Vec<(Arc<Pixmap>, u32)>,
+    total_ms: u32,
+    started: std::time::Instant,
+}
+
+impl Picture {
+    /// The frame showing now (animations run from when first decoded,
+    /// as a browser's do from load).
+    pub fn now(&self) -> Arc<Pixmap> {
+        if self.frames.len() == 1 || self.total_ms == 0 {
+            return self.frames[0].0.clone();
+        }
+        let mut t = (self.started.elapsed().as_millis() % self.total_ms as u128) as u32;
+        for (frame, ms) in &self.frames {
+            if t < *ms {
+                return frame.clone();
+            }
+            t -= ms;
+        }
+        self.frames[0].0.clone()
+    }
+}
+
+/// Decode a picture for drawing: every frame of a GIF or animated WebP.
+pub fn decode_picture(bytes: &[u8]) -> Option<Picture> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+    let frames: Option<Vec<image::Frame>> = match image::guess_format(bytes).ok()? {
+        image::ImageFormat::Gif => image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?.into_frames().collect_frames().ok(),
+        image::ImageFormat::WebP => {
+            let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            if decoder.has_animation() { decoder.into_frames().collect_frames().ok() } else { None }
+        }
+        _ => None,
+    };
+    let frames: Vec<(Arc<Pixmap>, u32)> = match frames.filter(|f| f.len() > 1) {
+        Some(frames) => frames
+            .into_iter()
+            .filter_map(|f| {
+                let (num, den) = f.delay().numer_denom_ms();
+                let ms = (num / den.max(1)).max(20);
+                Some((Arc::new(premultiplied(f.into_buffer())?), ms))
+            })
+            .collect(),
+        None => vec![(Arc::new(decode_image(bytes)?), 0)],
+    };
+    if frames.is_empty() {
+        return None;
+    }
+    let total_ms = frames.iter().map(|(_, ms)| ms).sum();
+    Some(Picture { frames, total_ms, started: std::time::Instant::now() })
+}
+
 pub fn decode_image(bytes: &[u8]) -> Option<Pixmap> {
-    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    premultiplied(image::load_from_memory(bytes).ok()?.to_rgba8())
+}
+
+/// Straight RGBA as tiny-skia's premultiplied pixels.
+fn premultiplied(img: image::RgbaImage) -> Option<Pixmap> {
     let (w, h) = img.dimensions();
     let mut pixmap = Pixmap::new(w, h)?;
     // tiny-skia stores premultiplied RGBA.

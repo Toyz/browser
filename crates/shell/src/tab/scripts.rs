@@ -38,6 +38,7 @@ impl Tab {
                             reply.send(this.locate(node)).ok();
                         }
                         js::FromJs::ScrollTo { y, smooth, .. } => this.script_scroll(y, smooth, cx),
+                        js::FromJs::CanvasFrames => this.canvas_frames(window, cx),
                         js::FromJs::Traverse(delta) => {
                             if delta < 0 {
                                 this.go_back(window, cx)

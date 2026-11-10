@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use page::{Document, NodeId};
 use url::Url;
 
-pub use dom::{node_from_number, to_html};
+pub use dom::{canvas_url, node_from_number, to_html};
 
 /// Fetches a script's source (blocking).
 pub type FetchText = Arc<dyn Fn(&Url) -> Option<String> + Send + Sync>;
@@ -115,10 +115,25 @@ pub enum FromJs {
     /// and waited for, the first time a script measures one the tab hasn't
     /// reported (a jump link scrolling to a section never on screen).
     Locate(NodeId, std::sync::mpsc::Sender<Option<[f32; 4]>>),
+    /// Canvases have new pixels: take them from `ScriptHost::canvas_frames`
+    /// (nothing else about the page changed).
+    CanvasFrames,
     /// `window.scrollTo()` and friends: scroll the page to (x, y), px;
     /// `smooth`: animated (`behavior: "smooth"`).
     ScrollTo { x: f32, y: f32, smooth: bool },
 }
+
+/// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height`.
+pub struct CanvasPixels {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Arc<[u8]>,
+}
+
+/// Each canvas's newest pixels the tab hasn't taken yet: a newer frame
+/// replaces one still waiting, so a page drawing faster than the tab
+/// paints doesn't queue frames up.
+pub type CanvasFrames = Arc<std::sync::Mutex<std::collections::HashMap<NodeId, CanvasPixels>>>;
 
 /// The tab's handle on a page's script thread.
 pub struct ScriptHost {
@@ -133,6 +148,8 @@ pub struct ScriptHost {
     /// Elements with mouse listeners (down/up/move/wheel/dblclick, or
     /// pointer events); the document's root stands for window/document.
     pub mouse_listening: Arc<std::sync::RwLock<std::collections::HashSet<NodeId>>>,
+    /// Canvas pixels waiting for the tab (see `FromJs::CanvasFrames`).
+    pub canvas_frames: CanvasFrames,
 }
 
 impl ScriptHost {
@@ -200,11 +217,13 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
     let fallback = doc.clone();
     let budget = opts.budget;
     let shared_listening = listening.clone();
+    let canvas_frames = CanvasFrames::default();
+    let shared_canvas = canvas_frames.clone();
     let spawned = std::thread::Builder::new()
         .name("feather-js".into())
         .stack_size(256 << 20)
         .spawn(move || {
-            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening, shared_measured, shared_mouse);
+            let mut rt = dom::Runtime::new(doc, opts, rx, fetch_tx, updates_tx, shared_listening, shared_measured, shared_mouse, shared_canvas);
             rt.run_initial_scripts();
             // Data the page fetched while loading makes the first paint
             // too, if it's quick.
@@ -216,7 +235,7 @@ pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
         return (fallback, None);
     }
     let first = first_rx.recv_timeout(budget).unwrap_or(fallback);
-    (first, Some(ScriptHost { tx, updates, listening, measured, mouse_listening }))
+    (first, Some(ScriptHost { tx, updates, listening, measured, mouse_listening, canvas_frames }))
 }
 
 /// When the next timer is due, for `recv_timeout`.

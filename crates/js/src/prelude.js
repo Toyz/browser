@@ -1202,7 +1202,7 @@
   const dirtyCanvases = new Set();
   function context2d(canvas) {
     const ops = [];
-    const rec = (...op) => { ops.push(op); if (!dirtyCanvases.has(canvas)) { dirtyCanvases.add(canvas); N.touch(); } };
+    const rec = (...op) => { ops.push(op); if (!dirtyCanvases.has(canvas)) { dirtyCanvases.add(canvas); N.canvasDirty(); } };
     const props = {
       fillStyle: "#000000", strokeStyle: "#000000", lineWidth: 1, lineCap: "butt", lineJoin: "miter", miterLimit: 10,
       globalAlpha: 1, globalCompositeOperation: "source-over", lineDashOffset: 0,
@@ -1320,7 +1320,7 @@
     set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
     get height() { const a = this.getAttribute("height"); return a === null ? 150 : Number(a) || 0; }
     set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
-    toDataURL() { return "data:,"; }
+    toDataURL() { return N.canvasDataURL(this.__id, flushCanvases()); }
     toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
   // <video>/<audio>: the whole API, in the state of a media element

@@ -656,17 +656,21 @@ fn relative_time_and_date_constructor() {
 
 #[test]
 fn canvas_drawing_reaches_the_snapshot() {
-    let doc = run(r##"<body><canvas id="c" width="40" height="20"></canvas><script>
-        const ctx = document.getElementById("c").getContext("2d");
+    let doc = run(r##"<body><canvas id="c" width="40" height="20"></canvas><p id="o"></p><script>
+        const c = document.getElementById("c"), ctx = c.getContext("2d");
         const g = ctx.createLinearGradient(0, 0, 40, 0);
         g.addColorStop(0, "red"); g.addColorStop(1, "blue");
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, 40, 20);
         ctx.beginPath(); ctx.arc(20, 10, 5, 0, Math.PI * 2); ctx.fillStyle = "#0f0"; ctx.fill();
+        document.getElementById("o").textContent = c.toDataURL().slice(0, 30);
         </script></body>"##);
+    // The canvas shows its pixels under a stable address (they go to the
+    // tab directly, not through the DOM)...
     let c = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("c")).unwrap();
-    let src = doc.element(c).unwrap().attr("src").unwrap_or("");
-    assert!(src.starts_with("data:image/png;base64,iVBOR"), "{}", &src[..src.len().min(60)]);
+    assert_eq!(doc.element(c).unwrap().attr("src"), Some(js::canvas_url(c).as_str()));
+    // ...and `toDataURL()` encodes what was drawn.
+    assert_eq!(text_of(&doc, "o"), "data:image/png;base64,iVBORw0K");
 }
 
 #[test]
