@@ -168,9 +168,11 @@ impl Block {
     fn sliceable_box(&self) -> bool {
         let s = &self.style;
         // `min-height: 100vh` page wrappers: the content is taller anyway.
+        // (A wrapper with hundreds of boxes in it is taller than its
+        // min-height in practice: badgedirectory's app shell is 800px min.)
         let min_height_ok = match s.min_height {
             Length::Auto | Length::Percent(_) => true,
-            Length::Px(_) => self.children.len() > 3 && s.painted_background().is_none(),
+            Length::Px(_) => (self.children.len() > 3 && s.painted_background().is_none()) || box_count(self, 300) >= 300,
         };
         s.border_width.top == 0.0
             && s.border_width.bottom == 0.0
@@ -179,7 +181,7 @@ impl Block {
             && min_height_ok
             && s.max_height.is_auto()
             // Clipping a box as tall as its content cuts nothing off.
-            && (s.overflow == Overflow::Visible || (s.height.is_auto() && s.max_height.is_auto() && s.painted_background().is_none()))
+            && (s.overflow == Overflow::Visible || (s.height.is_auto() && s.max_height.is_auto()))
             && s.opacity >= 1.0
             && s.position != style::Position::Absolute
             && s.position != style::Position::Fixed
@@ -2207,6 +2209,26 @@ fn round_corner_children(style: &ComputedStyle, kind: &BlockKind, children: &mut
             s.border_radius[2] = Length::Px(r);
         }
     }
+}
+
+/// How many boxes `b` holds, counting up to `limit`.
+fn box_count(b: &Block, limit: usize) -> usize {
+    fn walk(b: &LayoutBox, n: &mut usize, limit: usize) {
+        if *n >= limit {
+            return;
+        }
+        *n += 1;
+        if let LayoutBox::Block(b) = b {
+            for c in &b.children {
+                walk(c, n, limit);
+            }
+        }
+    }
+    let mut n = 0;
+    for c in &b.children {
+        walk(c, &mut n, limit);
+    }
+    n
 }
 
 /// How far `vertical-align` raises an inline element's baseline, px.
