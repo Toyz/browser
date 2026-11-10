@@ -1409,7 +1409,14 @@ impl Builder<'_> {
             st.width = Length::Px(w + edges_w);
         }
         if st.height.is_auto() {
-            st.height = Length::Px(h + edges_h);
+            // The content's height, as a minimum: a flex container can
+            // still stretch the field (GitHub's search boxes, whose text
+            // then sits in the middle).
+            let natural = h + edges_h;
+            st.min_height = match st.min_height {
+                Length::Px(m) => Length::Px(m.max(natural)),
+                _ => Length::Px(natural),
+            };
         }
         let placeholder_color = self
             .styler

@@ -147,7 +147,10 @@ impl Tab {
                             .disabled(control.disabled)
                             .text_color(fg)
                             .text_size(font)
-                            .size_full()
+                            // Full width, its own line's height: centered
+                            // in a taller box, as browsers draw the text of
+                            // a single-line field.
+                            .w_full()
                             .into_any_element(),
                     }
                     .into_any_element(),
