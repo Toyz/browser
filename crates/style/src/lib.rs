@@ -76,6 +76,9 @@ pub struct ComputedStyle {
     pub grid_column: Option<GridSpan>,
     /// Explicit column tracks, when they aren't all equal (`12rem 1fr`).
     pub grid_tracks: Option<Arc<[Track]>>,
+    /// Equal columns are at least as wide as their content (see
+    /// `Decl::GridContentMin`).
+    pub grid_content_min: bool,
     pub grid_areas: Option<GridAreas>,
     /// `grid-area: <name>` on a grid item.
     pub grid_area: Option<Arc<str>>,
@@ -212,6 +215,7 @@ impl ComputedStyle {
             grid_auto: None,
             grid_column: None,
             grid_tracks: None,
+            grid_content_min: false,
             grid_areas: None,
             grid_area: None,
             fit_width: false,

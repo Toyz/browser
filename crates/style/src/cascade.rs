@@ -920,6 +920,7 @@ impl Styler {
             }
             Decl::GridColumn(v) => s.grid_column = *v,
             Decl::GridTracks(None) => s.grid_tracks = None,
+            Decl::GridContentMin(v) => s.grid_content_min = *v,
             Decl::GridTracks(Some(specs)) => {
                 let tracks: Vec<Track> = specs
                     .iter()

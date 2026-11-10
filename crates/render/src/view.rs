@@ -739,7 +739,8 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
             d.children(render_items(&block.children, cx))
         }
         BlockKind::Grid => {
-            let d = base.grid().grid_cols(s.grid_columns.unwrap_or(1));
+            let n = s.grid_columns.unwrap_or(1);
+            let d = if s.grid_content_min { base.grid().grid_cols_min_content(n) } else { base.grid().grid_cols(n) };
             apply_gap(apply_alignment(d, s), s).children(render_items(&block.children, cx))
         }
     };

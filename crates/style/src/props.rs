@@ -144,6 +144,9 @@ pub enum Decl {
     GridColumns(GridCols),
     /// Explicit tracks (`None`: equal columns or none).
     GridTracks(Option<Arc<[TrackSpec]>>),
+    /// Equal `fr` columns that never get narrower than their content
+    /// (`1fr` is `minmax(auto, 1fr)`; `minmax(0, 1fr)` may).
+    GridContentMin(bool),
     GridAreas(Option<GridAreas>),
     GridArea(Option<Arc<str>>),
     GridRowStart(Option<i16>),
@@ -1157,7 +1160,10 @@ fn parse_template_columns<'i>(p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResul
     let start = p.state();
     let tracks = parse_tracks(p).ok().flatten();
     p.reset(&start);
+    let begin = p.position();
     out.push(Decl::GridColumns(parse_grid_columns(p)?));
+    let text = p.slice_from(begin).to_ascii_lowercase();
+    out.push(Decl::GridContentMin(text.contains("fr") && !text.contains("minmax")));
     // Equal shares are equal columns; equal `auto` (or `min-content`)
     // tracks are each as wide as their content (Primer's buttons put an
     // icon, a label and an icon in `min-content auto min-content`).
