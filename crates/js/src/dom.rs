@@ -104,6 +104,16 @@ impl Dom {
 pub(crate) mod geometry;
 #[path = "observers.rs"]
 pub(crate) mod observers;
+#[path = "context2d.rs"]
+pub(crate) mod context2d;
+
+/// The page's DOM, for natives that capture nothing (class methods): kept
+/// in the context.
+struct PageDom(Shared);
+
+pub(crate) fn page(cx: &Context) -> Shared {
+    cx.get_data::<PageDom>().expect("natives installed").0.clone()
+}
 
 pub(crate) fn is_module(e: &ElementData) -> bool {
     e.attr("type").is_some_and(|t| t.trim().eq_ignore_ascii_case("module"))
@@ -141,6 +151,8 @@ pub(crate) struct Dom {
     tab: async_channel::Sender<FromJs>,
     /// Canvases with drawing recorded since their pixels were last sent.
     canvases_dirty: bool,
+    /// Drawing recorded on each canvas since it was last replayed.
+    canvas_ops: HashMap<NodeId, Vec<crate::canvas::Op>>,
     /// Canvases drawn on since their pixels were last sent.
     drawn: HashSet<NodeId>,
     /// When each canvas was last drawn on (detached ones are let go of,
@@ -244,6 +256,7 @@ impl Runtime {
             laid_out: false,
             geometry: Default::default(),
             canvases_dirty: false,
+            canvas_ops: HashMap::new(),
             drawn: HashSet::new(),
             canvas_used: HashMap::new(),
         }));
@@ -557,8 +570,7 @@ impl Runtime {
         // Canvases drawn on get their bitmaps (and so their address in the
         // document); the pixels go to the tab at the next flush.
         if std::mem::take(&mut self.dom.borrow_mut().canvases_dirty) {
-            let ops = self.call_global("__flushCanvases", &[]);
-            draw_canvases(&self.dom, ops, &mut self.cx);
+            context2d::draw_pending(&self.dom);
         }
         let cssom = self.call_global("__cssomStyles", &[]);
         let cssom: Vec<(NodeId, String)> = node_texts(cssom, &mut self.cx).into_iter().filter_map(|(id, css)| Some((id?, css))).collect();
@@ -657,8 +669,7 @@ impl Runtime {
     /// one, changes the document).
     fn flush_canvases(&mut self) {
         if std::mem::take(&mut self.dom.borrow_mut().canvases_dirty) {
-            let ops = self.call_global("__flushCanvases", &[]);
-            draw_canvases(&self.dom, ops, &mut self.cx);
+            context2d::draw_pending(&self.dom);
         }
         let nodes = std::mem::take(&mut self.dom.borrow_mut().drawn);
         if nodes.is_empty() {
@@ -909,8 +920,6 @@ impl Runtime {
             }
         }
     }
-
-    /// Replay canvases' recorded drawing (`__flushCanvases()`'s answer).
 
     /// Say which promises were rejected with nobody listening.
     fn report_rejections(&mut self) {
@@ -1484,19 +1493,6 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         dom.focus = Some(node);
         Ok(JsValue::undefined())
     }));
-    // `canvas.toDataURL()`: its drawing so far (pending operations
-    // replayed first, from `[[id, w, h, ops], ...]`), as a PNG.
-    add("canvasDataURL", 2, Box::new(|d, a, cx| {
-        draw_canvases(d, a.get_or_undefined(1).clone(), cx);
-        let dom = &mut *d.borrow_mut();
-        let url = arg_node(dom, a, 0).and_then(|n| dom.canvases.get_mut(&n)).map(|c| c.data_url());
-        Ok(js_str(url.as_deref().unwrap_or("data:,")))
-    }));
-    // A canvas was drawn on: its pixels go to the tab at the next flush.
-    add("canvasDirty", 0, Box::new(|d, _, _| {
-        d.borrow_mut().canvases_dirty = true;
-        Ok(JsValue::undefined())
-    }));
     add("touch", 0, Box::new(|d, _, _| {
         d.borrow_mut().changed();
         Ok(JsValue::undefined())
@@ -1845,7 +1841,9 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::timers::install(&obj, dom, cx);
     crate::web_storage::install(&obj, dom, cx);
     geometry::install(&obj, dom, cx);
-    observers::install(dom, cx);
+    cx.insert_data(PageDom(dom.clone()));
+    observers::install(cx);
+    context2d::install(&obj, cx);
     cx.register_global_property(js_string!("__native"), obj, PropAttr::all()).ok();
 }
 
@@ -2130,26 +2128,6 @@ fn flatten(dom: &Dom, adopted: Vec<(Option<NodeId>, String)>) -> Document {
     copy
 }
 
-/// A JS value as a canvas operation argument (numbers, strings, arrays).
-fn to_arg(v: &JsValue, cx: &mut Context, depth: u8) -> crate::canvas::Arg {
-    use crate::canvas::Arg;
-    if let Some(n) = v.as_number() {
-        return Arg::N(n);
-    }
-    if let Some(s) = v.as_string() {
-        return Arg::S(s.to_std_string_escaped());
-    }
-    if let Some(b) = v.as_boolean() {
-        return Arg::N(if b { 1.0 } else { 0.0 });
-    }
-    if depth < 4
-        && let Some(arr) = v.as_object().and_then(|o| JsArray::from_object(o).ok())
-    {
-        let len = arr.length(cx).unwrap_or(0);
-        return Arg::A((0..len).map(|i| to_arg(&arr.get(i, cx).unwrap_or_default(), cx, depth + 1)).collect());
-    }
-    Arg::N(0.0)
-}
 
 /// An image for drawImage: decoded once per URL (from the shared cache).
 /// The picture `src` shows now, for `drawImage` (an animation's current
@@ -2197,56 +2175,6 @@ pub fn canvas_url(node: NodeId) -> String {
     format!("feather-canvas:{}", node_to_number(node))
 }
 
-/// Replay canvases' recorded drawing (`__flushCanvases()`'s answer); the
-/// canvases drawn on are noted in `Dom::drawn` (their pixels go to the tab).
-fn draw_canvases(d: &Shared, v: JsValue, cx: &mut Context) {
-    let Some(list) = v.as_object().and_then(|o| JsArray::from_object(o).ok()) else { return };
-    let len = list.length(cx).unwrap_or(0);
-    let mut batches = Vec::new();
-    for i in 0..len {
-        let Some(item) = list.get(i, cx).ok().and_then(|v| v.as_object()) else { continue };
-        let get = |k: u64, cx: &mut Context| item.get(k, cx).unwrap_or_default();
-        let node = get(0, cx).as_number().map(node_from_number);
-        let w = get(1, cx).as_number().unwrap_or(300.0) as u32;
-        let h = get(2, cx).as_number().unwrap_or(150.0) as u32;
-        let ops = to_arg(&get(3, cx), cx, 0);
-        let ops: Vec<Vec<crate::canvas::Arg>> = match ops {
-            crate::canvas::Arg::A(list) => list.into_iter().filter_map(|op| if let crate::canvas::Arg::A(v) = op { Some(v) } else { None }).collect(),
-            _ => Vec::new(),
-        };
-        if let Some(node) = node {
-            batches.push((node, w, h, ops));
-        }
-    }
-    let mut dom = d.borrow_mut();
-    dom.drawn.extend(batches.iter().map(|b| b.0));
-    for (node, w, h, ops) in batches {
-        // A new size is a new, blank bitmap (and a DOM change: the
-        // element's picture changes size).
-        if dom.canvases.get(&node).is_none_or(|c| c.size() != (w.max(1), h.max(1)))
-            && let Some(c) = crate::canvas::Canvas::new(w, h)
-        {
-            dom.canvases.insert(node, c);
-            dom.changed();
-        }
-        // Other canvases, for drawImage(canvas).
-        let others: HashMap<u64, tiny_skia::Pixmap> = ops
-            .iter()
-            .filter(|op| matches!(op.first(), Some(crate::canvas::Arg::S(s)) if s == "drawCanvas"))
-            .filter_map(|op| match op.get(1) {
-                Some(crate::canvas::Arg::N(id)) => {
-                    let other = dom.canvases.get(&node_from_number(*id))?;
-                    Some((*id as u64, other.pixmap().clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        let base = dom.doc.url.clone();
-        if let Some(canvas) = dom.canvases.get_mut(&node) {
-            canvas.apply(&ops, &others, &|src| canvas_image(&base, src));
-        }
-    }
-}
 
 /// Canvases that left the document (an app re-rendering its <canvas> makes
 /// a new one each time: Badge Directory's graph left hundreds of 4 MB

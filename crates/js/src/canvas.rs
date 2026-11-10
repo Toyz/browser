@@ -1,6 +1,6 @@
-//! `<canvas>` 2D drawing: the page's context records operations (in JS);
-//! before each snapshot they're replayed here onto a tiny-skia pixmap, and
-//! the snapshot shows the canvas as a PNG.
+//! `<canvas>` 2D drawing: the page's context (`context2d.rs`) records
+//! operations; before each snapshot they're replayed here onto a tiny-skia
+//! pixmap, whose pixels the tab shows.
 //!
 //! Supported: paths (lines, curves, arcs, ellipses, rects), fill and
 //! stroke with colors and linear/radial gradients, transforms,
@@ -15,32 +15,102 @@ use tiny_skia::{
     Pattern, Pixmap, Point, RadialGradient, Rect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-/// One argument of a recorded operation.
+/// Where `drawImage` draws from.
 #[derive(Debug, Clone)]
-pub enum Arg {
-    N(f64),
-    S(String),
-    A(Vec<Arg>),
+pub enum Source {
+    /// An image, by address (decoded from the cache).
+    Url(String),
+    /// Another canvas (its key: `node_to_number`).
+    Canvas(u64),
 }
 
-impl Arg {
-    fn num(&self) -> f32 {
-        match self {
-            Arg::N(n) => *n as f32,
-            Arg::S(s) => s.parse().unwrap_or(0.0),
-            Arg::A(_) => 0.0,
-        }
-    }
-    fn str(&self) -> &str {
-        match self {
-            Arg::S(s) => s,
-            _ => "",
-        }
-    }
-}
-
+/// One recorded drawing operation.
 #[derive(Clone)]
-enum Fill {
+pub enum Op {
+    /// The canvas was resized (or had its size set): blank, default state.
+    Reset,
+    Save,
+    Restore,
+    SetTransform([f32; 6]),
+    Transform([f32; 6]),
+    FillStyle(Fill),
+    StrokeStyle(Fill),
+    LineWidth(f32),
+    Alpha(f32),
+    Cap(LineCap),
+    Join(LineJoin),
+    Miter(f32),
+    Dash(Vec<f32>),
+    DashOffset(f32),
+    Blend(BlendMode),
+    BeginPath,
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    ClosePath,
+    Quad([f32; 4]),
+    Bezier([f32; 6]),
+    /// x, y, rx, ry, rotation, start, end; anticlockwise.
+    Ellipse([f32; 7], bool),
+    Rect([f32; 4]),
+    RoundRect([f32; 4], f32),
+    Fill(FillRule),
+    Stroke,
+    Clip,
+    FillRect([f32; 4]),
+    StrokeRect([f32; 4]),
+    ClearRect([f32; 4]),
+    /// From `source`: (dx, dy), (dx, dy, dw, dh) or (sx, sy, sw, sh, dx, dy, dw, dh).
+    DrawImage(Source, Vec<f32>),
+    /// `putImageData`: unpremultiplied RGBA, `w` x `h`, at (x, y).
+    PutPixels { x: i32, y: i32, w: u32, h: u32, rgba: Vec<u8> },
+}
+
+impl Op {
+    /// A `globalCompositeOperation`.
+    pub fn blend(name: &str) -> Option<BlendMode> {
+        Some(match name {
+            "source-over" => BlendMode::SourceOver,
+            "destination-out" => BlendMode::DestinationOut,
+            "destination-over" => BlendMode::DestinationOver,
+            "source-in" => BlendMode::SourceIn,
+            "source-out" => BlendMode::SourceOut,
+            "source-atop" => BlendMode::SourceAtop,
+            "destination-in" => BlendMode::DestinationIn,
+            "destination-atop" => BlendMode::DestinationAtop,
+            "lighter" => BlendMode::Plus,
+            "multiply" => BlendMode::Multiply,
+            "screen" => BlendMode::Screen,
+            "overlay" => BlendMode::Overlay,
+            "darken" => BlendMode::Darken,
+            "lighten" => BlendMode::Lighten,
+            "xor" => BlendMode::Xor,
+            "copy" => BlendMode::Source,
+            _ => return None,
+        })
+    }
+
+    pub fn cap(name: &str) -> Option<LineCap> {
+        Some(match name {
+            "butt" => LineCap::Butt,
+            "round" => LineCap::Round,
+            "square" => LineCap::Square,
+            _ => return None,
+        })
+    }
+
+    pub fn join(name: &str) -> Option<LineJoin> {
+        Some(match name {
+            "miter" => LineJoin::Miter,
+            "round" => LineJoin::Round,
+            "bevel" => LineJoin::Bevel,
+            _ => return None,
+        })
+    }
+}
+
+/// A fill or stroke style.
+#[derive(Clone)]
+pub enum Fill {
     Color(Color),
     Linear { from: Point, to: Point, stops: Vec<(f32, Color)> },
     Radial { from: Point, to: Point, radius: f32, stops: Vec<(f32, Color)> },
@@ -124,174 +194,118 @@ impl Canvas {
         url
     }
 
-    /// Run recorded operations (`[name, args...]`). `others` holds the
-    /// page's other canvases, for drawImage(canvas).
-    pub fn apply(&mut self, ops: &[Vec<Arg>], others: &HashMap<u64, Pixmap>, images: &dyn Fn(&str) -> Option<Arc<Pixmap>>) {
+    /// Run recorded operations. `others` holds the page's other
+    /// canvases, for drawImage(canvas).
+    pub fn apply(&mut self, ops: &[Op], others: &HashMap<u64, Pixmap>, images: &dyn Fn(&str) -> Option<Arc<Pixmap>>) {
         if !ops.is_empty() {
             self.url = None;
         }
         for op in ops {
-            let Some((name, args)) = op.split_first() else { continue };
-            let n = |i: usize| args.get(i).map(Arg::num).unwrap_or(0.0);
-            match name.str() {
-                "save" => self.stack.push(self.state.clone()),
-                "restore" => {
+            match op {
+                Op::Reset => {
+                    self.pixmap.fill(Color::TRANSPARENT);
+                    self.state = State::default();
+                    self.stack.clear();
+                    self.path = PathBuilder::new();
+                    self.started = false;
+                }
+                Op::Save => self.stack.push(self.state.clone()),
+                Op::Restore => {
                     if let Some(s) = self.stack.pop() {
                         self.state = s;
                     }
                 }
-                "setTransform" => self.state.transform = Transform::from_row(n(0), n(1), n(2), n(3), n(4), n(5)),
-                "transform" => {
-                    self.state.transform = self.state.transform.pre_concat(Transform::from_row(n(0), n(1), n(2), n(3), n(4), n(5)))
-                }
-                "translate" => self.state.transform = self.state.transform.pre_translate(n(0), n(1)),
-                "scale" => self.state.transform = self.state.transform.pre_scale(n(0), n(1)),
-                "rotate" => {
-                    self.state.transform = self.state.transform.pre_concat(Transform::from_rotate(n(0).to_degrees()))
-                }
-                "fillStyle" | "strokeStyle" => {
-                    let fill = args.first().and_then(parse_fill);
-                    if let Some(fill) = fill {
-                        if name.str() == "fillStyle" {
-                            self.state.fill = fill;
-                        } else {
-                            self.state.stroke = fill;
-                        }
-                    }
-                }
-                "lineWidth" => {
-                    if n(0) > 0.0 {
-                        self.state.line_width = n(0);
-                    }
-                }
-                "globalAlpha" => {
-                    if (0.0..=1.0).contains(&n(0)) {
-                        self.state.alpha = n(0);
-                    }
-                }
-                "lineCap" => {
-                    self.state.cap = match args.first().map(Arg::str) {
-                        Some("round") => LineCap::Round,
-                        Some("square") => LineCap::Square,
-                        _ => LineCap::Butt,
-                    }
-                }
-                "lineJoin" => {
-                    self.state.join = match args.first().map(Arg::str) {
-                        Some("round") => LineJoin::Round,
-                        Some("bevel") => LineJoin::Bevel,
-                        _ => LineJoin::Miter,
-                    }
-                }
-                "miterLimit" => self.state.miter = n(0),
-                "setLineDash" => {
-                    self.state.dash = match args.first() {
-                        Some(Arg::A(v)) => v.iter().map(Arg::num).collect(),
-                        _ => Vec::new(),
-                    }
-                }
-                "lineDashOffset" => self.state.dash_offset = n(0),
-                "globalCompositeOperation" => {
-                    self.state.blend = match args.first().map(Arg::str) {
-                        Some("destination-out") => BlendMode::DestinationOut,
-                        Some("destination-over") => BlendMode::DestinationOver,
-                        Some("source-in") => BlendMode::SourceIn,
-                        Some("source-atop") => BlendMode::SourceAtop,
-                        Some("destination-in") => BlendMode::DestinationIn,
-                        Some("lighter") => BlendMode::Plus,
-                        Some("multiply") => BlendMode::Multiply,
-                        Some("screen") => BlendMode::Screen,
-                        Some("xor") => BlendMode::Xor,
-                        Some("copy") => BlendMode::Source,
-                        _ => BlendMode::SourceOver,
-                    }
-                }
-                "beginPath" => {
+                &Op::SetTransform([a, b, c, d, e, f]) => self.state.transform = Transform::from_row(a, b, c, d, e, f),
+                &Op::Transform([a, b, c, d, e, f]) => self.state.transform = self.state.transform.pre_concat(Transform::from_row(a, b, c, d, e, f)),
+                Op::FillStyle(f) => self.state.fill = f.clone(),
+                Op::StrokeStyle(f) => self.state.stroke = f.clone(),
+                &Op::LineWidth(w) => self.state.line_width = w,
+                &Op::Alpha(a) => self.state.alpha = a,
+                &Op::Cap(c) => self.state.cap = c,
+                &Op::Join(j) => self.state.join = j,
+                &Op::Miter(m) => self.state.miter = m,
+                Op::Dash(d) => self.state.dash = d.clone(),
+                &Op::DashOffset(o) => self.state.dash_offset = o,
+                &Op::Blend(b) => self.state.blend = b,
+                Op::BeginPath => {
                     self.path = PathBuilder::new();
                     self.started = false;
                 }
-                "moveTo" => {
-                    let p = self.pt(n(0), n(1));
+                &Op::MoveTo(x, y) => {
+                    let p = self.pt(x, y);
                     self.path.move_to(p.x, p.y);
                     self.started = true;
                 }
-                "lineTo" => {
-                    let p = self.pt(n(0), n(1));
+                &Op::LineTo(x, y) => {
+                    let p = self.pt(x, y);
                     self.line_to(p);
                 }
-                "closePath" => {
+                Op::ClosePath => {
                     if self.started {
                         self.path.close();
                     }
                 }
-                "quadraticCurveTo" => {
-                    let (c, p) = (self.pt(n(0), n(1)), self.pt(n(2), n(3)));
+                &Op::Quad([cx, cy, x, y]) => {
+                    let (c, p) = (self.pt(cx, cy), self.pt(x, y));
                     self.ensure_start(c);
                     self.path.quad_to(c.x, c.y, p.x, p.y);
                 }
-                "bezierCurveTo" => {
-                    let (c1, c2, p) = (self.pt(n(0), n(1)), self.pt(n(2), n(3)), self.pt(n(4), n(5)));
+                &Op::Bezier([c1x, c1y, c2x, c2y, x, y]) => {
+                    let (c1, c2, p) = (self.pt(c1x, c1y), self.pt(c2x, c2y), self.pt(x, y));
                     self.ensure_start(c1);
                     self.path.cubic_to(c1.x, c1.y, c2.x, c2.y, p.x, p.y);
                 }
-                "arc" => self.ellipse(n(0), n(1), n(2), n(2), 0.0, n(3), n(4), args.get(5).is_some_and(|a| a.num() != 0.0)),
-                "ellipse" => self.ellipse(n(0), n(1), n(2), n(3), n(4), n(5), n(6), args.get(7).is_some_and(|a| a.num() != 0.0)),
-                "rect" => self.rect(n(0), n(1), n(2), n(3)),
-                "roundRect" => {
-                    let r = args.get(4).map(Arg::num).unwrap_or(0.0).min(n(2).abs() / 2.0).min(n(3).abs() / 2.0);
-                    self.round_rect(n(0), n(1), n(2), n(3), r);
-                }
-                "fill" => {
-                    let rule = if args.first().map(Arg::str) == Some("evenodd") { FillRule::EvenOdd } else { FillRule::Winding };
+                &Op::Ellipse([x, y, rx, ry, rotation, start, end], ccw) => self.ellipse(x, y, rx, ry, rotation, start, end, ccw),
+                &Op::Rect([x, y, w, h]) => self.rect(x, y, w, h),
+                &Op::RoundRect([x, y, w, h], r) => self.round_rect(x, y, w, h, r.min(w.abs() / 2.0).min(h.abs() / 2.0)),
+                &Op::Fill(rule) => {
                     if let Some(path) = self.path.clone().finish() {
                         self.fill_path(&path, rule);
                     }
                 }
-                "stroke" => {
+                Op::Stroke => {
                     if let Some(path) = self.path.clone().finish() {
                         self.stroke_path(&path);
                     }
                 }
-                "clip" => {
+                Op::Clip => {
                     if let Some(path) = self.path.clone().finish() {
                         let mut mask = Mask::new(self.pixmap.width(), self.pixmap.height()).expect("mask");
                         mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
                         if let Some(old) = &self.state.clip {
                             // Intersect: keep where both are set.
-                            let data: Vec<u8> = old.data().iter().zip(mask.data()).map(|(a, b)| ((*a as u16 * *b as u16) / 255) as u8).collect();
-                            mask.data_mut().copy_from_slice(&data);
+                            for (m, o) in mask.data_mut().iter_mut().zip(old.data()) {
+                                *m = ((*m as u16 * *o as u16) / 255) as u8;
+                            }
                         }
                         self.state.clip = Some(mask);
                     }
                 }
-                "fillRect" | "strokeRect" | "clearRect" => {
+                Op::FillRect(r) | Op::StrokeRect(r) | Op::ClearRect(r) => {
+                    let [x, y, w, h] = *r;
                     let mut pb = PathBuilder::new();
-                    let corners = [(n(0), n(1)), (n(0) + n(2), n(1)), (n(0) + n(2), n(1) + n(3)), (n(0), n(1) + n(3))];
-                    for (i, (x, y)) in corners.into_iter().enumerate() {
+                    for (i, (x, y)) in [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].into_iter().enumerate() {
                         let p = self.pt(x, y);
                         if i == 0 { pb.move_to(p.x, p.y) } else { pb.line_to(p.x, p.y) }
                     }
                     pb.close();
                     let Some(path) = pb.finish() else { continue };
-                    match name.str() {
-                        "fillRect" => self.fill_path(&path, FillRule::Winding),
-                        "strokeRect" => self.stroke_path(&path),
+                    match op {
+                        Op::FillRect(_) => self.fill_path(&path, FillRule::Winding),
+                        Op::StrokeRect(_) => self.stroke_path(&path),
                         _ => {
-                            let mut paint = Paint::default();
-                            paint.blend_mode = BlendMode::Clear;
+                            let paint = Paint { blend_mode: BlendMode::Clear, ..Paint::default() };
                             self.pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), self.state.clip.as_ref());
                         }
                     }
                 }
-                "drawImage" | "drawCanvas" => {
-                    let source: Option<Arc<Pixmap>> = if name.str() == "drawCanvas" {
-                        others.get(&(n(0) as u64)).map(|p| Arc::new(p.clone()))
-                    } else {
-                        args.first().and_then(|a| images(a.str()))
+                Op::DrawImage(source, rest) => {
+                    let src: Option<Arc<Pixmap>> = match source {
+                        Source::Canvas(key) => others.get(key).map(|p| Arc::new(p.clone())),
+                        Source::Url(url) => images(url),
                     };
-                    let Some(src) = source else { continue };
+                    let Some(src) = src else { continue };
                     let (iw, ih) = (src.width() as f32, src.height() as f32);
-                    let rest: Vec<f32> = args[1..].iter().map(Arg::num).collect();
                     let (sx, sy, sw, sh, dx, dy, dw, dh) = match rest.len() {
                         2 => (0.0, 0.0, iw, ih, rest[0], rest[1], iw, ih),
                         4 => (0.0, 0.0, iw, ih, rest[0], rest[1], rest[2], rest[3]),
@@ -303,9 +317,42 @@ impl Canvas {
                     }
                     self.draw_image(&src, (sx, sy, sw, sh), (dx, dy, dw, dh));
                 }
-                _ => {}
+                Op::PutPixels { x, y, w, h, rgba } => {
+                    let Some(size) = tiny_skia::IntSize::from_wh(*w, *h) else { continue };
+                    let Some(mut src) = Pixmap::from_vec(rgba.clone(), size) else { continue };
+                    premultiply(src.data_mut());
+                    // Replaces what's there, ignoring transform, alpha and clip.
+                    let paint = tiny_skia::PixmapPaint { blend_mode: BlendMode::Source, ..Default::default() };
+                    self.pixmap.draw_pixmap(*x, *y, src.as_ref(), &paint, Transform::identity(), None);
+                }
             }
         }
+    }
+
+    /// `getImageData`: the pixels of a region, unpremultiplied RGBA (outside
+    /// the canvas: transparent).
+    pub fn image_data(&self, x: i32, y: i32, w: u32, h: u32) -> Vec<u8> {
+        let mut out = vec![0u8; w as usize * h as usize * 4];
+        let (cw, ch) = (self.pixmap.width() as i32, self.pixmap.height() as i32);
+        let data = self.pixmap.data();
+        for row in 0..h as i32 {
+            let sy = y + row;
+            if !(0..ch).contains(&sy) {
+                continue;
+            }
+            for col in 0..w as i32 {
+                let sx = x + col;
+                if !(0..cw).contains(&sx) {
+                    continue;
+                }
+                let s = ((sy * cw + sx) * 4) as usize;
+                let d = ((row * w as i32 + col) * 4) as usize;
+                let a = data[s + 3];
+                let un = |c: u8| if a == 0 { 0 } else { ((c as u16 * 255 + a as u16 / 2) / a as u16).min(255) as u8 };
+                out[d..d + 4].copy_from_slice(&[un(data[s]), un(data[s + 1]), un(data[s + 2]), a]);
+            }
+        }
+        out
     }
 
     fn pt(&self, x: f32, y: f32) -> Point {
@@ -484,37 +531,31 @@ fn css_color(text: &str) -> Option<Color> {
 /// A fillStyle/strokeStyle: a color string, or a gradient
 /// `["linear", x0, y0, x1, y1, [[offset, color]...]]` /
 /// `["radial", x0, y0, r0, x1, y1, r1, stops]`.
-fn parse_fill(arg: &Arg) -> Option<Fill> {
-    match arg {
-        Arg::S(s) => css_color(s).map(Fill::Color),
-        Arg::A(v) => {
-            let kind = v.first()?.str();
-            let n = |i: usize| v.get(i).map(Arg::num).unwrap_or(0.0);
-            let stops_at = |i: usize| -> Vec<(f32, Color)> {
-                match v.get(i) {
-                    Some(Arg::A(stops)) => stops
-                        .iter()
-                        .filter_map(|s| match s {
-                            Arg::A(pair) => Some((pair.first()?.num().clamp(0.0, 1.0), css_color(pair.get(1)?.str())?)),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            };
-            match kind {
-                "linear" => {
-                    let stops = stops_at(5);
-                    single_or(stops, |stops| Fill::Linear { from: Point::from_xy(n(1), n(2)), to: Point::from_xy(n(3), n(4)), stops })
-                }
-                "radial" => {
-                    let stops = stops_at(7);
-                    single_or(stops, |stops| Fill::Radial { from: Point::from_xy(n(1), n(2)), to: Point::from_xy(n(4), n(5)), radius: n(6).max(0.001), stops })
-                }
-                _ => None,
-            }
+/// A CSS color as a fill (`None`: not a color, and ignored).
+pub fn color_fill(text: &str) -> Option<Fill> {
+    css_color(text).map(Fill::Color)
+}
+
+/// A canvas gradient as a fill: `linear` (x0, y0, x1, y1) or `radial` (x0,
+/// y0, r0, x1, y1, r1), with its (offset, CSS color) stops.
+pub fn gradient_fill(radial: bool, at: &[f32], stops: &[(f32, String)]) -> Fill {
+    let n = |i: usize| at.get(i).copied().unwrap_or(0.0);
+    let stops: Vec<(f32, Color)> = stops.iter().filter_map(|(o, c)| Some((o.clamp(0.0, 1.0), css_color(c)?))).collect();
+    let fill = if radial {
+        single_or(stops, |stops| Fill::Radial { from: Point::from_xy(n(0), n(1)), to: Point::from_xy(n(3), n(4)), radius: n(5).max(0.001), stops })
+    } else {
+        single_or(stops, |stops| Fill::Linear { from: Point::from_xy(n(0), n(1)), to: Point::from_xy(n(2), n(3)), stops })
+    };
+    fill.unwrap_or(Fill::Color(Color::TRANSPARENT))
+}
+
+/// Unpremultiplied RGBA to premultiplied, in place.
+fn premultiply(data: &mut [u8]) {
+    for px in data.chunks_exact_mut(4) {
+        let a = px[3] as u16;
+        for c in &mut px[..3] {
+            *c = ((*c as u16 * a + 127) / 255) as u8;
         }
-        Arg::N(_) => None,
     }
 }
 
@@ -641,36 +682,42 @@ mod tests {
     #[test]
     fn draws_shapes() {
         let mut c = Canvas::new(20, 20).unwrap();
-        let s = |v: &str| Arg::S(v.into());
+        let red = || color_fill("red").unwrap();
         let ops = vec![
-            vec![s("fillStyle"), s("red")],
-            vec![s("fillRect"), Arg::N(0.0), Arg::N(0.0), Arg::N(10.0), Arg::N(10.0)],
-            vec![s("beginPath")],
-            vec![s("fillStyle"), s("#00f")],
-            vec![s("arc"), Arg::N(15.0), Arg::N(15.0), Arg::N(4.0), Arg::N(0.0), Arg::N(6.3)],
-            vec![s("fill")],
+            Op::FillStyle(red()),
+            Op::FillRect([0.0, 0.0, 10.0, 10.0]),
+            Op::BeginPath,
+            Op::FillStyle(color_fill("#00f").unwrap()),
+            Op::Ellipse([15.0, 15.0, 4.0, 4.0, 0.0, 0.0, 6.3], false),
+            Op::Fill(FillRule::Winding),
         ];
         c.apply(&ops, &HashMap::new(), &|_| None);
         let px = |x: u32, y: u32| c.pixmap().pixel(x, y).unwrap();
         assert_eq!((px(5, 5).red(), px(5, 5).blue(), px(5, 5).alpha()), (255, 0, 255));
         assert_eq!((px(15, 15).blue(), px(15, 15).red()), (255, 0));
         assert_eq!(px(19, 0).alpha(), 0);
+        assert_eq!(c.image_data(4, 4, 1, 1), vec![255, 0, 0, 255]);
         assert!(c.data_url().starts_with("data:image/png;base64,iVBOR"));
         assert_eq!(base64(b"Man"), "TWFu");
+        // putImageData replaces; Reset blanks.
+        c.apply(&[Op::PutPixels { x: 0, y: 0, w: 1, h: 1, rgba: vec![0, 255, 0, 128] }], &HashMap::new(), &|_| None);
+        assert_eq!(c.image_data(0, 0, 1, 1), vec![0, 255, 0, 128]);
+        c.apply(&[Op::Reset], &HashMap::new(), &|_| None);
+        assert_eq!(c.image_data(5, 5, 1, 1), vec![0, 0, 0, 0]);
         // drawImage, scaled into a clipped rounded rect.
         let mut src = Pixmap::new(2, 2).unwrap();
         src.fill(Color::from_rgba8(0, 255, 0, 255));
         let src = Arc::new(src);
         let mut d = Canvas::new(20, 20).unwrap();
         let ops = vec![
-            vec![s("save")],
-            vec![s("translate"), Arg::N(10.0), Arg::N(10.0)],
-            vec![s("scale"), Arg::N(2.0), Arg::N(2.0)],
-            vec![s("beginPath")],
-            vec![s("roundRect"), Arg::N(-4.0), Arg::N(-4.0), Arg::N(8.0), Arg::N(8.0), Arg::N(1.5)],
-            vec![s("clip")],
-            vec![s("drawImage"), s("x.png"), Arg::N(-4.0), Arg::N(-4.0), Arg::N(8.0), Arg::N(8.0)],
-            vec![s("restore")],
+            Op::Save,
+            Op::Transform([1.0, 0.0, 0.0, 1.0, 10.0, 10.0]),
+            Op::Transform([2.0, 0.0, 0.0, 2.0, 0.0, 0.0]),
+            Op::BeginPath,
+            Op::RoundRect([-4.0, -4.0, 8.0, 8.0], 1.5),
+            Op::Clip,
+            Op::DrawImage(Source::Url("x.png".into()), vec![-4.0, -4.0, 8.0, 8.0]),
+            Op::Restore,
         ];
         d.apply(&ops, &HashMap::new(), &|_| Some(src.clone()));
         let p = d.pixmap().pixel(10, 10).unwrap();

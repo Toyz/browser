@@ -1189,130 +1189,15 @@
       return copy;
     }
   }
-  // Canvas 2D: the context records operations; before each snapshot they're
-  // replayed natively (tiny-skia) and the canvas shows the result.
-  const dirtyCanvases = new Set();
-  function context2d(canvas) {
-    const ops = [];
-    const rec = (...op) => { ops.push(op); if (!dirtyCanvases.has(canvas)) { dirtyCanvases.add(canvas); N.canvasDirty(); } };
-    const props = {
-      fillStyle: "#000000", strokeStyle: "#000000", lineWidth: 1, lineCap: "butt", lineJoin: "miter", miterLimit: 10,
-      globalAlpha: 1, globalCompositeOperation: "source-over", lineDashOffset: 0,
-      font: "10px sans-serif", textAlign: "start", textBaseline: "alphabetic", direction: "ltr",
-      shadowBlur: 0, shadowColor: "rgba(0, 0, 0, 0)", shadowOffsetX: 0, shadowOffsetY: 0,
-      imageSmoothingEnabled: true, imageSmoothingQuality: "low", filter: "none",
-    };
-    const recorded = new Set(["fillStyle", "strokeStyle", "lineWidth", "lineCap", "lineJoin", "miterLimit", "globalAlpha", "globalCompositeOperation", "lineDashOffset"]);
-    const style = (v) => (v && v._gradient ? v._gradient : String(v));
-    let stack = [];
-    let matrix = [1, 0, 0, 1, 0, 0];
-    let dash = [];
-    const mul = (m, n) => [m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3], m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]];
-    const gradient = (g) => ({
-      _gradient: g,
-      addColorStop(offset, color) { g[g.length - 1].push([Number(offset), String(color)]); },
-    });
-    const ctx = {
-      canvas,
-      _ops: ops,
-      save() { stack.push([Object.assign({}, props), matrix.slice(), dash.slice()]); rec("save"); },
-      restore() { const s = stack.pop(); if (s) { Object.assign(props, s[0]); matrix = s[1]; dash = s[2]; } rec("restore"); },
-      scale(x, y) { matrix = mul(matrix, [x, 0, 0, y, 0, 0]); rec("scale", x, y); },
-      rotate(a) { const c = Math.cos(a), s = Math.sin(a); matrix = mul(matrix, [c, s, -s, c, 0, 0]); rec("rotate", a); },
-      translate(x, y) { matrix = mul(matrix, [1, 0, 0, 1, x, y]); rec("translate", x, y); },
-      transform(a, b, c, d, e, f) { matrix = mul(matrix, [a, b, c, d, e, f]); rec("transform", a, b, c, d, e, f); },
-      setTransform(a, b, c, d, e, f) {
-        if (a && typeof a === "object") ({ a, b, c, d, e, f } = a);
-        if (a === undefined) [a, b, c, d, e, f] = [1, 0, 0, 1, 0, 0];
-        matrix = [a, b, c, d, e, f];
-        rec("setTransform", a, b, c, d, e, f);
-      },
-      resetTransform() { this.setTransform(1, 0, 0, 1, 0, 0); },
-      getTransform() { const [a, b, c, d, e, f] = matrix; return { a, b, c, d, e, f, m11: a, m12: b, m21: c, m22: d, m41: e, m42: f, is2D: true, isIdentity: a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0 }; },
-      beginPath() { rec("beginPath"); }, closePath() { rec("closePath"); },
-      moveTo(x, y) { rec("moveTo", x, y); }, lineTo(x, y) { rec("lineTo", x, y); },
-      quadraticCurveTo(a, b, c, d) { rec("quadraticCurveTo", a, b, c, d); },
-      bezierCurveTo(a, b, c, d, e, f) { rec("bezierCurveTo", a, b, c, d, e, f); },
-      arc(x, y, r, a0, a1, ccw) { rec("arc", x, y, r, a0, a1, ccw ? 1 : 0); },
-      arcTo(x1, y1, x2, y2) { rec("lineTo", x1, y1); rec("lineTo", x2, y2); },
-      ellipse(x, y, rx, ry, rot, a0, a1, ccw) { rec("ellipse", x, y, rx, ry, rot, a0, a1, ccw ? 1 : 0); },
-      rect(x, y, w, h) { rec("rect", x, y, w, h); },
-      roundRect(x, y, w, h, r) { rec("roundRect", x, y, w, h, Array.isArray(r) ? r[0] || 0 : r || 0); },
-      fill(a, b) {
-        const rule = typeof a === "string" ? a : typeof b === "string" ? b : "nonzero";
-        if (a instanceof Path2D) { rec("beginPath"); for (const [op, args] of a._ops) rec(op, ...args); }
-        rec("fill", rule);
-      },
-      stroke(p) {
-        if (p instanceof Path2D) { rec("beginPath"); for (const [op, args] of p._ops) rec(op, ...args); }
-        rec("stroke");
-      },
-      clip(p) {
-        if (p instanceof Path2D) { rec("beginPath"); for (const [op, args] of p._ops) rec(op, ...args); }
-        rec("clip");
-      },
-      fillRect(x, y, w, h) { rec("fillRect", x, y, w, h); },
-      strokeRect(x, y, w, h) { rec("strokeRect", x, y, w, h); },
-      clearRect(x, y, w, h) { rec("clearRect", x, y, w, h); },
-      isPointInPath() { return false; }, isPointInStroke() { return false; },
-      setLineDash(d) { dash = Array.from(d || [], Number); rec("setLineDash", dash); },
-      getLineDash() { return dash.slice(); },
-      fillText() {}, strokeText() {},
-      measureText(text) {
-        const size = parseFloat(/(\d+(?:\.\d+)?)px/.exec(props.font)?.[1] || "10");
-        const width = String(text).length * size * 0.55;
-        return { width, actualBoundingBoxAscent: size * 0.8, actualBoundingBoxDescent: size * 0.2, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width, fontBoundingBoxAscent: size * 0.8, fontBoundingBoxDescent: size * 0.2 };
-      },
-      drawImage(img, ...args) {
-        if (!img) return;
-        if (img instanceof HTMLCanvasElement) return rec("drawCanvas", img.__id, ...args);
-        const src = img.currentSrc || (img.getAttribute && N.resolve(img.getAttribute("src") || "")) || img.src;
-        if (src) rec("drawImage", String(src), ...args);
-      },
-      createLinearGradient: (x0, y0, x1, y1) => gradient(["linear", x0, y0, x1, y1, []]),
-      createRadialGradient: (x0, y0, r0, x1, y1, r1) => gradient(["radial", x0, y0, r0, x1, y1, r1, []]),
-      createConicGradient: (a, x, y) => gradient(["radial", x, y, 0, x, y, 1, []]),
-      createPattern: () => null,
-      createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
-      getImageData: (x, y, w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) }),
-      putImageData() {},
-      getContextAttributes: () => ({ alpha: true, desynchronized: false, colorSpace: "srgb", willReadFrequently: false }),
-    };
-    for (const name of Object.keys(props)) {
-      Object.defineProperty(ctx, name, {
-        enumerable: true,
-        get() { return props[name]; },
-        set(v) {
-          props[name] = v;
-          if (recorded.has(name)) rec(name, name === "fillStyle" || name === "strokeStyle" ? style(v) : v);
-        },
-      });
-    }
-    return ctx;
-  }
-  // [[canvas id, width, height, ops], ...] for canvases drawn on since the
-  // last snapshot.
-  function flushCanvases() {
-    const out = [];
-    for (const c of dirtyCanvases) {
-      const ctx = c._ctx;
-      if (!ctx) continue;
-      out.push([c.__id, c.width, c.height, ctx._ops.splice(0)]);
-    }
-    dirtyCanvases.clear();
-    return out;
-  }
+  // Canvas 2D: CanvasRenderingContext2D is native (context2d.rs).
   class HTMLCanvasElement extends HTMLElement {
-    getContext(kind) {
-      if (kind !== "2d") return null;
-      return this._ctx || (this._ctx = context2d(this));
-    }
+    getContext(kind) { return kind === "2d" ? N.context2d(this) : null; }
     get width() { const a = this.getAttribute("width"); return a === null ? 300 : Number(a) || 0; }
     // Setting the size clears the canvas (and its context's state).
-    set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
+    set width(v) { this.setAttribute("width", String(Math.floor(Number(v)) || 0)); N.canvasReset(this); }
     get height() { const a = this.getAttribute("height"); return a === null ? 150 : Number(a) || 0; }
-    set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); if (this._ctx) { this._ctx._ops.length = 0; this._ctx.setTransform(1, 0, 0, 1, 0, 0); } }
-    toDataURL() { return N.canvasDataURL(this.__id, flushCanvases()); }
+    set height(v) { this.setAttribute("height", String(Math.floor(Number(v)) || 0)); N.canvasReset(this); }
+    toDataURL() { return N.canvasDataURL(this); }
     toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
   // <video>/<audio>: the whole API, in the state of a media element
@@ -2767,15 +2652,6 @@
     serializeToString(n) { return n.nodeType === 9 ? n.documentElement.outerHTML : n.nodeType === 3 ? n.data : n.outerHTML || ""; }
   }
 
-  // Path2D: recorded, replayed by fill(path) / stroke(path) / clip(path).
-  class Path2D {
-    constructor(other) { this._ops = other instanceof Path2D ? other._ops.slice() : []; }
-    addPath(p) { if (p instanceof Path2D) this._ops.push(...p._ops); }
-  }
-  for (const name of ["moveTo", "lineTo", "closePath", "quadraticCurveTo", "bezierCurveTo", "arc", "arcTo", "ellipse", "rect", "roundRect"]) {
-    Path2D.prototype[name] = function (...a) { this._ops.push([name, a]); };
-  }
-
   const cssEscapeImpl = (v) => String(v).replace(/[\0-\x1f\x7f]|^-?\d|^-$|[^\w-]/g, (c, i) => (/[\0-\x1f\x7f]|\d/.test(c) && (i === 0 || /^-/.test(String(v))) ? "\\" + c.charCodeAt(0).toString(16) + " " : "\\" + c));
   const CSSApi = {
     supports(prop, value) { return value === undefined ? N.cssSupports(String(prop)) : N.cssSupports(String(prop), String(value)); },
@@ -2877,7 +2753,7 @@
 
   Object.assign(window, {
     DOMRect, DOMRectReadOnly, DOMPoint, DOMPointReadOnly: DOMPoint, DOMMatrix, DOMMatrixReadOnly: DOMMatrix,
-    Range, StaticRange, Selection, XMLSerializer, Path2D, CSS: CSSApi, CSSStyleDeclaration,
+    Range, StaticRange, Selection, XMLSerializer, CSS: CSSApi, CSSStyleDeclaration,
     structuredClone: (v) => structuredCloneImpl(v), BroadcastChannel, FileReader, MediaQueryList, NamedNodeMap, FontFace,
     Audio: function Audio(src) { const a = document.createElement("audio"); if (src !== undefined) a.setAttribute("src", src); return a; },
     Option: function Option(text, value, defaultSelected, selected) {
@@ -3000,7 +2876,6 @@
       if (pointer) { fire(pointer, MouseEvent); }
       fire(kind, MouseEvent);
     },
-    __flushCanvases: flushCanvases,
     __traverse: N.historyTraverse,
     __dispatchClick(id) {
       const n = wrap(id);

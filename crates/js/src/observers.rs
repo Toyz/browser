@@ -14,15 +14,9 @@ use boa_engine::{Context, JsData, JsError, JsNativeError, JsObject, JsResult, Js
 use boa_gc::{Finalize, GcRefCell, Trace};
 use page::NodeId;
 
-use super::Shared;
+use super::page;
 use super::geometry::{dom_rect, measure, painted_rect, this_node};
 
-/// The page's DOM, for the classes' methods (they capture nothing).
-struct Page(Shared);
-
-fn page(cx: &Context) -> Shared {
-    cx.get_data::<Page>().expect("observers installed").0.clone()
-}
 
 /// Observers with targets, which each layout is checked against.
 #[derive(Trace, Finalize, JsData, Default)]
@@ -516,8 +510,7 @@ pub(crate) fn deliver(cx: &mut Context) {
 }
 
 /// Register the observer classes (globals), with the page they observe.
-pub(crate) fn install(dom: &Shared, cx: &mut Context) {
-    cx.insert_data(Page(dom.clone()));
+pub(crate) fn install(cx: &mut Context) {
     let list = JsObject::from_proto_and_data(None, Live::default());
     cx.insert_data(LiveList(list));
     for result in [

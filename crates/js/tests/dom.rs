@@ -759,6 +759,39 @@ fn observers_are_native_classes() {
 }
 
 #[test]
+fn canvas_context_is_native_with_state_and_pixels() {
+    let doc = html::parse_scripted(
+        r##"<body><canvas id="c" width="10" height="10"></canvas><p id="o"></p><script>
+        const c = document.getElementById("c"), ctx = c.getContext("2d");
+        const out = [ctx instanceof CanvasRenderingContext2D, c.getContext("2d") === ctx, ctx.canvas === c, ctx.fillStyle, ctx.lineWidth];
+        ctx.lineWidth = -3; ctx.globalAlpha = 2; ctx.fillStyle = "nonsense"; ctx.lineCap = "round";
+        out.push(ctx.lineWidth, ctx.globalAlpha, ctx.fillStyle, ctx.lineCap);
+        ctx.save(); ctx.fillStyle = "red"; ctx.translate(2, 3); out.push(ctx.getTransform().e); ctx.restore();
+        out.push(ctx.fillStyle, ctx.getTransform().isIdentity);
+        ctx.fillStyle = "#00ff00"; ctx.fillRect(0, 0, 5, 5);
+        const p = new Path2D(); p.rect(5, 5, 5, 5); ctx.fillStyle = "blue"; ctx.fill(p);
+        const px = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data).join(",");
+        out.push(px(1, 1), px(7, 7), px(7, 1));
+        const img = ctx.createImageData(1, 1); img.data.set([255, 0, 0, 255]); ctx.putImageData(img, 7, 1);
+        out.push(px(7, 1));
+        const g = ctx.createLinearGradient(0, 0, 10, 0); g.addColorStop(0, "red"); g.addColorStop(1, "blue"); ctx.fillStyle = g;
+        out.push(ctx.fillStyle === g, g instanceof CanvasGradient);
+        c.width = 10; out.push(px(1, 1), ctx.fillStyle);
+        ctx.setLineDash([2, 3]); out.push(ctx.getLineDash().join("+"), c.toDataURL().slice(0, 15));
+        document.getElementById("o").textContent = out.join(" ");
+        </script></body>"##,
+        Url::parse("https://example.com/").unwrap(),
+        true,
+    );
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0 };
+    let (doc, _host) = js::start(doc, opts);
+    assert_eq!(
+        text_of(&doc, "o"),
+        "true true true #000000 1 1 1 #000000 round 2 #000000 true 0,255,0,255 0,0,255,255 0,0,0,0 255,0,0,255 true true 0,0,0,0 #000000 2+3 data:image/png;"
+    );
+}
+
+#[test]
 fn mouse_events_reach_scripts() {
     let doc = html::parse_scripted(
         r##"<body><canvas id="c"></canvas><p id="o"></p><script>
