@@ -2454,6 +2454,15 @@ impl Builder<'_> {
         for &child in doc.children(id) {
             let element = match &doc.node(child).data {
                 NodeData::Text(text) => {
+                    // In a flex or grid container, text that's only white
+                    // space isn't an item at all, whatever `white-space`
+                    // says (YouTube's `white-space: pre` view count turned
+                    // its markup's line breaks into a 100px-tall line).
+                    let items = blockify
+                        || matches!(parent_style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid);
+                    if items && text.chars().all(char::is_whitespace) {
+                        continue;
+                    }
                     c.inline.push_text(text, parent_style, link);
                     continue;
                 }
