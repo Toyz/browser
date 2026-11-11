@@ -392,6 +392,7 @@ impl Runtime {
         crate::abort::link(&mut cx);
         crate::worker::link(&mut cx);
         crate::media_source::link(&mut cx);
+        crate::forms::link(&mut cx);
         crate::media_element::link(canvas_out.clone(), updates.clone(), &mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;

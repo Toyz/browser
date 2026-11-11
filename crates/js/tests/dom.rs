@@ -1938,3 +1938,14 @@ fn media_source_plays_appended_segments() {
     let doc = run(&html);
     assert_eq!(text_of(&doc, "o"), "true false closed open 1:2.1 1:2.0 playing 4 320 2.02 1");
 }
+
+#[test]
+fn form_elements_is_a_controls_collection() {
+    let doc = run(r##"<body><form id="f"><input name="solution"><select id="pick"></select><div><textarea name="t"></textarea></div></form><input form="f" name="outside"><p id="o"></p><script>
+        const f = document.forms[0];
+        const els = f.elements;
+        els.namedItem("solution").value = "42";
+        document.getElementById("o").textContent = [els.length, els[0].name, els.pick.tagName, els.item(2).name, els.outside.name, els.namedItem("nope"), document.querySelector("input").value].join(" ");
+    </script></body>"##);
+    assert_eq!(text_of(&doc, "o"), "4 solution SELECT t outside  42");
+}

@@ -1166,7 +1166,7 @@
   }
   reflect(HTMLButtonElement, [["type", "type"], ["name", "name"], ["value", "value"], ["disabled", "disabled", "bool"]]);
   class HTMLFormElement extends HTMLElement {
-    get elements() { return this.querySelectorAll("input, select, textarea, button"); }
+    // `elements`: native (forms.rs).
     submit() { N.submitForm(this.__id); }
     requestSubmit() { if (this.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))) this.submit(); }
     reset() {}
@@ -2406,6 +2406,7 @@
     __fireDocument(type) { document.dispatchEvent(new Event(type, { bubbles: true })); },
     __fireWindow(type) { window.dispatchEvent(new Event(type)); },
     __fireNode(id, type) { const n = wrap(id); if (n) n.dispatchEvent(new Event(type)); },
+    __wrapNode: wrap,
     __fireTimer: N.fireTimer,
     __imageEvent: imageEvent,
     __layout: layout,

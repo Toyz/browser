@@ -271,12 +271,23 @@ impl<'a> ElementRef<'a> {
             let host = self.doc.tree_of(slot)?;
             self.doc.shadow.as_ref()?.light.get(&host).map(Vec::as_slice)
         });
-        let siblings = light.unwrap_or_else(|| {
+        let own = || {
             let parent = self.doc.parent(self.id).expect("sibling query on a detached node");
             self.doc.children(parent)
-        });
-        let ix = siblings.iter().position(|&c| c == self.id).unwrap_or(0);
-        (siblings, ix)
+        };
+        // (Slotted on through a second shadow tree, its slot's host's list
+        // may not have it: then its own parent's children. Taken as first
+        // of a list it isn't in, its "next siblings" held the slot it's in,
+        // and `:has()` walked round into it again until the stack ran out:
+        // Reddit crashed.)
+        let (siblings, ix) = match light.and_then(|l| Some((l, l.iter().position(|&c| c == self.id)?))) {
+            Some(found) => found,
+            None => {
+                let siblings = own();
+                (siblings, siblings.iter().position(|&c| c == self.id).unwrap_or(siblings.len()))
+            }
+        };
+        (siblings, ix.min(siblings.len().saturating_sub(1)))
     }
 }
 

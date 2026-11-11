@@ -36,6 +36,7 @@ mod streams;
 mod wasm;
 mod media_element;
 mod media_source;
+mod forms;
 mod response;
 mod worker_net;
 pub mod worker;
