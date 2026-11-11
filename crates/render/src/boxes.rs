@@ -752,6 +752,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         in_shrink: false,
         sticky: Vec::new(),
         percent_base: Some(styler.env().height),
+        definite: None,
         viewport_sized: false,
         keep_inline: false,
     };
@@ -837,6 +838,9 @@ struct Builder<'a> {
     /// that's known here: the viewport, for the root, and down a chain of
     /// `height: 100%` boxes (`html, body, #root { height: 100% }`).
     percent_base: Option<f32>,
+    /// The content height of the box whose children are being built, px,
+    /// when it's definite (a px height, or a percentage of a definite one).
+    definite: Option<f32>,
     /// The `html`/`body` box being built had `height: 100%`, dropped (the
     /// page list is the viewport): its children's percentages are still
     /// of the viewport.
@@ -1167,6 +1171,32 @@ impl Builder<'_> {
         if !children.iter().any(is_float) {
             return children;
         }
+        // Floats are grouped into rows of their own below, whose height is
+        // their content's: a float's percentage height is of this box,
+        // resolved here while that's known (YouTube's progress bar: chapter
+        // segments, `float: left; height: 100%`, in a 6px bar).
+        let parent_height = match parent.height {
+            Length::Px(h) if parent.border_box => Some((h - parent.vertical_edges()).max(0.0)),
+            Length::Px(h) => Some(h),
+            _ => self.definite,
+        };
+        let children: Vec<LayoutBox> = match parent_height {
+            Some(h) => children
+                .into_iter()
+                .map(|c| match c {
+                    LayoutBox::Block(mut b) if b.style.float != Float::None && matches!(b.style.height, Length::Percent(_)) => {
+                        if let Length::Percent(p) = b.style.height {
+                            let mut st = (*b.style).clone();
+                            st.height = Length::Px(h * p / 100.0);
+                            b.style = Arc::new(st);
+                        }
+                        LayoutBox::Block(b)
+                    }
+                    other => other,
+                })
+                .collect(),
+            None => children,
+        };
         let mut out = Vec::with_capacity(children.len());
         let mut iter: std::collections::VecDeque<LayoutBox> = children.into();
         while let Some(child) = iter.pop_front() {
@@ -1963,6 +1993,13 @@ impl Builder<'_> {
         generated: Generated,
     ) -> Block {
         let base = self.percent_base.take();
+        let outer_definite = self.definite;
+        let content = |h: f32| if style.border_box { (h - style.vertical_edges()).max(0.0) } else { h };
+        self.definite = match style.height {
+            Length::Px(h) => Some(content(h)),
+            Length::Percent(p) => outer_definite.map(|d| content(d * p / 100.0)),
+            _ => None,
+        };
         let mut style = style;
         // `calc(100% - 32px)` widths, against our guess at the containing
         // block (the layout only takes one or the other: alone, the
@@ -2005,6 +2042,7 @@ impl Builder<'_> {
         self.percent_base = chain;
         let block = self.build_block_sized(id, style, kind, link, generated);
         self.percent_base = base;
+        self.definite = outer_definite;
         block
     }
 

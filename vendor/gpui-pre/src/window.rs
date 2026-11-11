@@ -1240,9 +1240,9 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) element_opacity: f32,
-    /// Feather: what painting maps every point through (`p * scale +
+    /// Feather: what painting maps every point through (`p * (sx, sy) +
     /// offset`), for CSS `transform: scale()` (see [`Window::with_paint_scale`]).
-    paint_scale: (f32, Point<Pixels>),
+    paint_scale: ((f32, f32), Point<Pixels>),
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2371,7 +2371,7 @@ impl Window {
             element_offset_stack: Vec::new(),
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
-            paint_scale: (1.0, Point::default()),
+            paint_scale: ((1.0, 1.0), Point::default()),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input: None,
@@ -4543,43 +4543,58 @@ impl Window {
     /// `transform: scale()`), on top of any scale already in effect. Only
     /// drawing changes: layout and hit testing stay where they were.
     pub fn with_paint_scale<R>(&mut self, pivot: Point<Pixels>, scale: f32, f: impl FnOnce(&mut Self) -> R) -> R {
-        if scale == 1.0 || !scale.is_finite() {
+        self.with_paint_scale_xy(pivot, (scale, scale), f)
+    }
+
+    /// Feather: paint what `f` paints scaled by `(sx, sy)` about `pivot`
+    /// (CSS `scaleX()` / `scaleY()`; lengths such as radii, border widths
+    /// and font sizes scale by the smaller factor).
+    pub fn with_paint_scale_xy<R>(&mut self, pivot: Point<Pixels>, scale: (f32, f32), f: impl FnOnce(&mut Self) -> R) -> R {
+        let (x, y) = scale;
+        if (x == 1.0 && y == 1.0) || !x.is_finite() || !y.is_finite() {
             return f(self);
         }
         let outer = self.paint_scale;
         // outer(pivot + (p - pivot) * scale)
-        let (s, t) = outer;
-        let offset = point(pivot.x * (1.0 - scale) * s, pivot.y * (1.0 - scale) * s) + t;
-        self.paint_scale = (s * scale, offset);
+        let ((sx, sy), t) = outer;
+        let offset = point(pivot.x * (1.0 - x) * sx, pivot.y * (1.0 - y) * sy) + t;
+        self.paint_scale = ((sx * x, sy * y), offset);
         let result = f(self);
         self.paint_scale = outer;
         result
     }
 
+    /// Feather: whether painting is scaled now.
+    #[inline]
+    fn paint_scaled(&self) -> bool {
+        self.paint_scale.0 != (1.0, 1.0) || !self.paint_scale.1.is_zero()
+    }
+
     /// Feather: `p` where the current paint scale puts it.
     #[inline]
     fn scaled_point(&self, p: Point<Pixels>) -> Point<Pixels> {
-        let (s, t) = self.paint_scale;
-        if s == 1.0 && t.is_zero() {
+        if !self.paint_scaled() {
             return p;
         }
-        point(p.x * s, p.y * s) + t
+        let ((sx, sy), t) = self.paint_scale;
+        point(p.x * sx, p.y * sy) + t
     }
 
     /// Feather: `b` where the current paint scale puts it.
     #[inline]
     fn scaled_bounds(&self, b: Bounds<Pixels>) -> Bounds<Pixels> {
-        let s = self.paint_scale.0;
-        if s == 1.0 && self.paint_scale.1.is_zero() {
+        if !self.paint_scaled() {
             return b;
         }
-        Bounds { origin: self.scaled_point(b.origin), size: size(b.size.width * s, b.size.height * s) }
+        let (sx, sy) = self.paint_scale.0;
+        Bounds { origin: self.scaled_point(b.origin), size: size(b.size.width * sx, b.size.height * sy) }
     }
 
     /// Feather: a length as the current paint scale draws it.
     #[inline]
     fn scaled_len(&self, l: Pixels) -> Pixels {
-        l * self.paint_scale.0
+        let (sx, sy) = self.paint_scale.0;
+        l * sx.min(sy)
     }
 
     /// Obtain the current element opacity. This method should only be called during the
@@ -4982,7 +4997,7 @@ impl Window {
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
     pub fn paint_quad(&mut self, mut quad: PaintQuad) {
         self.invalidator.debug_assert_paint();
-        if self.paint_scale.0 != 1.0 || !self.paint_scale.1.is_zero() {
+        if self.paint_scaled() {
             quad.bounds = self.scaled_bounds(quad.bounds);
             quad.corner_radii = quad.corner_radii.map(|r| self.scaled_len(*r));
             quad.border_widths = quad.border_widths.map(|w| self.scaled_len(*w));

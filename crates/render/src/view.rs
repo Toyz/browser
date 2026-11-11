@@ -1078,8 +1078,8 @@ fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>
     // `transform: scale()`: everything in it drawn bigger or smaller about
     // its center (an empty decorated box is drawn scaled already, as SVG).
     match block.style.scale {
-        (x, y) if x == y && x != 1.0 && !block.children.is_empty() => {
-            Scaled { child: el, scale: x, origin: block.style.transform_origin }.into_any_element()
+        (x, y) if (x, y) != (1.0, 1.0) && transform::box_shape_size(block).is_none() => {
+            Scaled { child: el, scale: (x, y), origin: block.style.transform_origin }.into_any_element()
         }
         _ => el,
     }
@@ -1089,7 +1089,7 @@ fn render_block_unclipped(block: &Block, cx: &RenderCx, margin: Edges<CssLength>
 /// out, and takes the pointer, at its own size.
 struct Scaled {
     child: AnyElement,
-    scale: f32,
+    scale: (f32, f32),
     /// `transform-origin`, of the box.
     origin: (CssLength, CssLength),
 }
@@ -1153,7 +1153,7 @@ impl Element for Scaled {
         };
         let pivot = bounds.origin + point(at(self.origin.0, bounds.size.width), at(self.origin.1, bounds.size.height));
         let child = &mut self.child;
-        window.with_paint_scale(pivot, self.scale, |window| child.paint(window, cx));
+        window.with_paint_scale_xy(pivot, self.scale, |window| child.paint(window, cx));
     }
 }
 
@@ -2126,10 +2126,8 @@ pub(crate) mod transform {
         Some(svg().data(&mono.markup).size_full().text_color(color).with_transformation(xf.gpui()).into_any_element())
     }
 
-    /// An empty box with a background or border and a transform: its style
-    /// without the decoration (so the box keeps its size and place), and the
-    /// decoration as transformed SVG layers covering its border box.
-    pub(crate) fn box_shape(block: &Block, cx: &RenderCx) -> Option<(ComputedStyle, AnyElement)> {
+    /// The border box size `box_shape` draws `block` at, when it does.
+    pub(crate) fn box_shape_size(block: &Block) -> Option<(f32, f32)> {
         let s = &*block.style;
         if !block.children.is_empty() || !matches!(block.kind, BlockKind::Normal) {
             return None;
@@ -2161,6 +2159,19 @@ pub(crate) mod transform {
         if w <= 0.0 || h <= 0.0 {
             return None;
         }
+        Some((w, h))
+    }
+
+    /// An empty box with a background or border and a transform: its style
+    /// without the decoration (so the box keeps its size and place), and the
+    /// decoration as transformed SVG layers covering its border box.
+    pub(crate) fn box_shape(block: &Block, cx: &RenderCx) -> Option<(ComputedStyle, AnyElement)> {
+        let (w, h) = box_shape_size(block)?;
+        let s = &*block.style;
+        let xf = Xf::of_box(s);
+        let bw = s.border_width;
+        let has_border = Side::ALL.iter().any(|&side| bw.get(side) > 0.0);
+        let fill = s.background.or(s.background_image);
         let radii: [(f32, f32); 4] = std::array::from_fn(|i| match s.border_radius[i] {
             CssLength::Px(r) => (r, r),
             CssLength::Percent(p) => (w * p / 100.0, h * p / 100.0),

@@ -117,7 +117,16 @@ Drop these when Boa releases include equivalent fixes.
   underlines) and every content mask pushed inside it is mapped about a
   pivot; glyphs are rasterized at the scaled size. Layout and hit testing
   are unchanged. It's CSS `transform: scale()`: GPUI could transform only
-  monochrome SVGs.
+  monochrome SVGs. `with_paint_scale_xy` scales x and y apart (`scaleX()`,
+  YouTube's progress bar); lengths (radii, borders, font sizes) take the
+  smaller factor.
+- `src/window.rs`: deferred draws prepaint under the content mask they were
+  deferred with (paint already did): a positioned box inside a positioned
+  box was deferred while its parent prepainted with no mask, escaping its
+  ancestors' `overflow: hidden` (YouTube's volume slider over the time).
+- `src/style.rs`: `AlignContent::SafeCenter` (taffy's `SAFE_CENTER`): CSS
+  `safe center`, centered unless it overflows, then at the start (how
+  buttons center their content).
 - `src/elements/list.rs`: `ListState::item_extent` (where an item starts
   and how tall it is, measured or estimated) and `offset_for_y` (the item
   and offset at a pixel position), so scripts can be told where off-screen
