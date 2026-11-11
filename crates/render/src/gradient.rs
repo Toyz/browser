@@ -187,7 +187,13 @@ impl GradientFill {
 
         // A pattern repeats: rasterize enough periods that a few hundred
         // pixels are covered per image, so big boxes take few sprites.
-        let (rx, ry) = (self.repeat.x && tile.0 < bw, self.repeat.y && tile.1 < bh);
+        // (A tile bigger than the box still repeats when it's moved off the
+        // box's start: what it uncovers is the next tile.)
+        let shifted = |pos: f32, frac: f32, free: f32| (free * frac + pos).abs() >= 0.5;
+        let (rx, ry) = (
+            self.repeat.x && (tile.0 < bw || shifted(self.position.dx, self.position.x, bw - tile.0)),
+            self.repeat.y && (tile.1 < bh || shifted(self.position.dy, self.position.y, bh - tile.1)),
+        );
         let reps = |on: bool, t: f32| if on { (256.0 / t).ceil().clamp(1.0, 64.0) as u32 } else { 1 };
         let (nx, ny) = (reps(rx, tile.0), reps(ry, tile.1));
         let scale = window.scale_factor();
@@ -197,8 +203,10 @@ impl GradientFill {
         // Where the first tile goes: `background-position` aligns the tile
         // in the free space (and the repeats extend both ways from there).
         let free = (bw - tile.0, bh - tile.1);
-        let x0 = free.0 * self.position.x;
-        let y0 = free.1 * self.position.y;
+        // (Plus its px offsets: a loading shimmer slides a gradient across by
+        // animating them, and stood still without.)
+        let x0 = free.0 * self.position.x + self.position.dx;
+        let y0 = free.1 * self.position.y + self.position.dy;
         let start = |offset: f32, step: f32, repeat: bool| if repeat { offset - (offset / step).ceil() * step } else { offset };
         let (sx, sy) = (start(x0, f32::from(block.width), rx), start(y0, f32::from(block.height), ry));
         // Rounded corners: GPUI rounds each picture's visible part, not the
@@ -215,7 +223,10 @@ impl GradientFill {
         // ...and only where the box has straight sides between its corners:
         // in a circle (an avatar's loading shimmer) every edge is curve.
         let straight_sides = largest * 2.0 < bounds.size.width.min(bounds.size.height) - px(1.);
-        if rounded && !at_box && !((rx || ry) && tiles_cover && straight_sides) {
+        // A tile bigger than the box, moved across it (a shimmer): one
+        // picture too, else the seam between two tiles shows as a line.
+        let big_shifted = !at_box && (rx || ry) && (f32::from(block.width) > bw || f32::from(block.height) > bh);
+        if big_shifted || (rounded && !at_box && !((rx || ry) && tiles_cover && straight_sides)) {
             let hard = g.repeating || g.stops.windows(2).any(|w| matches!((w[0].pos, w[1].pos), (Some(a), Some(b)) if a == b));
             if let Some(layer) = composed(&image, (sx, sy), (f32::from(block.width), f32::from(block.height)), (rx, ry), (bw, bh), scale, hard, window) {
                 window.paint_image(bounds, bounds, radii, layer, 0, false).ok();
