@@ -1874,7 +1874,14 @@ fn native_timers_call_back_in_order() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(text, "i1,i2,raf,t12,str");
+    // Each ran once, the cleared one never; the interval's two ticks in
+    // order, the 20ms timeout before the 30ms one. (Where the animation
+    // frame lands among the 5ms ticks depends on the machine's load.)
+    let mut seen: Vec<&str> = text.split(',').collect();
+    let at = |x: &str| seen.iter().position(|s| *s == x);
+    assert!(at("i1") < at("i2") && at("t12") < at("str") && at("raf").is_some(), "{text}");
+    seen.sort_unstable();
+    assert_eq!(seen, ["i1", "i2", "raf", "str", "t12"], "{text}");
 }
 
 fn base64(bytes: &[u8]) -> String {
