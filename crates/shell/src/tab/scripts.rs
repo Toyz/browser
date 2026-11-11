@@ -190,11 +190,18 @@ impl Tab {
 
     /// A key pressed (or let go) in the page: its scripts hear it, at the
     /// focused field if there is one.
-    pub(super) fn script_key(&mut self, kind: &'static str, keystroke: &Keystroke) {
+    pub(super) fn script_key(&mut self, kind: &'static str, keystroke: &Keystroke, window: &Window, cx: &App) {
         let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
         let (key, code) = dom_key(keystroke);
         let m = &keystroke.modifiers;
-        host.send(js::ToJs::Key { kind, key, code, target: self.forms.focused, modifiers: [m.control, m.shift, m.alt, m.platform] });
+        let target = self.focused_field(window, cx);
+        // What was typed before this key, first (keys typed faster than the
+        // field reports its changes: Enter ran a lookup on the text before
+        // its last letter).
+        if let Some(node) = target {
+            self.tell_value(node, cx);
+        }
+        host.send(js::ToJs::Key { kind, key, code, target, modifiers: [m.control, m.shift, m.alt, m.platform] });
     }
 
     /// A mouse event in the page: scripts listening under the pointer get

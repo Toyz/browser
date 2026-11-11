@@ -47,6 +47,8 @@ pub struct Forms {
     open_select: Option<NodeId>,
     /// The text field with keyboard focus (`:focus`).
     pub focused: Option<NodeId>,
+    /// Each field's value as scripts last heard it.
+    told: HashMap<NodeId, String>,
     /// A text field got this mouse-down (set by the field, read by the
     /// page's handler right after).
     pub clicked_field: Option<NodeId>,
@@ -314,13 +316,7 @@ impl Tab {
                 }
             }
             // Scripts read field values (and hear `input`).
-            InputEvent::Change => {
-                if let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref())
-                    && let Some(field) = self.forms.fields.get(&node)
-                {
-                    host.send(js::ToJs::Input { node, value: field.value(cx) });
-                }
-            }
+            InputEvent::Change => self.tell_value(node, cx),
             InputEvent::Focus => {
                 if self.forms.focused != Some(node) {
                     self.forms.focused = Some(node);
@@ -334,6 +330,29 @@ impl Tab {
                 self.interaction_changed(window, cx);
             }
             _ => {}
+        }
+    }
+
+    /// The element keys go to: the field with the keyboard focus (asked of
+    /// the field itself: its focus event can come after the first keys, and
+    /// a page's Enter handler on the field never ran), else what scripts or
+    /// the tab focused last.
+    pub(super) fn focused_field(&self, window: &Window, cx: &App) -> Option<NodeId> {
+        let focused = |f: &Field| match f {
+            Field::Line(s) => gpui::Focusable::focus_handle(s.read(cx), cx).is_focused(window),
+            Field::Area(s) => gpui::Focusable::focus_handle(s.read(cx), cx).is_focused(window),
+        };
+        self.forms.fields.iter().find(|(_, f)| focused(f)).map(|(n, _)| *n).or(self.forms.focused)
+    }
+
+    /// Scripts hear a field's value, if it changed since they last did
+    /// (and an `input` event).
+    pub(super) fn tell_value(&mut self, node: NodeId, cx: &App) {
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
+        let Some(value) = self.forms.fields.get(&node).map(|f| f.value(cx)) else { return };
+        if self.forms.told.get(&node) != Some(&value) {
+            self.forms.told.insert(node, value.clone());
+            host.send(js::ToJs::Input { node, value });
         }
     }
 

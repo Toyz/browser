@@ -2832,8 +2832,8 @@ impl Tab {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, _| {
                 this.script_mouse("mousemove", event.position, 0, (0.0, 0.0));
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, _| this.script_key("keydown", &event.keystroke)))
-            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, _| this.script_key("keyup", &event.keystroke)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| this.script_key("keydown", &event.keystroke, window, cx)))
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, window, cx| this.script_key("keyup", &event.keystroke, window, cx)))
             .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
                 // The reader scrolling takes over from a script's smooth scroll.
                 this.scroll_animation = None;
