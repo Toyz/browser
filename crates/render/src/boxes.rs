@@ -4360,8 +4360,12 @@ impl Flattener {
         if !absolutes.is_empty() || kept {
             if first_row == self.tree.rows.len() {
                 // No in-flow content: an empty row to hang them on (or for a
-                // measured box to be drawn at all).
+                // measured box to be drawn at all), no taller than nothing
+                // (as a line, GitHub's three empty React roots pushed its
+                // header 63px down).
                 let edges = self.edges();
+                let mut empty = (*s).clone();
+                empty.line_height = style::LineHeight::Px(0.0);
                 self.tree.rows.push(Row {
                     edges,
                     wrappers: self.wrappers.clone(),
@@ -4370,7 +4374,7 @@ impl Flattener {
                     indent_right: inner_right,
                     content: LayoutBox::Paragraph(Arc::new(Paragraph {
                         id: usize::MAX - first_row,
-                        style: s.clone(),
+                        style: Arc::new(empty),
                         text: SharedString::default(),
                         spans: Vec::new(),
                         links: Arc::from([]),
