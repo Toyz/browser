@@ -2768,6 +2768,23 @@ impl Builder<'_> {
                             block.children.push(LayoutBox::Image(image));
                         }
                     }
+                    // No insets: it sits where it would be in the flow (its
+                    // static position), not at its containing block's
+                    // corner. Anchored there: a box in the flow, no taller
+                    // than nothing, it's placed in (Google's sign-in footer,
+                    // below its card, was drawn at the card's top).
+                    let inset = block.style.inset;
+                    if [inset.top, inset.right, inset.bottom, inset.left].iter().all(|l| l.is_auto()) && c.inline.is_empty() {
+                        let mut st = ComputedStyle::initial();
+                        st.display = Display::Block;
+                        st.position = style::Position::Relative;
+                        st.height = Length::Px(0.0);
+                        st.border_width = style::Edges::all(0.0);
+                        st.background = None;
+                        let anchor = self.synthetic_block(st, BlockKind::Normal, vec![LayoutBox::Block(block)]);
+                        c.push(LayoutBox::Block(anchor));
+                        continue;
+                    }
                     block.flow_at = Some(c.children.len() as u32);
                     c.absolutes.push(LayoutBox::Block(block));
                     continue;

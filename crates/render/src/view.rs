@@ -264,6 +264,11 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
         _ => i32::MIN,
     };
     let below = |b: &LayoutBox| matches!(b, LayoutBox::Block(a) if a.style.z_index.unwrap_or(0) <= content_level);
+    // One a later relatively positioned sibling paints over (split into
+    // rows, that sibling is in a later row): drawn in place, not in the
+    // layer over everything (Google's sign-in: a white backdrop before
+    // the card hid it).
+    let in_place = |b: &LayoutBox| matches!(b, LayoutBox::Block(a) if a.under_later);
     let mut inner = div()
         .w_full()
         .flex()
@@ -271,14 +276,15 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
         .pt(px(row.space_before))
         .pl(px(row.indent_left))
         .pr(px(row.indent_right))
-        .children(row.absolutes.iter().filter(|b| below(b)).map(|b| positioned(b, cx, b.margin())))
+        .children(row.absolutes.iter().filter(|b| in_place(b)).map(|b| render_box(b, cx, b.margin(), false)))
+        .children(row.absolutes.iter().filter(|b| !in_place(b) && below(b)).map(|b| positioned(b, cx, b.margin())))
         .child(in_flow(
             &row.content,
             cx,
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
-        .children(row.absolutes.iter().filter(|b| !below(b)).map(|b| positioned(b, cx, b.margin())))
+        .children(row.absolutes.iter().filter(|b| !in_place(b) && !below(b)).map(|b| positioned(b, cx, b.margin())))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
@@ -2191,7 +2197,11 @@ impl Element for ControlHost {
 /// An out-of-flow box behind its siblings (negative `z-index`): painted in
 /// tree order, not deferred above everything.
 fn behind(b: &LayoutBox) -> bool {
-    matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some_and(|z| z < 0))
+    // (Also one a later relatively positioned sibling paints over: the
+    // builder appends absolute boxes after the flow, so drawn where they
+    // are in the list they'd be on top. Google's sign-in: a white backdrop,
+    // before its card in the page, hid it.)
+    matches!(b, LayoutBox::Block(block) if block.style.z_index.is_some_and(|z| z < 0) || block.under_later)
 }
 
 thread_local! {
