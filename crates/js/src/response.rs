@@ -9,7 +9,7 @@ use boa_engine::object::FunctionObjectBuilder;
 use boa_engine::object::builtins::JsArray;
 use boa_engine::property::Attribute;
 use boa_engine::{Context, JsData, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, js_string};
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, GcRefCell, Trace};
 
 use crate::dom::js_value_string;
 
@@ -30,6 +30,8 @@ pub(crate) struct Response {
     /// `None` once read.
     #[unsafe_ignore_trace]
     body: RefCell<Option<Vec<u8>>>,
+    /// `body`, once asked for: a stream of it.
+    stream: GcRefCell<Option<JsObject>>,
 }
 
 impl crate::body::HasBody for Response {
@@ -89,14 +91,14 @@ fn make(body: &JsValue, init: Option<&JsObject>, cx: &mut Context) -> JsResult<R
         }
         bytes
     };
-    Ok(Response { status: status as u16, status_text, kind: "default".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(bytes)) })
+    Ok(Response { status: status as u16, status_text, kind: "default".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(bytes)), stream: GcRefCell::new(None) })
 }
 
 /// A response the network gave.
 pub(crate) fn from_network(r: crate::cors::ScriptResponse, cx: &mut Context) -> JsResult<JsValue> {
     let pairs: Vec<JsValue> = r.headers.iter().map(|(k, v)| JsArray::from_iter([JsString::from(k.as_str()).into(), JsString::from(v.as_str()).into()], cx).into()).collect();
     let headers = crate::body::new_headers(&JsArray::from_iter(pairs, cx).into(), cx)?;
-    let data = Response { status: r.status, status_text: r.status_text, kind: r.kind.into(), url: r.url.to_string(), redirected: r.redirected, headers, body: RefCell::new(Some(r.body)) };
+    let data = Response { status: r.status, status_text: r.status_text, kind: r.kind.into(), url: r.url.to_string(), redirected: r.redirected, headers, body: RefCell::new(Some(r.body)), stream: GcRefCell::new(None) };
     Ok(Response::from_data(data, cx)?.into())
 }
 
@@ -118,15 +120,30 @@ impl Class for Response {
         for (name, f) in getters {
             getter(class, name, NativeFunction::from_fn_ptr(f));
         }
-        // No streams here: the body is read whole.
-        getter(class, "body", NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::null())));
+        // The body as a stream (of the whole of it, which is here).
+        getter(class, "body", NativeFunction::from_fn_ptr(|this, _, cx| {
+            let o = this.as_object().filter(|o| o.downcast_ref::<Response>().is_some()).ok_or_else(|| JsNativeError::typ().with_message("not a Response"))?;
+            if let Some(s) = o.downcast_ref::<Response>().expect("checked").stream.borrow().clone() {
+                return Ok(s.into());
+            }
+            let bytes = o.downcast_ref::<Response>().expect("checked").body.borrow().clone();
+            let Some(bytes) = bytes else { return Ok(JsValue::null()) };
+            let (stream, shared) = crate::streams::readable(cx)?;
+            if !bytes.is_empty() {
+                let chunk = crate::blob::uint8_array(&bytes, cx)?;
+                crate::streams::push(&shared, chunk, cx);
+            }
+            crate::streams::close(&shared, cx);
+            *o.downcast_ref::<Response>().expect("checked").stream.borrow_mut() = Some(stream.clone());
+            Ok(stream.into())
+        }));
         crate::body::add_to::<Response>(class);
         class.method(js_string!("clone"), 0, NativeFunction::from_fn_ptr(|this, _, cx| {
             let (status, status_text, kind, url, redirected, headers, body) =
                 with(this, |r| (r.status, r.status_text.clone(), r.kind.clone(), r.url.clone(), r.redirected, r.headers.clone(), r.body.borrow().clone()))?;
             let body = body.ok_or_else(|| JsNativeError::typ().with_message("Response.clone: Body has already been consumed."))?;
             let headers = crate::body::new_headers(&headers.into(), cx)?;
-            Ok(Response::from_data(Response { status, status_text, kind, url, redirected, headers, body: RefCell::new(Some(body)) }, cx)?.into())
+            Ok(Response::from_data(Response { status, status_text, kind, url, redirected, headers, body: RefCell::new(Some(body)), stream: GcRefCell::new(None) }, cx)?.into())
         }));
         let statics: [(&str, usize, Method); 3] = [
             ("json", 1, |_, a, cx| {
@@ -143,7 +160,7 @@ impl Class for Response {
             }),
             ("error", 0, |_, _, cx| {
                 let headers = crate::body::new_headers(&JsValue::undefined(), cx)?;
-                let r = Response { status: 0, status_text: String::new(), kind: "error".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(Vec::new())) };
+                let r = Response { status: 0, status_text: String::new(), kind: "error".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(Vec::new())), stream: GcRefCell::new(None) };
                 Ok(Response::from_data(r, cx)?.into())
             }),
             ("redirect", 1, |_, a, cx| {
@@ -158,7 +175,7 @@ impl Class for Response {
                 }
                 let headers = crate::body::new_headers(&JsValue::undefined(), cx)?;
                 default_header(&headers, "location", url.as_str(), cx)?;
-                let r = Response { status, status_text: String::new(), kind: "default".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(Vec::new())) };
+                let r = Response { status, status_text: String::new(), kind: "default".into(), url: String::new(), redirected: false, headers, body: RefCell::new(Some(Vec::new())), stream: GcRefCell::new(None) };
                 Ok(Response::from_data(r, cx)?.into())
             }),
         ];

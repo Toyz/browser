@@ -1748,8 +1748,19 @@ impl Tab {
                 // (FEATHER_FRAME_MS=16 draws at a display's rate: pages that
                 // react to layout can differ from the default's 100ms.)
                 let every = std::env::var("FEATHER_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+                let perf = std::env::var_os("FEATHER_PERF").is_some();
+                let (mut n, mut total, mut worst, mut since) = (0u32, Duration::ZERO, Duration::ZERO, std::time::Instant::now());
                 while std::time::Instant::now() < until {
+                    let t = std::time::Instant::now();
                     cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    if perf {
+                        let d = t.elapsed();
+                        (n, total, worst) = (n + 1, total + d, worst.max(d));
+                        if since.elapsed() >= Duration::from_secs(1) {
+                            eprintln!("perf/s: {n} draws, {:?} avg, {worst:?} worst", total / n.max(1));
+                            (n, total, worst, since) = (0, Duration::ZERO, Duration::ZERO, std::time::Instant::now());
+                        }
+                    }
                     cx.background_executor().timer(Duration::from_millis(every)).await;
                 }
             }
