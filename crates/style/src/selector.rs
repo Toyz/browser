@@ -272,8 +272,9 @@ impl<'a> ElementRef<'a> {
             self.doc.shadow.as_ref()?.light.get(&host).map(Vec::as_slice)
         });
         let own = || {
-            let parent = self.doc.parent(self.id).expect("sibling query on a detached node");
-            self.doc.children(parent)
+            // (Detached, as `getComputedStyle` of a removed element asks:
+            // no siblings.)
+            self.doc.parent(self.id).map_or(&[][..], |parent| self.doc.children(parent))
         };
         // (Slotted on through a second shadow tree, its slot's host's list
         // may not have it: then its own parent's children. Taken as first
@@ -333,12 +334,12 @@ impl selectors::Element for ElementRef<'_> {
 
     fn prev_sibling_element(&self) -> Option<Self> {
         let (siblings, ix) = self.sibling_elements();
-        siblings[..ix].iter().rev().find_map(|&id| self.element_at(id))
+        siblings.get(..ix).unwrap_or_default().iter().rev().find_map(|&id| self.element_at(id))
     }
 
     fn next_sibling_element(&self) -> Option<Self> {
         let (siblings, ix) = self.sibling_elements();
-        siblings[ix + 1..].iter().find_map(|&id| self.element_at(id))
+        siblings.get(ix + 1..).unwrap_or_default().iter().find_map(|&id| self.element_at(id))
     }
 
     fn first_element_child(&self) -> Option<Self> {

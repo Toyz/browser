@@ -1203,6 +1203,10 @@ fn refresh_cssom(d: &Shared, cx: &mut Context) {
 
 /// An element's computed `prop` (`size`: as laid out, for `width`/`height`).
 fn computed_value(dom: &mut Dom, id: NodeId, prop: &str, size: Option<(f32, f32)>) -> String {
+    // Not in the document: no style (browsers give empty strings).
+    if !is_connected(dom, id) {
+        return String::new();
+    }
     let env = media_env(dom);
     let Dom { doc, styles, generation, dark, cssom, .. } = dom;
     let fetch = |u: &Url| net::fetch_text_cached(u);

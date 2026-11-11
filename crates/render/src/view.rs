@@ -336,8 +336,7 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
             eprintln!("z wrapper: {:?} z={:?} pos={:?} raised={raised_wrapper}", wrapper.node, s.z_index, s.position);
         }
         if raised_wrapper && STACKING.with(|st| st.get().1) == 0 {
-            let rank = 1 + s.z_index.unwrap_or(0).clamp(0, (1 << Z_BITS) - 2) as usize;
-            let priority = rank << (Z_BITS * (CONTEXT_LEVELS - 1));
+            let priority = next_slot(s.z_index.unwrap_or(0)) << (Z_BITS * (CONTEXT_LEVELS - 1));
             inner = ClippedDeferred { child: Some(inner), priority }.into_any_element();
         }
     }
@@ -771,34 +770,61 @@ fn deferred(b: &LayoutBox, context: bool, build: impl FnOnce() -> AnyElement) ->
     if level >= CONTEXT_LEVELS || DEFER_LEVELS.with(|d| d.get()) >= 8 {
         return None;
     }
-    let priority = base + (z_rank(b) << (Z_BITS * (CONTEXT_LEVELS - 1 - level)));
+    let z = match b {
+        LayoutBox::Block(block) => block.style.z_index.unwrap_or(0),
+        _ => 0,
+    };
+    let priority = base + (next_slot(z) << (Z_BITS * (CONTEXT_LEVELS - 1 - level)));
     if std::env::var_os("FEATHER_DEBUG_Z").is_some()
         && let LayoutBox::Block(block) = b
     {
         eprintln!("z: {:?} z={:?} level={level} context={context} priority={priority:x}", block.node, block.style.z_index);
     }
     DEFER_LEVELS.with(|d| d.set(d.get() + 1));
+    // A context's contents are numbered among themselves.
+    let outer_seq = context.then(|| SEQ.replace(0));
     if context {
         STACKING.with(|s| s.set((priority, level + 1)));
     }
     let el = build();
     STACKING.with(|s| s.set((base, level)));
+    if let Some(seq) = outer_seq {
+        SEQ.set(seq);
+    }
     DEFER_LEVELS.with(|d| d.set(d.get() - 1));
     Some(ClippedDeferred { child: Some(el), priority }.into_any_element())
 }
 
-const Z_BITS: u32 = 12;
-const CONTEXT_LEVELS: u32 = 5;
+/// Bits per stacking level: the `z-index` rank, then the place in tree
+/// order among the level's deferred boxes (see `next_slot`).
+const Z_BITS: u32 = 16;
+const SEQ_BITS: u32 = 6;
+const CONTEXT_LEVELS: u32 = 4;
 
-/// A positioned box's place among its context's: `z-index` (auto: 0), 1
-/// up (0 is the context's own content), at most 2^12 - 1.
-fn z_rank(b: &LayoutBox) -> usize {
-    let z = match b {
-        LayoutBox::Block(block) => block.style.z_index.unwrap_or(0),
-        _ => 0,
-    };
-    1 + z.clamp(0, (1 << Z_BITS) - 2) as usize
+thread_local! {
+    /// Deferred boxes so far at the current level (tree order).
+    static SEQ: Cell<u32> = const { Cell::new(0) };
 }
+
+/// A frame starts: tree order counts from the top.
+pub fn begin_stacking() {
+    SEQ.set(0);
+}
+
+/// A deferred box's slot at its level: its `z-index` rank, then its place
+/// in tree order. With the rank alone, sibling stacking contexts of one
+/// z-index interleaved their contents: a `z-index: 10` box inside an
+/// earlier `z-index: 1` context painted over a later one (Twitch's home
+/// carousel placeholder, black, over the player above it).
+fn next_slot(z: i32) -> usize {
+    let seq = SEQ.get();
+    SEQ.set(seq + 1);
+    // 10 bits of rank: small z-indexes exactly, large ones by magnitude.
+    let z = z.max(0) as u64;
+    let rank = if z < 800 { 1 + z } else { 801 + (64 - z.leading_zeros() as u64) * 6 }.min((1 << (Z_BITS - SEQ_BITS)) - 1);
+    ((rank as usize) << SEQ_BITS) | (seq.min((1 << SEQ_BITS) - 1) as usize)
+}
+
 
 /// A relatively positioned (or sticky) box with a positive `z-index`: it
 /// stays where it is in the flow, but paints with the positioned boxes, in

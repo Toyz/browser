@@ -1189,6 +1189,24 @@
     toDataURL() { return N.canvasDataURL(this); }
     toBlob(cb) { setTimeout(() => cb(new Blob([], { type: "image/png" })), 0); }
   }
+  // OffscreenCanvas: a canvas not in the document (Stripe's page drew its
+  // gradient on one; without it the page threw and showed its error page).
+  class OffscreenCanvas extends EventTarget {
+    constructor(width, height) {
+      super();
+      this._canvas = document.createElement("canvas");
+      this._canvas.width = width;
+      this._canvas.height = height;
+    }
+    get width() { return this._canvas.width; }
+    set width(v) { this._canvas.width = v; }
+    get height() { return this._canvas.height; }
+    set height(v) { this._canvas.height = v; }
+    getContext(kind, options) { return this._canvas.getContext(kind, options); }
+    convertToBlob(options) { return new Promise((resolve) => this._canvas.toBlob(resolve, options && options.type, options && options.quality)); }
+    transferToImageBitmap() { return { width: this.width, height: this.height, close() {} }; }
+  }
+  global.OffscreenCanvas = OffscreenCanvas;
   // <video>/<audio>: the whole API, in the state of a media element
   // with nothing it can play (there's no playback yet). Players read and
   // listen to all of it; a missing `textTracks` threw in the Guardian's,

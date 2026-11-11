@@ -2920,6 +2920,7 @@ impl Render for Tab {
 
 impl Tab {
     fn render_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        render::view::begin_stacking();
         if std::env::var_os("BROWSER_DEBUG").is_some() {
             let top = self.list_state.logical_scroll_top();
             let now = (top.item_ix, f32::from(top.offset_in_item), self.list_state.item_count());
