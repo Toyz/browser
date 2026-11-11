@@ -481,7 +481,12 @@ impl Runtime {
                 let url = dom.doc.resolve_url(src)?;
                 drop(dom);
                 let t = Instant::now();
-                let code = (self.opts.fetch_text)(&url)?;
+                // A `blob:` URL is the page's own: its bytes are here.
+                let code = if url.scheme() == "blob" {
+                    crate::blob::object_url_data(url.as_str()).map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())?
+                } else {
+                    (self.opts.fetch_text)(&url)?
+                };
                 if self.opts.debug && t.elapsed() > Duration::from_millis(20) {
                     eprintln!("js: waited {:?} for {url}", t.elapsed());
                 }

@@ -198,6 +198,10 @@ impl WebModules {
         let ahead = self.prefetched.borrow_mut().remove(url.as_str());
         let code = match ahead.and_then(|rx| rx.recv().ok()) {
             Some(code) => code,
+            // Inline (`data:`) and the page's own (`blob:`) modules: here
+            // already, nothing to fetch (or allow).
+            None if url.scheme() == "data" => net::fetch_text_cached(&url),
+            None if url.scheme() == "blob" => crate::blob::object_url_data(url.as_str()).map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned()),
             None => (self.fetch)(&url),
         };
         let code = code.ok_or_else(|| JsNativeError::typ().with_message(format!("failed to fetch module {url}")))?;
