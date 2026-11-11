@@ -67,6 +67,8 @@ declaration and expression parsers to record their source span.
   `src/vm/opcode/get/property.rs` (`JS_TRACE_ERRORS`): every error the engine
   raises, caught or not, logged once with its script position; calling a
   non-function says what was called, on what, and the last property read.
+  `JS_TRACE_ERRORS=all` (`vm::trace_thrown`, from `opcode/control_flow/throw.rs`)
+  logs what scripts `throw` themselves too.
 - `src/builtins/eval/mod.rs` (`JS_DUMP_EVAL=DIR`, `JS_DUMP_EVAL_MIN`): saves
   `eval()`'d sources for debugging.
 - `src/vm/mod.rs` (`JS_PROFILE`, `vm::start_profiler`): a ticker thread

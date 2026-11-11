@@ -21,8 +21,11 @@ impl Throw {
         value: RegisterOperand,
         context: &mut Context,
     ) -> ControlFlow<CompletionRecord> {
-        let value = context.vm.get_register(value.into());
-        let error = JsError::from_opaque(value.clone());
+        let value = context.vm.get_register(value.into()).clone();
+        if *crate::vm::TRACE_ERRORS {
+            crate::vm::trace_thrown(&value, context);
+        }
+        let error = JsError::from_opaque(value);
         context.vm.pending_exception = Some(error);
 
         // Note: -1 because we increment after fetching the opcode.

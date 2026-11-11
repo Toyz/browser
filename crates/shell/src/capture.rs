@@ -57,7 +57,8 @@ Environment:
   BROWSER_DEBUG          Log navigation, clicks and script timing
   MEDIA_MUTE             Play media silently
   JS_TRACE_ERRORS        Log every error the script engine raises (caught
-                         or not), once each, with where
+                         or not), once each, with where; =all also
+                         what scripts throw themselves
   JS_DUMP_EVAL=DIR       Save each large eval()'d source to DIR
   JS_PROFILE[=N]         Sample where scripts spend their time (top
                          functions every N samples, default 2000, per thread)

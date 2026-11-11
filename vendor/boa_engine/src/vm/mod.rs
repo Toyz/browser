@@ -78,6 +78,27 @@ thread_local! {
     pub(crate) static LAST_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
+/// (Feather) `JS_TRACE_ERRORS=all`: what scripts throw themselves (`throw`),
+/// caught or not, once per message and place.
+#[cold]
+pub(crate) fn trace_thrown(thrown: &JsValue, context: &mut Context) {
+    if !*TRACE_ERRORS || !std::env::var("JS_TRACE_ERRORS").is_ok_and(|v| v == "all") {
+        return;
+    }
+    thread_local!(static SEEN_THROWN: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default());
+    let text = match thrown.as_object() {
+        Some(o) => o.get(crate::js_string!("message"), context).ok().map(|m| m.display().to_string()).unwrap_or_default(),
+        None => thrown.display().to_string(),
+    };
+    let frame = context.vm.frame();
+    let code = frame.code_block();
+    let at = code.source_info().map().find(frame.pc.saturating_sub(1)).map(|p| format!(":{}:{}", p.line_number(), p.column_number())).unwrap_or_default();
+    let line = format!("thrown {:?} [in {} {}{at}]", text.chars().take(200).collect::<String>(), code.name().to_std_string_escaped(), code.path());
+    if SEEN_THROWN.with(|s| s.borrow_mut().insert(line.clone())) {
+        eprintln!("js error: {line}");
+    }
+}
+
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
 
