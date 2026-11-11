@@ -441,6 +441,15 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
                 picture = true;
                 el.time = t;
                 el.seeking = false;
+                // A time set before the first picture: that picture is the
+                // data loaded (YouTube resumes so; it stayed at
+                // HAVE_METADATA while playing).
+                if !el.loaded_data {
+                    el.loaded_data = true;
+                    el.ready = HAVE_ENOUGH_DATA;
+                    el.network = NETWORK_IDLE;
+                    fire_now.extend(["loadeddata", "canplay", "canplaythrough"]);
+                }
                 fire_now.extend(["timeupdate", "seeked"]);
             }
             media::Event::Ended => {
@@ -947,12 +956,12 @@ pub(crate) fn link(frames: crate::CanvasFrames, updates: async_channel::Sender<F
             define(&video, name, get, None, cx).ok();
         }
         let quality = NativeFunction::from_fn_ptr(|t, _, cx| {
-            let shown = with(t, cx, |e, _| e.shown.load(Ordering::Relaxed))?;
+            let (shown, dropped) = with(t, cx, |e, _| (e.shown.load(Ordering::Relaxed), e.player.as_ref().map_or(0, |p| p.dropped())))?;
             let now = crate::dom::now_ms(&crate::dom::page(cx));
             let o = boa_engine::object::ObjectInitializer::new(cx)
                 .property(js_string!("creationTime"), now, Attribute::all())
-                .property(js_string!("droppedVideoFrames"), 0, Attribute::all())
-                .property(js_string!("totalVideoFrames"), shown, Attribute::all())
+                .property(js_string!("droppedVideoFrames"), dropped, Attribute::all())
+                .property(js_string!("totalVideoFrames"), shown + dropped, Attribute::all())
                 .property(js_string!("corruptedVideoFrames"), 0, Attribute::all())
                 .build();
             Ok(o.into())

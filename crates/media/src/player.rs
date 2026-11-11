@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::source::{Feeder, Growing};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::mse::Mse;
 use crate::{Demuxer, Info, Output, Source, VideoFrame, audio};
@@ -61,6 +61,7 @@ pub struct Player {
     tx: mpsc::Sender<Command>,
     feeder: Option<Feeder>,
     stop: Arc<AtomicBool>,
+    dropped: Arc<AtomicU32>,
 }
 
 impl Player {
@@ -77,8 +78,10 @@ impl Player {
             Input::Mse(_) => None,
         };
         let stop = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicU32::new(0));
         let (tx, rx) = mpsc::channel();
         let stopped = stop.clone();
+        let counted = dropped.clone();
         std::thread::Builder::new()
             .name("feather-media".into())
             .spawn(move || {
@@ -86,10 +89,16 @@ impl Player {
                     Input::File(g, hint) => Demuxer::open_source(Box::new(g), hint.as_deref()).map(|d| Box::new(d) as Box<dyn Source>),
                     Input::Mse(m) => m.source(stopped).map(|s| Box::new(s) as Box<dyn Source>),
                 };
-                present(source, rx, show, events, sound)
+                present(source, rx, show, events, sound, counted)
             })
             .ok();
-        Player { tx, feeder, stop }
+        Player { tx, feeder, stop, dropped }
+    }
+
+    /// Pictures not shown: late, or skipped to catch up with the clock
+    /// (`getVideoPlaybackQuality().droppedVideoFrames`).
+    pub fn dropped(&self) -> u32 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     pub fn send(&self, c: Command) {
@@ -111,10 +120,15 @@ impl Drop for Player {
 /// end).
 type Decoded = (u32, Result<Option<Output>, String>);
 
-fn decode(mut d: Box<dyn Source>, seeks: mpsc::Receiver<(u32, f64)>, out: mpsc::SyncSender<Decoded>) {
+fn decode(mut d: Box<dyn Source>, seeks: mpsc::Receiver<(u32, f64)>, out: mpsc::SyncSender<Decoded>, skip: Arc<AtomicU64>) {
     let mut generation = 0;
     let mut ended = false;
     loop {
+        // Behind the clock: on to the next keyframe from there.
+        let to = f64::from_bits(skip.swap(f64::NAN.to_bits(), Ordering::Relaxed));
+        if !to.is_nan() {
+            d.skip_video_to(to);
+        }
         let seek = if ended { seeks.recv().ok() } else { seeks.try_recv().ok() };
         if ended && seek.is_none() {
             return;
@@ -159,6 +173,7 @@ fn present(
     mut show: impl FnMut(VideoFrame),
     mut events: impl FnMut(Event),
     sound: bool,
+    dropped: Arc<AtomicU32>,
 ) {
     let d = match source {
         Ok(d) => d,
@@ -171,7 +186,16 @@ fn present(
     events(Event::Metadata(info));
     let (seek_tx, seek_rx) = mpsc::channel();
     let (out_tx, decoded) = mpsc::sync_channel::<Decoded>(16);
-    std::thread::Builder::new().name("feather-decode".into()).spawn(move || decode(d, seek_rx, out_tx)).ok();
+    let skip = Arc::new(AtomicU64::new(f64::NAN.to_bits()));
+    let skip_to = skip.clone();
+    std::thread::Builder::new().name("feather-decode".into()).spawn(move || decode(d, seek_rx, out_tx, skip_to)).ok();
+    // How far behind the clock decoded pictures come (decoding slower than
+    // real time: Twitch's 1080p60), and the time between pictures.
+    let mut behind = 0.0f64;
+    let mut frame_gap = 1.0 / 30.0;
+    let mut last_arrived: Option<f64> = None;
+    let mut arrived_at = Instant::now();
+    let mut skip_asked = Instant::now() - Duration::from_secs(10);
 
     let mut sound = if info.has_audio && sound {
         audio::Output::open().map_err(|e| eprintln!("media: no sound: {e}")).ok()
@@ -298,6 +322,14 @@ fn present(
             }
             match out {
                 Ok(Some(Output::Video(f))) => {
+                    if let Some(prev) = last_arrived.replace(f.time)
+                        && f.time > prev
+                        && f.time - prev < 0.25
+                    {
+                        frame_gap = frame_gap * 0.9 + (f.time - prev) * 0.1;
+                    }
+                    arrived_at = Instant::now();
+                    behind = if playing && !show_next && seek_to.is_none() { now(&clock, &sound) - f.time } else { 0.0 };
                     // An accurate seek skips pictures before its time
                     // (keeping one, in case none come after).
                     if let Some(t) = seek_to
@@ -374,11 +406,27 @@ fn present(
                 due = frames.pop_front();
             }
             if let Some(f) = due {
+                // Pictures between the last shown and this one weren't.
+                let missed = ((f.time - last_shown) / frame_gap).round() - 1.0;
+                if missed >= 1.0 && f.time > last_shown {
+                    dropped.fetch_add(missed.min(600.0) as u32, Ordering::Relaxed);
+                }
                 last_shown = f.time;
                 show(f);
             }
+            // Decoding behind the clock (not the download): the clock goes
+            // on, late pictures are dropped, and well behind, decoding skips
+            // to the next keyframe, as browsers do. (Stopping the clock for
+            // each picture played Twitch's 1080p60 at 0.6x, ever further
+            // behind live, and told its player nothing was dropped.)
+            // (Only while pictures keep coming: none at all is the download.)
+            let lagging = behind > 0.05 && arrived_at.elapsed() < Duration::from_millis(300);
+            if lagging && behind > 0.5 && skip_asked.elapsed() > Duration::from_secs(1) {
+                skip_asked = Instant::now();
+                skip.store((t + 0.5).to_bits(), Ordering::Relaxed);
+            }
             // Out of pictures (or sound) mid-play: wait for the download.
-            let starved = !eof && ((info.has_video && frames.is_empty()) || sound.as_ref().is_some_and(|s| s.buffered() == 0.0));
+            let starved = !eof && ((info.has_video && frames.is_empty() && !lagging) || sound.as_ref().is_some_and(|s| s.buffered() == 0.0));
             if starved != stalled {
                 stalled = starved;
                 if starved {

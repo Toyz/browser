@@ -560,3 +560,57 @@ pub(crate) fn link(cx: &mut Context) {
     crate::dom::extend_event_target::<MediaSource>(cx);
     crate::dom::extend_event_target::<SourceBuffer>(cx);
 }
+
+/// Pixels per second the software decoder keeps up with: 1080p at 30fps
+/// (Twitch's 1080p60 decoded at about 0.6x real time and played slow).
+const SMOOTH_PIXEL_RATE: f64 = 1920.0 * 1080.0 * 30.0;
+
+/// `navigator.mediaCapabilities`: what plays, and what plays smoothly here.
+/// Players pick their quality by it (Twitch asked, got nothing, and went to
+/// 1080p60, which this decoder can't keep up with).
+pub(crate) fn media_capabilities(cx: &mut Context) -> JsObject {
+    let decoding = NativeFunction::from_fn_ptr(|_, a, cx| {
+        let config = a.first().cloned().unwrap_or_default();
+        let get = |o: &JsValue, k: &str, cx: &mut Context| -> JsValue {
+            o.as_object().and_then(|o| o.get(JsString::from(k), cx).ok()).unwrap_or_default()
+        };
+        let video = get(&config, "video", cx);
+        let audio = get(&config, "audio", cx);
+        let kind = |v: &JsValue, cx: &mut Context| get(v, "contentType", cx).to_string(cx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+        let mut supported = true;
+        let mut smooth = true;
+        if !video.is_undefined() {
+            supported &= self::supported(&kind(&video, cx));
+            let num = |k: &str, cx: &mut Context| get(&video, k, cx).to_number(cx).ok().filter(|n| n.is_finite()).unwrap_or(0.0);
+            let rate = num("width", cx) * num("height", cx) * num("framerate", cx).max(1.0);
+            smooth = rate <= SMOOTH_PIXEL_RATE;
+            if std::env::var_os("MEDIA_DEBUG").is_some() {
+                eprintln!("media: decodingInfo {} {}x{}@{} -> smooth {smooth}", kind(&video, cx), num("width", cx), num("height", cx), num("framerate", cx));
+            }
+        }
+        if !audio.is_undefined() {
+            supported &= self::supported(&kind(&audio, cx));
+        }
+        let info = boa_engine::object::ObjectInitializer::new(cx)
+            .property(js_string!("supported"), supported, Attribute::all())
+            .property(js_string!("smooth"), supported && smooth, Attribute::all())
+            .property(js_string!("powerEfficient"), false, Attribute::all())
+            .property(js_string!("keySystemAccess"), JsValue::null(), Attribute::all())
+            .property(js_string!("configuration"), config, Attribute::all())
+            .build();
+        Ok(boa_engine::object::builtins::JsPromise::resolve(info, cx)?.into())
+    });
+    let encoding = NativeFunction::from_fn_ptr(|_, a, cx| {
+        let info = boa_engine::object::ObjectInitializer::new(cx)
+            .property(js_string!("supported"), false, Attribute::all())
+            .property(js_string!("smooth"), false, Attribute::all())
+            .property(js_string!("powerEfficient"), false, Attribute::all())
+            .property(js_string!("configuration"), a.first().cloned().unwrap_or_default(), Attribute::all())
+            .build();
+        Ok(boa_engine::object::builtins::JsPromise::resolve(info, cx)?.into())
+    });
+    boa_engine::object::ObjectInitializer::new(cx)
+        .function(decoding, js_string!("decodingInfo"), 1)
+        .function(encoding, js_string!("encodingInfo"), 1)
+        .build()
+}

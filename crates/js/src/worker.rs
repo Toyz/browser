@@ -557,12 +557,14 @@ fn install_scope(cx: &mut Context, natives: &JsObject, setup: &Setup, clock: Rc<
     global.set(js_string!("location"), location, false, cx).ok();
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get()) as u32;
     let languages = JsArray::from_iter([js_string!("en-US").into()], cx);
+    let capabilities = crate::media_source::media_capabilities(cx);
     let navigator = ObjectInitializer::new(cx)
         .property(js_string!("userAgent"), JsString::from(crate::USER_AGENT), Attribute::READONLY | Attribute::ENUMERABLE)
         .property(js_string!("hardwareConcurrency"), threads, Attribute::READONLY | Attribute::ENUMERABLE)
         .property(js_string!("language"), js_string!("en-US"), Attribute::READONLY | Attribute::ENUMERABLE)
         .property(js_string!("languages"), languages, Attribute::READONLY | Attribute::ENUMERABLE)
         .property(js_string!("onLine"), true, Attribute::READONLY | Attribute::ENUMERABLE)
+        .property(js_string!("mediaCapabilities"), capabilities, Attribute::READONLY | Attribute::ENUMERABLE)
         .build();
     global.set(js_string!("navigator"), navigator, false, cx).ok();
     let started = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64() * 1000.0);

@@ -127,6 +127,12 @@ impl H264 {
             }
         }
         let (width, height, rgba) = decoded?;
+        if std::env::var_os("MEDIA_DEBUG").is_some() {
+            thread_local!(static SIZE: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) });
+            if SIZE.with(|s| s.replace((width, height))) != (width, height) {
+                eprintln!("media: h264 now {width}x{height} at {time:.3}s");
+            }
+        }
         let time = self.pending.pop().map_or(time, |Reverse(t)| t.0);
         Some(VideoFrame { width, height, rgba, time })
     }

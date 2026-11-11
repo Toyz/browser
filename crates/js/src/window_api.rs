@@ -121,6 +121,7 @@ fn navigator(cx: &mut Context) -> JsValue {
         .property(js_string!("readText"), read, Attribute::all())
         .build();
     let ro = Attribute::READONLY | Attribute::ENUMERABLE | Attribute::CONFIGURABLE;
+    let capabilities = crate::media_source::media_capabilities(cx);
     ObjectInitializer::new(cx)
         .property(js_string!("userAgent"), JsString::from(ua), ro)
         .property(js_string!("appVersion"), JsString::from(&ua[8..]), ro)
@@ -134,6 +135,7 @@ fn navigator(cx: &mut Context) -> JsValue {
         .property(js_string!("maxTouchPoints"), 0, ro)
         .property(js_string!("webdriver"), false, ro)
         .property(js_string!("clipboard"), clipboard, ro)
+        .property(js_string!("mediaCapabilities"), capabilities, ro)
         .function(send_beacon, js_string!("sendBeacon"), 2)
         .build()
         .into()

@@ -70,6 +70,10 @@ pub(crate) trait Source: Send {
     fn info(&self) -> Info;
     /// The next output (`None` at the end; may wait for data).
     fn decode_next(&mut self) -> Result<Option<Output>>;
+
+    /// Decoding has fallen behind: skip pictures up to the first keyframe
+    /// at or after `t` (sound goes on).
+    fn skip_video_to(&mut self, _t: f64) {}
     /// The next outputs are from the keyframe at or before `time`.
     fn seek(&mut self, time: f64) -> Result<()>;
 }

@@ -307,7 +307,7 @@ impl Mse {
             has_audio: s.buffers.iter().any(|b| !b.removed && b.audio),
         };
         drop(s);
-        Ok(MseSource { mse: self.clone(), stop, info, video: None, audio: None, video_at: f64::NEG_INFINITY, audio_at: f64::NEG_INFINITY, seek_to: None, draining: false })
+        Ok(MseSource { mse: self.clone(), stop, info, video: None, audio: None, video_at: f64::NEG_INFINITY, audio_at: f64::NEG_INFINITY, seek_to: None, draining: false, skip_until: None })
     }
 }
 
@@ -319,6 +319,9 @@ struct AudioDecode {
 /// Playing from the buffers: each track's next sample after the last one
 /// decoded, the earlier of the two first.
 pub(crate) struct MseSource {
+    /// Pictures before the first keyframe at or after this aren't decoded
+    /// (see `Source::skip_video_to`).
+    skip_until: Option<f64>,
     mse: Mse,
     stop: Arc<std::sync::atomic::AtomicBool>,
     info: Info,
@@ -383,6 +386,13 @@ impl MseSource {
 impl Source for MseSource {
     fn info(&self) -> Info {
         self.info
+    }
+
+    fn skip_video_to(&mut self, t: f64) {
+        // (Only forward: a keyframe already passed would replay the past.)
+        if self.info.has_video && t > self.video_at {
+            self.skip_until = Some(t);
+        }
     }
 
     fn decode_next(&mut self) -> Result<Option<Output>> {
@@ -453,6 +463,12 @@ impl Source for MseSource {
                     let Codec::Avc { avcc, .. } = &*codec else { continue };
                     self.video = Some((codec.clone(), H264::new(Some(avcc))?));
                 }
+                if let Some(until) = self.skip_until {
+                    if !(sample.key && sample.pts + 0.001 >= until) {
+                        continue;
+                    }
+                    self.skip_until = None;
+                }
                 let (_, h) = self.video.as_mut().expect("a decoder");
                 if let Some(f) = h.decode(sample.bytes(), sample.pts) {
                     return Ok(Some(Output::Video(f)));
@@ -478,6 +494,7 @@ impl Source for MseSource {
     }
 
     fn seek(&mut self, time: f64) -> Result<()> {
+        self.skip_until = None;
         self.seek_to = Some(time);
         self.draining = false;
         if let Some((_, h)) = &mut self.video {
