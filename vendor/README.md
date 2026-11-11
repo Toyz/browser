@@ -52,6 +52,11 @@ declaration and expression parsers to record their source span.
 
 ## boa_engine 0.22.0
 
+- `src/vm/opcode/define/own_property.rs` (`DefineOwnPropertyByName`): an
+  object literal's field on an ordinary, extensible object that doesn't
+  have it yet is inserted directly (what ordinary [[DefineOwnProperty]]
+  does then), skipping the descriptor validation: ~4% on an object-heavy
+  benchmark.
 - `src/bytecompiler/class.rs`: a class constructor's code keeps the class's
   source text (see `boa_ast`), so `Function.prototype.toString` returns it.
 - `src/builtins/function/mod.rs` (`Function.prototype.toString`): functions

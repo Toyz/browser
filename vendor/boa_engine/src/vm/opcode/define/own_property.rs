@@ -26,8 +26,29 @@ impl DefineOwnPropertyByName {
             .code_block()
             .constant_string(index.into());
         let object = object.to_object(context)?;
+        let key: crate::property::PropertyKey = name.into();
+        // (Feather) An object literal's field: on an ordinary, extensible
+        // object without it yet, ordinary [[DefineOwnProperty]] just adds
+        // it. Added directly (the generic path validated a descriptor
+        // against a missing one, a sixth of object-heavy scripts' time).
+        {
+            use crate::object::internal_methods::ORDINARY_INTERNAL_METHODS;
+            let vtable = object.vtable();
+            if std::ptr::fn_addr_eq(vtable.__define_own_property__, ORDINARY_INTERNAL_METHODS.__define_own_property__)
+                && std::ptr::fn_addr_eq(vtable.__get_own_property__, ORDINARY_INTERNAL_METHODS.__get_own_property__)
+            {
+                let mut o = object.borrow_mut();
+                if o.extensible && !o.properties().contains_key(&key) {
+                    o.insert(
+                        key,
+                        PropertyDescriptor::builder().value(value).writable(true).enumerable(true).configurable(true).build(),
+                    );
+                    return Ok(());
+                }
+            }
+        }
         object.__define_own_property__(
-            &name.into(),
+            &key,
             PropertyDescriptor::builder()
                 .value(value.clone())
                 .writable(true)
