@@ -2313,7 +2313,14 @@ impl Builder<'_> {
                         || matches!(b.style.height, Length::Percent(_))))
             });
             c.absolutes = stay;
-            self.hoisted.extend(up);
+            // (Where they were among this box's children means nothing in
+            // the one they go up to.)
+            self.hoisted.extend(up.into_iter().map(|mut b| {
+                if let LayoutBox::Block(b) = &mut b {
+                    b.flow_at = None;
+                }
+                b
+            }));
         }
         // Absolute boxes go after the flow: note those a later positioned
         // sibling of as high a z-index paints over (BBC's consent overlay,
@@ -4408,7 +4415,9 @@ impl Flattener {
             other => other,
         };
         match child {
-            LayoutBox::Block(b) if b.is_splittable() => {
+            // (One with nothing in its flow stays whole: split, it made no
+            // rows at all, and its padding and background were lost.)
+            LayoutBox::Block(b) if b.is_splittable() && !(empty_flow(&b) && takes_room(&b)) => {
                 self.visit_block_contents(b, indent_left, indent_right);
             }
             mut content => {
@@ -4492,6 +4501,26 @@ fn collect_images(b: &LayoutBox, out: &mut Vec<Arc<Url>>) {
 /// without it went to the page's corner.
 fn contains_absolutes(style: &ComputedStyle) -> bool {
     style.position != style::Position::Static || style.transformed
+}
+
+/// Nothing in its flow (only absolute boxes, if anything).
+fn empty_flow(b: &Block) -> bool {
+    b.children.iter().all(|c| matches!(c, LayoutBox::Block(x) if x.style.position == style::Position::Absolute))
+}
+
+/// An empty box that's still seen or takes room: a background or border,
+/// vertical padding (an aspect-ratio spacer's `padding-bottom: 56.25%`),
+/// or a height of its own.
+fn takes_room(b: &Block) -> bool {
+    let st = &b.style;
+    let some = |l: Length| !l.is_auto() && !matches!(l, Length::Px(v) if v == 0.0) && !matches!(l, Length::Percent(p) if p == 0.0);
+    st.float == Float::None
+        && (st.painted_background().is_some()
+            || st.has_border()
+            || some(st.padding.top)
+            || some(st.padding.bottom)
+            || some(st.height)
+            || some(st.min_height))
 }
 
 /// A float that takes no room: no content, and nothing giving it height.
@@ -5045,3 +5074,4 @@ mod form_tests {
         assert!(found.iter().any(|(_, links)| links.iter().any(|(_, s)| s == "feather-activate")), "{found:?}");
     }
 }
+

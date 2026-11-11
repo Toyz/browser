@@ -984,6 +984,12 @@ impl Tab {
         let frames = std::mem::take(&mut *host.canvas_frames.lock().unwrap_or_else(|e| e.into_inner()));
         let mut redraw = false;
         for (node, mut c) in frames {
+            if std::env::var_os("FEATHER_DEBUG_FRAMES").is_some() {
+                let px = &c.pixels;
+                let step = (px.len() / 4 / 64).max(1) * 4;
+                let (sum, n) = px.chunks(4).step_by(step / 4).fold((0u64, 0u64), |(s, n), p| (s + p[0] as u64 + p[1] as u64 + p[2] as u64, n + 1));
+                eprintln!("frame {node:?} {}x{} mean {}", c.width, c.height, sum / (3 * n.max(1)));
+            }
             if !c.bgra {
                 render::images::to_bgra(&mut c.pixels);
                 c.bgra = true;
