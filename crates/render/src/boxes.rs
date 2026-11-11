@@ -2018,6 +2018,13 @@ impl Builder<'_> {
             _ => None,
         };
         let mut style = style;
+        // `width: fit-content` on a flex row's item is how it's sized anyway;
+        // drawn as `align-self: start` (for block flow, where that keeps it
+        // from stretching across), it'd lose its stretched height in the row
+        // (Twitch's chat column, 0 high).
+        if style.fit_width && self.in_flex_row {
+            Arc::make_mut(&mut style).fit_width = false;
+        }
         // `calc(100% - 32px)` widths, against our guess at the containing
         // block (the layout only takes one or the other: alone, the
         // percentage made BBC's page as wide as the window, margins and all).
@@ -2211,13 +2218,17 @@ impl Builder<'_> {
         }
         // A positioned box is the containing block of the absolute boxes
         // inside it; a static one sends those placed by their insets on up
-        // (ones with no insets sit where they'd be in the flow: they stay).
+        // (ones with no insets sit where they'd be in the flow: they stay),
+        // and those sized by it too: a percentage height is of the
+        // containing block, not of a static parent as tall as nothing
+        // (Twitch's chat column, `height: 100%` in an `<aside>`, was 0 high).
         if contains_absolutes(&style) {
             c.absolutes.extend(self.hoisted.drain(hoist_mark..));
         } else if self.positioned > 0 {
             let (up, stay): (Vec<_>, Vec<_>) = std::mem::take(&mut c.absolutes).into_iter().partition(|b| {
                 matches!(b, LayoutBox::Block(b) if b.style.position == style::Position::Absolute
-                    && [b.style.inset.top, b.style.inset.right, b.style.inset.bottom, b.style.inset.left].iter().any(|l| !l.is_auto()))
+                    && ([b.style.inset.top, b.style.inset.right, b.style.inset.bottom, b.style.inset.left].iter().any(|l| !l.is_auto())
+                        || matches!(b.style.height, Length::Percent(_))))
             });
             c.absolutes = stay;
             self.hoisted.extend(up);
