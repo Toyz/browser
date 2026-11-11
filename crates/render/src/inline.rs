@@ -807,9 +807,20 @@ fn place(
             let m = measured[ix];
             let area = Bounds::new(point(dx + x, y), size(m.width, line.extent.height()));
             let span_style = &para.spans[piece.span as usize].style;
-            // `pointer-events: none` text isn't under the mouse.
+            // `pointer-events: none` text isn't under the mouse. An inline
+            // object is its own element under it (an inline-block button,
+            // YouTube's mute: clicks went to the box around it).
             if cx.track_hover && !span_style.inert {
-                out.areas.push((area, span_style.node));
+                let node = match piece.kind {
+                    PieceKind::Object(oi) => match &para.objects[oi as usize] {
+                        InlineObject::Block(atomic) => atomic.node.or(span_style.node),
+                        InlineObject::BlockBox(block) => block.node.or(span_style.node),
+                        InlineObject::Image(image) if !image.style.pointer_events_none => image.node.or(span_style.node),
+                        InlineObject::Image(_) => span_style.node,
+                    },
+                    _ => span_style.node,
+                };
+                out.areas.push((area, node));
             }
             if !span_style.inert
                 && let Some(c) = cursor_style(span_style.cursor)

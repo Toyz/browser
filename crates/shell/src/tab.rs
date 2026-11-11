@@ -114,6 +114,10 @@ pub struct Tab {
     _script_styles: Option<Task<()>>,
     /// A link click already went to the scripts (mouse up shouldn't again).
     script_clicked: bool,
+    /// Mouse presses so far, and the press a link last acted on: nested
+    /// flows each hear the release over a button, one press acts once.
+    presses: u64,
+    link_press: u64,
     /// The last mouse move was over something scripts listen to.
     script_hovering: bool,
     _refresh: Option<Task<()>>,
@@ -278,6 +282,8 @@ impl Tab {
             _scripts_task: None,
             _script_styles: None,
             script_clicked: false,
+            presses: 0,
+            link_press: 0,
             script_hovering: false,
             _refresh: None,
             _restyle: None,
@@ -2742,6 +2748,7 @@ impl Tab {
                     // closes its suggestions on it).
                     // (`mousedown` reaches scripts first, as in browsers.)
                     this.mouse_down = true;
+                    this.presses += 1;
                     this.script_mouse("mousedown", event.position, 0, (0.0, 0.0));
                     if this.forms.clicked_field.take().is_none() {
                         if this.forms.focused.is_some() {

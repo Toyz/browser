@@ -156,6 +156,10 @@ impl Tab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.link_press == self.presses {
+            return;
+        }
+        self.link_press = self.presses;
         let Some((host, target)) = self.heard_click() else {
             if std::env::var_os("BROWSER_DEBUG").is_some() {
                 eprintln!("click: no script listening (target {:?})", self.click_target());

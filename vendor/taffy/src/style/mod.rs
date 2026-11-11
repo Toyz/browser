@@ -11,6 +11,7 @@ pub mod percent_plus_length {
     pub struct PercentPlusLength {
         /// Of the basis, 0 to 1.
         pub fraction: f32,
+        /// Plus this many pixels.
         pub length: f32,
     }
 
