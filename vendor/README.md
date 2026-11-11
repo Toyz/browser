@@ -64,6 +64,10 @@ declaration and expression parsers to record their source span.
   non-function says what was called, on what, and the last property read.
 - `src/builtins/eval/mod.rs` (`JS_DUMP_EVAL=DIR`, `JS_DUMP_EVAL_MIN`): saves
   `eval()`'d sources for debugging.
+- `src/vm/mod.rs` (`JS_PROFILE`, `vm::start_profiler`): a ticker thread
+  raises a flag each millisecond; the interpreter loops note the running
+  function, line and caller when they see it, and print the top entries
+  every 2000 samples.
 
 - `src/builtins/array_buffer/mod.rs`, `src/object/builtins/jsarraybuffer.rs`:
   an `ArrayBuffer` can view bytes it doesn't own (`ExternalBytes`,

@@ -172,6 +172,12 @@ fn fire(_: &JsValue, a: &[JsValue], c: &Captures, cx: &mut Context) -> JsResult<
         }
         _ => args,
     };
+    let started = std::time::Instant::now();
+    let kind_name = match kind {
+        Kind::Frame => "frame",
+        Kind::Idle => "idle",
+        _ => "timeout",
+    };
     let result = match callback.as_callable() {
         Some(f) => f.call(&JsValue::undefined(), &args, cx),
         // `setTimeout("code", ms)`: run the code.
@@ -180,6 +186,12 @@ fn fire(_: &JsValue, a: &[JsValue], c: &Captures, cx: &mut Context) -> JsResult<
             cx.eval(Source::from_bytes(&code))
         }
     };
+    // FEATHER_LONG_TASKS: which callbacks take long.
+    if std::env::var_os("FEATHER_LONG_TASKS").is_some() && started.elapsed() > std::time::Duration::from_millis(50) {
+        let source = callback.to_string(cx).map(|s| s.to_std_string_escaped()).unwrap_or_default();
+        let source: String = source.chars().take(220).collect();
+        eprintln!("long callback ({kind_name}) {:?}: {}", started.elapsed(), source.replace('\n', " "));
+    }
     if let Err(e) = result {
         // As an uncaught error would be: `error` event, console.
         let report = cx.global_object().get(js_string!("reportError"), cx).ok().and_then(|f| f.as_callable());

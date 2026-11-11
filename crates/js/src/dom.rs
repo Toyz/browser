@@ -387,6 +387,9 @@ impl Runtime {
         // to 10k entries; browsers allow ~10k nested calls).
         cx.runtime_limits_mut().set_recursion_limit(10_000);
         cx.runtime_limits_mut().set_stack_size_limit(1 << 20);
+        if std::env::var_os("JS_PROFILE").is_some() {
+            boa_engine::vm::start_profiler();
+        }
         declarative_shadow_roots(&mut dom.borrow_mut());
         install_natives(&mut cx, &dom);
         crate::web_url::register(&mut cx);
@@ -630,8 +633,14 @@ impl Runtime {
             due.into_iter().map(|(_, id)| id).collect()
         };
         for id in &due {
+            let started = Instant::now();
             self.call_global("__fireTimer", &[JsValue::from(*id)]);
+            let fired = started.elapsed();
             self.cx.run_jobs().ok();
+            // FEATHER_LONG_TASKS: tasks that keep the page from updating.
+            if std::env::var_os("FEATHER_LONG_TASKS").is_some() && started.elapsed() > Duration::from_millis(100) {
+                eprintln!("long task: timer {id}: {fired:?} + microtasks {:?} at {:?}", started.elapsed() - fired, self.started.elapsed());
+            }
             self.take_input();
         }
         !due.is_empty()
@@ -1280,6 +1289,16 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     add("tag", 1, Box::new(|d, a, _| {
         let dom = d.borrow();
         Ok(arg_node(&dom, a, 0).and_then(|n| dom.doc.element(n)).map_or(JsValue::null(), |e| js_str(&e.name.local)))
+    }));
+    // The topmost ancestor (a document, a shadow root, or a detached
+    // subtree's top): event retargeting asks it for every listener.
+    add("rootOf", 1, Box::new(|d, a, _| {
+        let dom = d.borrow();
+        let mut n = arg_node(&dom, a, 0);
+        while let Some(p) = n.and_then(|n| dom.doc.parent(n)) {
+            n = Some(p);
+        }
+        Ok(id_value(n))
     }));
     add("parent", 1, Box::new(|d, a, _| {
         let dom = d.borrow();

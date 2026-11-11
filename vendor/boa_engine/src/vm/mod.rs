@@ -53,6 +53,24 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 
+/// (Feather, JS_PROFILE) Set every millisecond by a ticker thread: the
+/// interpreter then notes where it is.
+pub(crate) static PROFILE_TICK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// (Feather, JS_PROFILE) Start the ticker (once).
+pub fn start_profiler() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::Builder::new()
+            .name("js-profile".into())
+            .spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                PROFILE_TICK.store(true, std::sync::atomic::Ordering::Relaxed);
+            })
+            .ok();
+    });
+}
+
 /// (Feather) JS_TRACE_ERRORS: log errors the engine raises, with context.
 pub(crate) static TRACE_ERRORS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("JS_TRACE_ERRORS").is_some());
 thread_local! {
@@ -985,6 +1003,10 @@ impl Context {
             .get(self.vm.frame().pc as usize)
         {
             let opcode = Opcode::decode(*byte);
+            if PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed) {
+                PROFILE_TICK.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.profile_sample();
+            }
 
             match self.execute_one(
                 |context, opcode| {
@@ -1008,6 +1030,39 @@ impl Context {
         CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
+    /// (Feather, JS_PROFILE) Count where the script is now: its function
+    /// and line, with its caller's.
+    #[cold]
+    #[inline(never)]
+    fn profile_sample(&self) {
+        thread_local! {
+            static COUNTS: std::cell::RefCell<(u32, std::collections::HashMap<String, u32>)> = std::cell::RefCell::default();
+        }
+        let describe = |frame: &CallFrame| {
+            let code = &frame.code_block;
+            let line = code.source_info().map().find(frame.pc).map_or(0, |p| p.line_number());
+            let path = code.path().to_string();
+            let path: String = path.chars().rev().take(48).collect::<Vec<_>>().into_iter().rev().collect();
+            format!("{}@{path}:{line}", code.name().to_std_string_escaped())
+        };
+        let here = describe(self.vm.frame());
+        let caller = self.vm.frames.len().checked_sub(2).and_then(|i| self.vm.frames.get(i)).map(describe).unwrap_or_default();
+        COUNTS.with(|c| {
+            let mut c = c.borrow_mut();
+            *c.1.entry(format!("{here}  <- {caller}")).or_default() += 1;
+            c.0 += 1;
+            if c.0 >= 2000 {
+                let mut top: Vec<_> = c.1.iter().map(|(k, v)| (*v, k.clone())).collect();
+                top.sort_by(|a, b| b.0.cmp(&a.0));
+                eprintln!("js profile ({} samples):", c.0);
+                for (n, k) in top.iter().take(25) {
+                    eprintln!("  {n:5} {k}");
+                }
+                *c = Default::default();
+            }
+        });
+    }
+
     pub(crate) fn run(&mut self) -> CompletionRecord {
         while let Some(byte) = self
             .vm
@@ -1018,6 +1073,10 @@ impl Context {
             .get(self.vm.frame().pc as usize)
         {
             let opcode = Opcode::decode(*byte);
+            if PROFILE_TICK.load(std::sync::atomic::Ordering::Relaxed) {
+                PROFILE_TICK.store(false, std::sync::atomic::Ordering::Relaxed);
+                self.profile_sample();
+            }
 
             match self.execute_one(
                 |context, opcode| {

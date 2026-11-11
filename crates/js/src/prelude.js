@@ -452,6 +452,7 @@
     dispatchEvent(ev) {
       ev.target = this;
       ev._origin = this;
+      ev._light = undefined;
       const path = [];
       for (let n = this; n; n = parentForEvents(n)) path.push(n);
       ev._path = path;
@@ -497,8 +498,7 @@
   // see its host, not what's inside.
   function retarget(target, node) {
     for (let t = target; t; ) {
-      let root = t;
-      while (root.parentNode) root = root.parentNode;
+      const root = t.__featherNode === undefined ? null : wrap(N.rootOf(t.__featherNode));
       if (!(root instanceof ShadowRoot)) return t;
       for (let x = node; x; x = x instanceof ShadowRoot ? x.host : x.parentNode) {
         if (x === root) return t;
@@ -508,8 +508,16 @@
     return target;
   }
   function invoke(node, ev, phase, capture) {
+    // Capturing past a node nobody listens on: nothing to do there.
+    if (capture === true && !(node._listeners && node._listeners[ev.type])) return;
     ev.currentTarget = node;
-    if (ev._origin && node !== window && node !== document) ev.target = retarget(ev._origin, node);
+    // (Outside any shadow tree, the target is the same for every listener.)
+    if (ev._origin && ev._light === undefined) {
+      const o = ev._origin.__featherNode;
+      ev._light = o === undefined || !(wrap(N.rootOf(o)) instanceof ShadowRoot);
+    }
+    if (ev._origin && ev._light) ev.target = ev._origin;
+    else if (ev._origin && node !== window && node !== document) ev.target = retarget(ev._origin, node);
     else if (ev._origin) ev.target = retarget(ev._origin, document.documentElement);
     ev.eventPhase = phase;
     const list = node._listeners && node._listeners[ev.type];

@@ -75,6 +75,19 @@ pub struct Registered {
 /// Parse a stylesheet. Rules inside `@media` keep their conditions (see
 /// [`StyleRule::media`]); nothing is evaluated against the viewport here.
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
+    // FEATHER_CSS_GREP=TEXT: where stylesheets mention TEXT (debugging).
+    if let Some(needle) = std::env::var("FEATHER_CSS_GREP").ok().filter(|n| !n.is_empty()) {
+        for (at, _) in css.match_indices(&needle).take(20) {
+            let (mut a, mut b) = (at.saturating_sub(300), (at + 300).min(css.len()));
+            while !css.is_char_boundary(a) {
+                a -= 1;
+            }
+            while !css.is_char_boundary(b) {
+                b += 1;
+            }
+            eprintln!("css grep: …{}…", &css[a..b]);
+        }
+    }
     let mut sheet = Stylesheet::default();
     let mut parser = Parser::new(css);
     let mut top = TopLevel { sheet: &mut sheet, seen_rule: false, media: Vec::new(), layer: None };

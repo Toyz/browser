@@ -7,6 +7,7 @@ mod layers;
 mod size;
 mod sources;
 mod vars;
+pub use vars::computed_custom;
 
 pub use dark::DARK_CANVAS;
 pub use sources::{StyleSource, collect_style_sources};

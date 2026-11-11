@@ -48,6 +48,13 @@ fn substitute_with(raw: &str, get: &dyn Fn(&str) -> Option<Arc<str>>, depth: usi
     Some(format!("{}{}{}", &raw[..start], replacement.trim(), rest))
 }
 
+/// A custom property's computed value, as `getPropertyValue("--x")` reads
+/// it: its `var()` references substituted (empty if one can't be).
+pub fn computed_custom(custom: &crate::CustomProps, name: &str) -> String {
+    let Some(raw) = custom.get(name) else { return String::new() };
+    substitute_with(raw, &|n| custom.get(n).cloned(), 0).unwrap_or_default()
+}
+
 impl Styler {
     pub(super) fn resolve_vars(&self, name: &Arc<str>, raw: &str, custom: &CustomProps) -> Option<Rc<Vec<Decl>>> {
         // Unset, a registered property is its initial value.

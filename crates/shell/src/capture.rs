@@ -59,6 +59,10 @@ Environment:
   JS_TRACE_ERRORS        Log every error the script engine raises (caught
                          or not), once each, with where
   JS_DUMP_EVAL=DIR       Save each large eval()'d source to DIR
+  JS_PROFILE             Sample where scripts spend their time (top
+                         functions every 2000 samples, per thread)
+  FEATHER_LONG_TASKS     Log timer tasks and callbacks that run long
+  FEATHER_CSS_GREP=TEXT  Show where parsed stylesheets mention TEXT
   FEATHER_NO_CULL        Build every box each frame, off screen or not
   FEATHER_DEBUG_CULL     Log how many boxes were far off screen each frame
 ";

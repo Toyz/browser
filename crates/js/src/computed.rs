@@ -128,7 +128,7 @@ pub(crate) fn value(s: &ComputedStyle, property: &str, size: Option<(f32, f32)>,
         if s.border_box { outer } else { outer - a.px_or_zero() - b.px_or_zero() - ba - bb }
     };
     if let Some(name) = property.strip_prefix("--") {
-        return s.custom.get(format!("--{name}").as_str()).map(|v| v.to_string()).unwrap_or_default();
+        return style::cascade::computed_custom(&s.custom, &format!("--{name}"));
     }
     match property {
         "display" => kebab(&s.display),
