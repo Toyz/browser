@@ -1028,6 +1028,9 @@ pub(crate) struct DeferredDraw {
     element_id_stack: ElementIdStack,
     text_style_stack: Vec<TextStyleRefinement>,
     content_mask: Option<ContentMask<Pixels>>,
+    /// (Feather) the ancestors' opacity when it was deferred: a positioned
+    /// box in a faded (or hidden, opacity 0) one stays faded.
+    opacity: f32,
     rem_size: Pixels,
     element: Option<AnyElement>,
     absolute_offset: Point<Pixels>,
@@ -4127,7 +4130,7 @@ impl Window {
             traversal_order.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
 
             for deferred_draw_ix in traversal_order {
-                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, content_mask) = {
+                let (element, parent_node, current_view, rem_size, absolute_offset, prepaint_range, content_mask, opacity) = {
                     let deferred_draw = &mut self.next_frame.deferred_draws[deferred_draw_ix];
                     self.element_id_stack
                         .clone_from(&deferred_draw.element_id_stack);
@@ -4141,6 +4144,7 @@ impl Window {
                         deferred_draw.absolute_offset,
                         deferred_draw.prepaint_range.clone(),
                         deferred_draw.content_mask.clone(),
+                        deferred_draw.opacity,
                     )
                 };
                 self.next_frame.dispatch_tree.set_active_node(parent_node);
@@ -4154,8 +4158,10 @@ impl Window {
                             // box in a positioned box) keep their ancestors'
                             // clip, and its hitboxes are clipped too.
                             window.with_content_mask(content_mask, |window| {
-                                window.with_absolute_element_offset(absolute_offset, |window| {
-                                    element.prepaint(window, cx);
+                                window.with_element_opacity(Some(opacity), |window| {
+                                    window.with_absolute_element_offset(absolute_offset, |window| {
+                                        element.prepaint(window, cx);
+                                    });
                                 });
                             });
                         });
@@ -4196,12 +4202,15 @@ impl Window {
 
             let paint_start = self.paint_index();
             let content_mask = deferred_draw.content_mask;
+            let opacity = deferred_draw.opacity;
             if let Some(element) = deferred_draw.element.as_mut() {
                 self.with_rendered_view(deferred_draw.current_view, |window| {
                     window.with_content_mask(content_mask, |window| {
-                        window.with_rem_size(Some(deferred_draw.rem_size), |window| {
-                            element.paint(window, cx);
-                        });
+                        window.with_element_opacity(Some(opacity), |window| {
+                            window.with_rem_size(Some(deferred_draw.rem_size), |window| {
+                                element.paint(window, cx);
+                            });
+                        })
                     })
                 })
             } else {
@@ -4273,6 +4282,7 @@ impl Window {
                     element_id_stack: deferred_draw.element_id_stack.clone(),
                     text_style_stack: deferred_draw.text_style_stack.clone(),
                     content_mask: deferred_draw.content_mask,
+                    opacity: deferred_draw.opacity,
                     rem_size: deferred_draw.rem_size,
                     priority: deferred_draw.priority,
                     element: None,
@@ -4814,6 +4824,7 @@ impl Window {
             element_id_stack: self.element_id_stack.clone(),
             text_style_stack: self.text_style_stack.clone(),
             content_mask,
+            opacity: self.element_opacity,
             rem_size: self.rem_size(),
             priority,
             element: Some(element),

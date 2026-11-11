@@ -120,6 +120,9 @@ Drop these when Boa releases include equivalent fixes.
   monochrome SVGs. `with_paint_scale_xy` scales x and y apart (`scaleX()`,
   YouTube's progress bar); lengths (radii, borders, font sizes) take the
   smaller factor.
+- `src/window.rs`: deferred draws keep the element opacity they were
+  deferred under (prepaint and paint): a positioned box inside a hidden
+  (`opacity: 0`) one showed (YouTube's hover-only menu buttons).
 - `src/window.rs`: deferred draws prepaint under the content mask they were
   deferred with (paint already did): a positioned box inside a positioned
   box was deferred while its parent prepainted with no mask, escaping its
