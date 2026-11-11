@@ -91,8 +91,50 @@ fn plugins(cx: &mut Context) {
         .ok();
 }
 
+/// Web IDL: an interface's attributes and operations live on its
+/// prototype (accessors and methods), not on each object. Scripts reading
+/// `Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent")`, or
+/// listing `navigator`'s own properties, saw the opposite. The object's own
+/// properties move there: methods as they are, accessors as they are,
+/// values as getters of the value they had (these objects' values are
+/// fixed once made).
+fn move_to_prototype(object: &JsObject, proto: &JsObject, cx: &mut Context) {
+    let realm = cx.realm().clone();
+    for key in object.own_property_keys(cx).unwrap_or_default() {
+        let Some(desc) = object.borrow().properties().get(&key) else { continue };
+        let moved = if desc.is_accessor_descriptor() {
+            PropertyDescriptor::builder()
+                .maybe_get(desc.get().cloned())
+                .maybe_set(desc.set().cloned())
+                .enumerable(true)
+                .configurable(true)
+                .build()
+        } else {
+            let value = desc.value().cloned().unwrap_or_default();
+            if value.as_object().is_some_and(|o| o.is_callable()) {
+                PropertyDescriptor::builder().value(value).writable(true).enumerable(true).configurable(true).build()
+            } else {
+                let name = match &key {
+                    PropertyKey::String(s) => format!("get {}", s.to_std_string_escaped()),
+                    _ => "get".into(),
+                };
+                let getter = NativeFunction::from_copy_closure_with_captures(|_, _, v: &JsValue, _| Ok(v.clone()), value);
+                let getter = FunctionObjectBuilder::new(&realm, getter).name(JsString::from(name)).length(0).build();
+                PropertyDescriptor::builder().get(getter).enumerable(true).configurable(true).build()
+            }
+        };
+        if proto.has_own_property(key.clone(), cx).unwrap_or(true) {
+            continue;
+        }
+        if proto.define_property_or_throw(key.clone(), moved, cx).is_ok() {
+            object.delete_property_or_throw(key, cx).ok();
+        }
+    }
+}
+
 /// Tag every interface on the global object (once its constructors exist).
 pub(crate) fn tag(cx: &mut Context) {
+    plugins(cx);
     for (object, iface) in SINGLETONS {
         let Some(object) = cx.global_object().get(JsString::from(*object), cx).ok().and_then(|v| v.as_object()) else { continue };
         let proto = interface(cx, iface);
@@ -104,9 +146,12 @@ pub(crate) fn tag(cx: &mut Context) {
         {
             proto.set_prototype(Some(old));
         }
-        object.set_prototype(Some(proto));
+        object.set_prototype(Some(proto.clone()));
+        // (`location`'s members are its own: [LegacyUnforgeable].)
+        if *iface != "Location" {
+            move_to_prototype(&object, &proto, cx);
+        }
     }
-    plugins(cx);
     let global = cx.global_object();
     let tag_key = PropertyKey::Symbol(JsSymbol::to_string_tag());
     let skip = language_globals();
