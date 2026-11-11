@@ -100,6 +100,8 @@ declaration and expression parsers to record their source span.
   its value (a lazy getter) reshapes the object while it runs; its accessor
   slot cached under the new shape had the next read call the value as the
   getter, "not a callable function" (Google Translate showed no result).
+- `src/builtins/mod.rs`: `%TypedArray%` isn't bound as a global
+  `TypedArray` (an intrinsic only, as in browsers).
 - `src/builtins/intl/locale/utils.rs` (`default_locale`): the system locale
   is asked for once per thread. Each `Number.prototype.toLocaleString`
   makes a NumberFormat that asked the OS (`CFLocaleCopyPreferredLanguages`)

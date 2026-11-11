@@ -410,7 +410,8 @@ pub(crate) fn set_default_global_bindings(context: &mut Context) -> JsResult<()>
     global_binding::<Set>(context)?;
     global_binding::<String>(context)?;
     global_binding::<RegExp>(context)?;
-    global_binding::<BuiltinTypedArray>(context)?;
+    // (Feather) Not `%TypedArray%`: an intrinsic, not a global (no browser
+    // has `TypedArray`; scripts listing the globals saw one).
     global_binding::<Int8Array>(context)?;
     global_binding::<Uint8Array>(context)?;
     global_binding::<Uint8ClampedArray>(context)?;
