@@ -158,6 +158,14 @@ impl MetalAtlasTextures {
             height: DevicePixels(16384),
         };
         let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        if std::env::var_os("FEATHER_DEBUG_ATLAS").is_some() {
+            let list = match kind {
+                AtlasTextureKind::Monochrome => &self.monochrome_textures,
+                _ => &self.polychrome_textures,
+            };
+            let live = list.textures.iter().flatten().count();
+            eprintln!("atlas: new {kind:?} texture {}x{} for a {}x{} tile ({live} live)", size.width.0, size.height.0, min_size.width.0, min_size.height.0);
+        }
         let texture_descriptor = MTLTextureDescriptor::new();
         // SAFETY: Both dimensions are clamped to the existing 1024..=16384 atlas size limits.
         unsafe {

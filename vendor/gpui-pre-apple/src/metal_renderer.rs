@@ -102,6 +102,9 @@ impl InstanceBufferPool {
         } else {
             MTLResourceOptions::StorageModeManaged
         };
+        if std::env::var_os("FEATHER_DEBUG_ATLAS").is_some() {
+            eprintln!("metal: new {}-byte instance buffer ({} pooled)", self.buffer_size, self.buffers.len());
+        }
         let buffer = device
             .newBufferWithLength_options(self.buffer_size, options)
             .with_context(|| format!("allocating {}-byte instance buffer", self.buffer_size))?;
