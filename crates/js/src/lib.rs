@@ -79,6 +79,8 @@ pub struct Options {
     /// (Wikipedia pinned its side panels for a wider default, squeezing the
     /// article, then unpinned them over several frames).
     pub viewport: Option<(f32, f32)>,
+    /// The user has used this page's site: sound may start on its own.
+    pub activated: bool,
 }
 
 /// To the script thread.

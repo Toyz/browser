@@ -407,6 +407,12 @@ impl Tab {
 
     /// Go somewhere new: push onto history (dropping any forward entries).
     pub fn navigate(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
+        loader::activate_origin(&url);
+        self.script_navigate(url, window, cx);
+    }
+
+    /// A page's scripts went somewhere: not the user's doing.
+    fn script_navigate(&mut self, url: Url, window: &mut Window, cx: &mut Context<Self>) {
         if !self.history.is_empty() {
             self.history.truncate(self.history_ix + 1);
             self.history_doc.truncate(self.history_ix + 1);
@@ -2749,6 +2755,9 @@ impl Tab {
                     // (`mousedown` reaches scripts first, as in browsers.)
                     this.mouse_down = true;
                     this.presses += 1;
+                    if let Some(url) = this.page.as_ref().map(|p| &p.url) {
+                        loader::activate_origin(url);
+                    }
                     this.script_mouse("mousedown", event.position, 0, (0.0, 0.0));
                     if this.forms.clicked_field.take().is_none() {
                         if this.forms.focused.is_some() {

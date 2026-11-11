@@ -82,6 +82,21 @@ pub fn may_load(page: &Url, url: &Url) -> bool {
 }
 
 /// Fetch → parse → style → build boxes. Blocking: run it in the background.
+/// Origins the user has used this session (clicked in, or gone to
+/// themselves): their pages may start playing sound on their own, as
+/// Chrome's autoplay policy allows (YouTube starts its video).
+static ACTIVATED: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+pub fn activate_origin(url: &Url) {
+    let mut set = ACTIVATED.lock().unwrap_or_else(|e| e.into_inner());
+    set.get_or_insert_with(Default::default).insert(url.origin().ascii_serialization());
+}
+
+fn activated(url: &Url) -> bool {
+    let set = ACTIVATED.lock().unwrap_or_else(|e| e.into_inner());
+    set.as_ref().is_some_and(|s| s.contains(&url.origin().ascii_serialization()))
+}
+
 pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>, session: u64) -> anyhow::Result<LoadedPage> {
     if url.scheme() == "view-source" {
         let inner = Url::parse(url.path()).map_err(|e| anyhow::anyhow!("bad view-source URL: {e}"))?;
@@ -145,6 +160,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
                 debug: std::env::var_os("BROWSER_DEBUG").is_some(),
                 session,
                 viewport: Some((env.width, env.height)),
+                activated: activated(&response.url),
             },
         )
     } else {

@@ -351,7 +351,7 @@ impl Runtime {
             canvases: HashMap::new(),
             media_dirty: Vec::new(),
             media_frames: HashSet::new(),
-            activated: false,
+            activated: opts.activated,
             submit: None,
             values: HashMap::new(),
             debug: opts.debug,

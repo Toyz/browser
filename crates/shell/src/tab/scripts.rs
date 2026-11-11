@@ -37,7 +37,7 @@ impl Tab {
                     }
                     match msg {
                         js::FromJs::Document(doc) => this.script_dom(doc, window, cx),
-                        js::FromJs::Navigate(url) => this.navigate(url, window, cx),
+                        js::FromJs::Navigate(url) => this.script_navigate(url, window, cx),
                         js::FromJs::Submit(form) => this.submit_native(form, None, window, cx),
                         js::FromJs::UrlChanged { url, replace } => this.script_url_changed(url, replace, cx),
                         js::FromJs::Focus(node) => this.script_focus(node, window, cx),
