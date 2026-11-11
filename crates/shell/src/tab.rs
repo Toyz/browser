@@ -2300,7 +2300,11 @@ impl Tab {
                 let (store, scheduled, tab) = (self.measured_bounds.clone(), self.layout_scheduled.clone(), cx.entity().downgrade());
                 let (frame, seen) = (self.bounds_frame.clone(), self.bounds_seen.clone());
                 let measured = self.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.clone());
-                let (sticky, sticky_store, list) = (self.sticky_nodes(), self.sticky_bounds.clone(), self.list_state.clone());
+                // (Where the page is scrolled, read now: the list can't be
+                // asked while it's laying out, when bounds are reported.)
+                let scroll = self.scroll_y();
+                let list_top = f32::from(self.list_state.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
+                let (sticky, sticky_store) = (self.sticky_nodes(), self.sticky_bounds.clone());
                 Rc::new(move |node, bounds, window, cx| {
                     let mut rect = [
                         f32::from(bounds.origin.x),
@@ -2311,8 +2315,6 @@ impl Tab {
                     // A sticky box in its place: where its pinned copy goes.
                     if sticky.contains(&node) {
                         // (In the page: its row may not be drawn later.)
-                        let scroll = f32::from(-list.scroll_px_offset_for_scrollbar().y).max(0.0);
-                        let list_top = f32::from(list.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
                         sticky_store.borrow_mut().insert(node, [rect[0], rect[1] - list_top + scroll, rect[2], rect[3]]);
                         if !measured.as_ref().is_some_and(|m| m.read().is_ok_and(|m| m.contains(&node))) {
                             return;

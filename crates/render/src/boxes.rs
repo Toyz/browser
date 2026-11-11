@@ -110,6 +110,12 @@ pub struct Block {
     pub pseudo: Option<(NodeId, u8)>,
     /// A float and what follows it (see [`FloatSplit`]).
     pub float_split: Option<FloatSplit>,
+    /// An absolute box: how many in-flow siblings came before it (they're
+    /// appended after them, losing their place in tree order).
+    pub flow_at: Option<u32>,
+    /// An absolute box a later relatively positioned sibling of as high a
+    /// `z-index` paints over (tree order among equals).
+    pub under_later: bool,
 }
 
 /// A row holding a float and the siblings after it: `[float, column]` (or
@@ -364,6 +370,8 @@ impl Block {
                     heading: false,
                     pseudo: None,
                     float_split: None,
+                    flow_at: None,
+                    under_later: false,
                 }));
                 row += 1;
             }
@@ -391,6 +399,8 @@ impl Block {
             heading: false,
             pseudo: None,
             float_split: None,
+            flow_at: None,
+            under_later: false,
         }
     }
 
@@ -822,6 +832,8 @@ pub fn build_plain_text(text: &str) -> LayoutTree {
         heading: false,
         pseudo: None,
         float_split: None,
+        flow_at: None,
+        under_later: false,
     };
     if let Some(p) = inline.finish(1, style) {
         block.children.push(LayoutBox::Paragraph(Arc::new(p)));
@@ -1792,6 +1804,8 @@ impl Builder<'_> {
             heading: false,
             pseudo: None,
             float_split: None,
+            flow_at: None,
+            under_later: false,
         };
         place(self, block, c);
     }
@@ -1850,6 +1864,8 @@ impl Builder<'_> {
             heading: false,
             pseudo: None,
             float_split: None,
+            flow_at: None,
+            under_later: false,
         }
     }
 
@@ -1898,6 +1914,8 @@ impl Builder<'_> {
                     heading: false,
                     pseudo: None,
                     float_split: None,
+                    flow_at: None,
+                    under_later: false,
                 };
                 Generated::place(Some(empty), c, link);
             }
@@ -2297,6 +2315,24 @@ impl Builder<'_> {
             c.absolutes = stay;
             self.hoisted.extend(up);
         }
+        // Absolute boxes go after the flow: note those a later positioned
+        // sibling of as high a z-index paints over (BBC's consent overlay,
+        // before its dialog, both at z-index 2147483646).
+        for b in &mut c.absolutes {
+            if let LayoutBox::Block(b) = b
+                && let Some(at) = b.flow_at
+            {
+                let level = b.style.z_index.unwrap_or(0);
+                b.under_later = level >= 0
+                    && children.get(at as usize..).is_some_and(|later| {
+                        later.iter().any(|c| {
+                            matches!(c, LayoutBox::Block(s)
+                                if matches!(s.style.position, style::Position::Relative | style::Position::Sticky)
+                                    && s.style.z_index.unwrap_or(0) >= level)
+                        })
+                    });
+            }
+        }
         // Positioned boxes paint in z-index order (tree order among equals).
         c.absolutes.sort_by_key(|b| match b {
             LayoutBox::Block(b) => b.style.z_index.unwrap_or(0),
@@ -2471,6 +2507,8 @@ impl Builder<'_> {
             heading,
             pseudo: None,
             float_split: None,
+            flow_at: None,
+            under_later: false,
         }
     }
 
@@ -2650,7 +2688,15 @@ impl Builder<'_> {
             // Anchored to the page itself and spanning it from the top
             // (`position: absolute; top: 0; left: 0; right: 0`, app shells like
             // YouTube's): that's where it would be in flow anyway.
-            if style.position == style::Position::Absolute && self.positioned == 0 && page_spanning(&style) {
+            // (Not an overlay: a layer with its own z-index, height or
+            // bottom covers the viewport, it doesn't take a place in flow.)
+            if style.position == style::Position::Absolute
+                && self.positioned == 0
+                && page_spanning(&style)
+                && style.z_index.is_none()
+                && style.height == Length::Auto
+                && style.inset.bottom == Length::Auto
+            {
                 let s = Arc::make_mut(&mut style);
                 // Relative, not static: still the box its own positioned
                 // children are placed in. (Static, a consent dialog's
@@ -2719,6 +2765,7 @@ impl Builder<'_> {
                             block.children.push(LayoutBox::Image(image));
                         }
                     }
+                    block.flow_at = Some(c.children.len() as u32);
                     c.absolutes.push(LayoutBox::Block(block));
                     continue;
                 }
@@ -2759,6 +2806,8 @@ impl Builder<'_> {
                     heading: false,
                     pseudo: None,
                     float_split: None,
+                    flow_at: None,
+                    under_later: false,
                 };
                 self.flush(c);
                 Generated::place(Some(frame), c, link);

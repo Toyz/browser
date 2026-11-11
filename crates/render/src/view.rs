@@ -256,6 +256,14 @@ pub fn take_rendered() -> usize {
 /// Render one top-level row (a list item in the virtualized page list).
 pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
     let margin = row.content.margin();
+    // Positioned boxes of one level paint in tree order: absolutes under a
+    // relatively positioned row of as high a `z-index` go first (BBC's
+    // consent overlay, before its dialog, dimmed it drawn after).
+    let content_level = match &row.content {
+        LayoutBox::Block(b) if matches!(b.style.position, style::Position::Relative | style::Position::Sticky) => b.style.z_index.unwrap_or(0),
+        _ => i32::MIN,
+    };
+    let below = |b: &LayoutBox| matches!(b, LayoutBox::Block(a) if a.style.z_index.unwrap_or(0) <= content_level);
     let mut inner = div()
         .w_full()
         .flex()
@@ -263,13 +271,14 @@ pub fn render_row(row: &Row, cx: &RenderCx) -> AnyElement {
         .pt(px(row.space_before))
         .pl(px(row.indent_left))
         .pr(px(row.indent_right))
+        .children(row.absolutes.iter().filter(|b| below(b)).map(|b| positioned(b, cx, b.margin())))
         .child(in_flow(
             &row.content,
             cx,
             Edges { top: CssLength::ZERO, bottom: CssLength::ZERO, ..margin },
             true,
         ))
-        .children(row.absolutes.iter().map(|b| positioned(b, cx, b.margin())))
+        .children(row.absolutes.iter().filter(|b| !below(b)).map(|b| positioned(b, cx, b.margin())))
         .into_any_element();
 
     // Re-create each split container around this slice, innermost first.
@@ -813,17 +822,23 @@ fn in_flow(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, flow: bool) -
     render_box(b, cx, margin, flow)
 }
 
-/// An absolutely positioned box (`z-index` auto or 0) with a relatively
-/// positioned sibling after it: positioned boxes paint in tree order, so
-/// the sibling goes on top. Drawn in place, before it, not deferred above
-/// everything (a consent dialog's backdrop dimmed the dialog itself).
+/// An absolutely positioned box with a relatively positioned sibling after
+/// it whose `z-index` is as high or higher: positioned boxes of one level
+/// paint in tree order, so the sibling goes on top. Drawn in place, before
+/// it, not deferred above everything (a consent dialog's backdrop dimmed
+/// the dialog itself: BBC's, both at z-index 2147483646).
 fn under_later_sibling(children: &[LayoutBox], ix: usize) -> bool {
-    let auto = |b: &LayoutBox| matches!(b, LayoutBox::Block(block) if block.style.z_index.is_none_or(|z| z == 0));
-    auto(&children[ix])
+    let LayoutBox::Block(this) = &children[ix] else { return false };
+    let level = this.style.z_index.unwrap_or(0);
+    if this.under_later {
+        return true;
+    }
+    // (Below the page's flow, negative ones are drawn first anyway.)
+    level >= 0
         && children[ix + 1..].iter().any(|c| {
             matches!(c, LayoutBox::Block(block)
                 if matches!(block.style.position, style::Position::Relative | style::Position::Sticky)
-                    && block.style.z_index.is_none_or(|z| z >= 0))
+                    && block.style.z_index.unwrap_or(0) >= level)
         })
 }
 
