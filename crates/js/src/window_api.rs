@@ -89,7 +89,7 @@ fn console(dom: &Shared, cx: &mut Context) -> JsValue {
     level!("debug");
     level!("error");
     level!("trace");
-    for name in ["group", "groupCollapsed", "groupEnd", "time", "timeEnd", "timeLog", "count", "countReset", "assert", "table", "dir", "dirxml", "clear"] {
+    for name in ["group", "groupCollapsed", "groupEnd", "time", "timeEnd", "timeLog", "timeStamp", "count", "countReset", "assert", "table", "dir", "dirxml", "clear", "profile", "profileEnd", "context"] {
         init.function(NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())), JsString::from(name), 0);
     }
     init.build().into()

@@ -877,6 +877,21 @@
   }
 
   class Element extends Node {
+    // Whether it's rendered: no `display: none` on it or above (and, if
+    // asked, not hidden or transparent).
+    checkVisibility(opts) {
+      opts = opts || {};
+      if (!this.isConnected) return false;
+      for (let e = this; e && e.nodeType === 1; e = e.parentElement) {
+        const s = getComputedStyle(e);
+        if (s.display === "none") return false;
+        if ((opts.opacityProperty || opts.checkOpacity) && s.opacity === "0") return false;
+      }
+      if (opts.visibilityProperty || opts.checkVisibilityCSS) {
+        if (getComputedStyle(this).visibility !== "visible") return false;
+      }
+      return true;
+    }
     get tagName() { return N.tag(this.__featherNode).toUpperCase(); }
     get localName() { return N.tag(this.__featherNode); }
     get namespaceURI() { return N.namespace(this.__featherNode); }
@@ -1437,6 +1452,26 @@
       }
     }
   }
+  // The kinds of rule, as their own classes (pages test `rule instanceof
+  // CSSStyleRule`; without it Google Translate's scripts threw).
+  class CSSGroupingRule extends CSSRule {}
+  class CSSConditionRule extends CSSGroupingRule {}
+  class CSSStyleRule extends CSSRule {}
+  class CSSMediaRule extends CSSConditionRule {}
+  class CSSSupportsRule extends CSSConditionRule {}
+  class CSSImportRule extends CSSRule {}
+  class CSSFontFaceRule extends CSSRule {}
+  class CSSKeyframesRule extends CSSRule {}
+  for (const [k, v] of Object.entries({ STYLE_RULE: 1, CHARSET_RULE: 2, IMPORT_RULE: 3, MEDIA_RULE: 4, FONT_FACE_RULE: 5, PAGE_RULE: 6, KEYFRAMES_RULE: 7, KEYFRAME_RULE: 8, SUPPORTS_RULE: 12 })) {
+    Object.defineProperty(CSSRule, k, { value: v, enumerable: true });
+    Object.defineProperty(CSSRule.prototype, k, { value: v, enumerable: true });
+  }
+  function ruleFor(text, sheet) {
+    const t = String(text).trimStart();
+    const Kind = t.startsWith("@media") ? CSSMediaRule : t.startsWith("@supports") ? CSSSupportsRule : t.startsWith("@import") ? CSSImportRule
+      : t.startsWith("@font-face") ? CSSFontFaceRule : /^@(-webkit-)?keyframes/.test(t) ? CSSKeyframesRule : t.startsWith("@") ? CSSRule : CSSStyleRule;
+    return new Kind(text, sheet);
+  }
   // Stylesheets as rule lists: constructed ones (adoptedStyleSheets) and
   // <style> elements' (CSS-in-JS libraries insertRule into those).
   class CSSStyleSheet {
@@ -1445,7 +1480,7 @@
     set _text(v) { this._rules = splitRules(String(v)); }
     replaceSync(text) { this._text = String(text); this._changed(); }
     replace(text) { this.replaceSync(text); return Promise.resolve(this); }
-    get cssRules() { return this._rules.map((r) => new CSSRule(r, this)); }
+    get cssRules() { return this._rules.map((r) => ruleFor(r, this)); }
     get rules() { return this.cssRules; }
     get type() { return "text/css"; }
     insertRule(rule, index) {
@@ -1908,7 +1943,7 @@
     XPathResult: Object.assign(class XPathResult {}, { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 }),
     VisualViewport: class VisualViewport extends EventTarget {},
     ReportingObserver: class ReportingObserver { observe() {} disconnect() {} takeRecords() { return []; } },
-    CSSRule,
+    CSSRule, CSSStyleRule, CSSMediaRule, CSSSupportsRule, CSSImportRule, CSSFontFaceRule, CSSKeyframesRule, CSSGroupingRule, CSSConditionRule,
     XMLDocument: Document, HTMLDocument: Document,
     Event, CustomEvent, UIEvent, MouseEvent, KeyboardEvent, InputEvent, FocusEvent, PointerEvent: MouseEvent,
     URL, URLSearchParams,
@@ -1931,7 +1966,19 @@
         domContentLoadedEventEnd: t, domComplete: t, loadEventStart: t, loadEventEnd: t, unloadEventStart: 0, unloadEventEnd: 0,
         redirectStart: 0, redirectEnd: 0, toJSON() { return this; },
       };
-      const navigation = { name: location.href, entryType: "navigation", startTime: 0, duration: 0, type: "navigate", redirectCount: 0, transferSize: 0, encodedBodySize: 0, decodedBodySize: 0, responseStart: 0, domContentLoadedEventEnd: 0, loadEventEnd: 0, toJSON() { return this; } };
+      // PerformanceNavigationTiming, every field a number (Google
+      // Translate rounds them into a report: undefined became NaN, its
+      // protobuf threw "int32" and the translation never showed).
+      const loaded = Math.max(1, Math.round(N.now()));
+      const navigation = {
+        name: location.href, entryType: "navigation", initiatorType: "navigation", nextHopProtocol: "h2", type: "navigate", redirectCount: 0,
+        startTime: 0, duration: loaded, workerStart: 0, redirectStart: 0, redirectEnd: 0, fetchStart: 0,
+        domainLookupStart: 0, domainLookupEnd: 0, connectStart: 0, connectEnd: 0, secureConnectionStart: 0,
+        requestStart: 0, responseStart: 0, responseEnd: 0, unloadEventStart: 0, unloadEventEnd: 0,
+        domInteractive: loaded, domContentLoadedEventStart: loaded, domContentLoadedEventEnd: loaded, domComplete: loaded,
+        loadEventStart: loaded, loadEventEnd: loaded, transferSize: 0, encodedBodySize: 0, decodedBodySize: 0, serverTiming: [],
+        toJSON() { return this; },
+      };
       const marks = [];
       return {
         now: () => N.now(), timeOrigin: origin, timing, navigation: { type: 0, redirectCount: 0 },
