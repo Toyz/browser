@@ -135,7 +135,7 @@ where
         let previous_index = self.write_index.checked_sub(1).unwrap_or(PEEK_BUF_SIZE - 1);
 
         if let Some(ref token) = self.peeked[previous_index]
-            && token.kind() == &TokenKind::LineTerminator
+            && matches!(token.kind(), TokenKind::LineTerminator)
         {
             // We don't want to have multiple contiguous line terminators in the buffer, since
             // they have no meaning.
@@ -188,7 +188,7 @@ where
         }
 
         if let Some(ref token) = self.peeked[self.read_index] {
-            if skip_line_terminators && token.kind() == &TokenKind::LineTerminator {
+            if skip_line_terminators && matches!(token.kind(), TokenKind::LineTerminator) {
                 // We only store 1 contiguous line terminator, so if the one at `self.read_index`
                 // was a line terminator, we know that the next won't be one.
                 self.read_index = (self.read_index + 1) % PEEK_BUF_SIZE;
@@ -246,7 +246,7 @@ where
             }
 
             if let Some(ref token) = self.peeked[read_index] {
-                if skip_line_terminators && token.kind() == &TokenKind::LineTerminator {
+                if skip_line_terminators && matches!(token.kind(), TokenKind::LineTerminator) {
                     read_index = (read_index + 1) % PEEK_BUF_SIZE;
                     // We only store 1 contiguous line terminator, so if the one at `self.read_index`
                     // was a line terminator, we know that the next won't be one.

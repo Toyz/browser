@@ -1732,6 +1732,14 @@ where
     impl<'ast> Visitor<'ast> for ContainsInvalidObjectLiteral {
         type BreakTy = ();
 
+        // (Feather) Not into nested functions: each function's body is
+        // checked when it's parsed (an arrow's expression body too), and
+        // walking them again from every enclosing statement list made
+        // parsing quadratic in nesting depth.
+        fn visit_function_body(&mut self, _: &'ast FunctionBody) -> ControlFlow<Self::BreakTy> {
+            ControlFlow::Continue(())
+        }
+
         fn visit_object_literal(
             &mut self,
             node: &'ast crate::expression::literal::ObjectLiteral,

@@ -258,7 +258,7 @@ where
     ) -> ParseResult<&Token> {
         let tok = self.peek_no_skip_line_term(skip_n, interner).or_abrupt()?;
 
-        if tok.kind() == &TokenKind::LineTerminator {
+        if matches!(tok.kind(), TokenKind::LineTerminator) {
             Err(Error::unexpected(
                 tok.to_string(interner),
                 tok.span(),
@@ -277,7 +277,7 @@ where
     ) -> ParseResult<Option<bool>> {
         self.peek_no_skip_line_term(skip_n, interner)?
             .map_or(Ok(None), |t| {
-                Ok(Some(t.kind() == &TokenKind::LineTerminator))
+                Ok(Some(matches!(t.kind(), TokenKind::LineTerminator)))
             })
     }
 

@@ -205,6 +205,18 @@ Drop these when Boa releases include equivalent fixes.
   skipped. font-kit's `family_name` aborts the app on a web font without a
   family name.
 
+## boa_parser, boa_ast (parsing speed)
+
+- `boa_parser/src/lexer/identifier.rs`: ASCII identifier characters are
+  matched directly; the Unicode ID_Start/ID_Continue set lookup is only for
+  the rest (it was 6% of parsing YouTube's player).
+- `boa_parser`: line-terminator token checks are `matches!`, not a derived
+  `PartialEq` on `TokenKind`.
+- `boa_ast/src/operations/mod.rs` (`contains_invalid_object_literal`) doesn't
+  walk into nested function bodies (each is checked when parsed);
+  `boa_parser/.../arrow_function.rs` checks an arrow's expression body
+  itself.
+
 ## gpui-component 0.9.0
 
 - `src/input/input.rs`, `src/input/textarea.rs`: `caret_color()` on `Input`

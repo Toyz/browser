@@ -123,7 +123,7 @@ where
                 let next_tok = cursor.peek_no_skip_line_term(0, interner).or_abrupt()?;
 
                 // Check if next token is a line terminator
-                if next_tok.kind() == &TokenKind::LineTerminator {
+                if matches!(next_tok.kind(), TokenKind::LineTerminator) {
                     return Err(Error::general(
                         "Unexpected token 'await'",
                         tok.span().start(),

@@ -4631,6 +4631,7 @@ dependencies = [
  "image",
  "imagesize 0.13.0",
  "media",
+ "mimalloc",
  "net",
  "page",
  "ring",

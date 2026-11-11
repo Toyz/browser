@@ -197,6 +197,14 @@ where
         } else {
             let expression = ExpressionBody::new(self.allow_in, false).parse(cursor, interner)?;
             let span = expression.span();
+            // (Feather) Checked here: enclosing statement lists no longer
+            // walk into function bodies for it.
+            if boa_ast::operations::contains_invalid_object_literal(&expression) {
+                return Err(Error::lex(LexError::Syntax(
+                    "invalid object literal in arrow function body".into(),
+                    span.start(),
+                )));
+            }
             ast::function::FunctionBody::new(
                 StatementList::new(
                     [ast::Statement::Return(Return::new(expression.into())).into()],
