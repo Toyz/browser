@@ -96,7 +96,9 @@ fn fill<T: Copy>(s: &Shared, channels: u16, out: &mut [T], convert: impl Fn(f32)
         out.fill(silence);
         return;
     }
-    let volume = f32::from_bits(s.volume.load(Ordering::Relaxed));
+    // MEDIA_MUTE: play on (the clock runs) without a sound.
+    static MUTE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("MEDIA_MUTE").is_some());
+    let volume = if *MUTE { 0.0 } else { f32::from_bits(s.volume.load(Ordering::Relaxed)) };
     let mut q = s.queue.lock().unwrap_or_else(|e| e.into_inner());
     // Whole frames only.
     let frames = (q.len() / usize::from(channels)).min(out.len() / usize::from(channels));

@@ -55,6 +55,9 @@ Environment:
   FEATHER_DEBUG_SHADOW   Log shadow-tree styling
   FEATHER_DEBUG_Z        Log stacking (z-index) priorities
   BROWSER_DEBUG          Log navigation, clicks and script timing
+  MEDIA_MUTE             Play media silently
+  FEATHER_NO_CULL        Build every box each frame, off screen or not
+  FEATHER_DEBUG_CULL     Log how many boxes were far off screen each frame
 ";
 
 #[derive(Debug, Clone)]

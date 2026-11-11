@@ -188,6 +188,8 @@ pub struct RenderCx {
     pub controls: ControlRenderer,
     /// What `<iframe>`s show: their documents' views, by element.
     pub embeds: Rc<HashMap<page::NodeId, gpui_kit::AnyView>>,
+    /// Skips building blocks far off screen (see [`crate::cull`]).
+    pub cull: Option<Rc<crate::cull::Cull>>,
 }
 
 pub(crate) fn cursor_style(c: style::Cursor) -> Option<CursorStyle> {
@@ -239,6 +241,16 @@ fn line_height(lh: LineHeight) -> DefiniteLength {
         LineHeight::Number(n) => relative(n),
         LineHeight::Px(v) => px(v).into(),
     }
+}
+
+thread_local! {
+    /// Boxes rendered since last asked (FEATHER_PERF).
+    static RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Boxes rendered since the last call (FEATHER_PERF).
+pub fn take_rendered() -> usize {
+    RENDERED.with(|n| n.replace(0))
 }
 
 /// Render one top-level row (a list item in the virtualized page list).
@@ -387,58 +399,89 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .zip([s.border_width.top, s.border_width.left, s.border_width.bottom, s.border_width.right])
         .find(|&(_, w)| w > 0.0)
         .map(|(c, _)| palette.color(c));
-    el.mt(len(margin.top))
-        .mr(len(margin.right))
-        .mb(len(margin.bottom))
-        .ml(len(margin.left))
-        .pt(definite(s.padding.top))
-        .pr(definite(s.padding.right))
-        .pb(definite(s.padding.bottom))
-        .pl(definite(s.padding.left))
-        .border_t(px(s.border_width.top))
-        .border_r(px(s.border_width.right))
-        .border_b(px(s.border_width.bottom))
-        .border_l(px(s.border_width.left))
-        .when_some(border_color, |d, c| d.border_color(c))
-        .rounded_tl(radius(s.border_radius[0]))
-        .rounded_tr(radius(s.border_radius[1]))
-        .rounded_br(radius(s.border_radius[2]))
-        .rounded_bl(radius(s.border_radius[3]))
-        .when_some(s.box_background(), |d, bg| d.bg(palette.color(bg)))
+    // Set in place: each builder call moves the whole `Div` (1.3KB), and
+    // this ran dozens of them for every box of every frame (a seventh of
+    // the window thread's time on YouTube was copying).
+    let mut el = el;
+    {
+        let st = el.style();
+        st.margin.top = Some(len(margin.top));
+        st.margin.right = Some(len(margin.right));
+        st.margin.bottom = Some(len(margin.bottom));
+        st.margin.left = Some(len(margin.left));
+        st.padding.top = Some(definite(s.padding.top));
+        st.padding.right = Some(definite(s.padding.right));
+        st.padding.bottom = Some(definite(s.padding.bottom));
+        st.padding.left = Some(definite(s.padding.left));
+        st.border_widths.top = Some(px(s.border_width.top).into());
+        st.border_widths.right = Some(px(s.border_width.right).into());
+        st.border_widths.bottom = Some(px(s.border_width.bottom).into());
+        st.border_widths.left = Some(px(s.border_width.left).into());
+        if let Some(c) = border_color {
+            st.border_color = Some(c);
+        }
+        st.corner_radii.top_left = Some(radius(s.border_radius[0]).into());
+        st.corner_radii.top_right = Some(radius(s.border_radius[1]).into());
+        st.corner_radii.bottom_right = Some(radius(s.border_radius[2]).into());
+        st.corner_radii.bottom_left = Some(radius(s.border_radius[3]).into());
+        if let Some(bg) = s.box_background() {
+            st.background = Some(palette.color(bg).into());
+        }
         // GPUI sizes border boxes; CSS's default content-box sizes exclude
         // padding/border (see `content_box`).
-        .when(content_box(s), |mut d| {
-            d.style().content_box = Some(true);
-            d
-        })
-        .when(!s.width.is_auto(), |d| d.w(len(box_width(s, s.width))))
-        .when(!s.height.is_auto(), |d| d.h(len(box_height(s, s.height))))
-        .when(!s.min_width.is_auto(), |d| d.min_w(len(box_width(s, s.min_width))))
-        .when(!s.min_height.is_auto(), |d| d.min_h(len(box_height(s, s.min_height))))
-        .when(!s.max_width.is_auto(), |d| d.max_w(len(box_width(s, s.max_width))))
-        .when(!s.max_height.is_auto(), |d| d.max_h(len(box_height(s, s.max_height))))
+        if content_box(s) {
+            st.content_box = Some(true);
+        }
+        if !s.width.is_auto() {
+            st.size.width = Some(len(box_width(s, s.width)));
+        }
+        if !s.height.is_auto() {
+            st.size.height = Some(len(box_height(s, s.height)));
+        }
+        if !s.min_width.is_auto() {
+            st.min_size.width = Some(len(box_width(s, s.min_width)));
+        }
+        if !s.min_height.is_auto() {
+            st.min_size.height = Some(len(box_height(s, s.min_height)));
+        }
+        if !s.max_width.is_auto() {
+            st.max_size.width = Some(len(box_width(s, s.max_width)));
+        }
+        if !s.max_height.is_auto() {
+            st.max_size.height = Some(len(box_height(s, s.max_height)));
+        }
         // A positioned box's `calc(100% - 34rem)`: resolved by the layout
         // against its containing block (which the builder doesn't know).
-        .when_some(s.mixed_widths.as_ref().filter(|_| matches!(s.position, style::Position::Absolute | style::Position::Fixed)), |mut d, m| {
+        if let Some(m) = s.mixed_widths.as_ref().filter(|_| matches!(s.position, style::Position::Absolute | style::Position::Fixed)) {
             let calc = |(px_, pct): (f32, f32)| gpui_kit::Length::Definite(gpui_kit::DefiniteLength::Calc { fraction: pct / 100.0, pixels: px(px_) });
             if let Some(w) = m.width {
-                d.style().size.width = Some(calc(w));
+                st.size.width = Some(calc(w));
             }
             if let Some(w) = m.min_width {
-                d.style().min_size.width = Some(calc(w));
+                st.min_size.width = Some(calc(w));
             }
             if let Some(w) = m.max_width {
-                d.style().max_size.width = Some(calc(w));
+                st.max_size.width = Some(calc(w));
             }
-            d
-        })
-        .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
-        .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
+        }
+        if s.overflow != Overflow::Visible {
+            st.overflow.x = Some(gpui_kit::Overflow::Hidden);
+            st.overflow.y = Some(gpui_kit::Overflow::Hidden);
+        }
+        if s.opacity < 1.0 {
+            st.opacity = Some(s.opacity);
+        }
         // `aspect-ratio`: the missing side follows the given one.
-        .when_some(s.aspect_ratio.filter(|_| s.width.is_auto() || s.height.is_auto()), |mut d, r| {
-            d.style().aspect_ratio = Some(r);
-            d
-        })
+        if let Some(r) = s.aspect_ratio.filter(|_| s.width.is_auto() || s.height.is_auto()) {
+            st.aspect_ratio = Some(r);
+        }
+        st.flex_grow = Some(s.flex_grow);
+        st.flex_shrink = Some(s.flex_shrink);
+        if !s.flex_basis.is_auto() {
+            st.flex_basis = Some(len(s.flex_basis));
+        }
+    }
+    el
         .map(|d| {
             // `filter: drop-shadow()`: drawn as the box's shadow.
             let mut shadows = s.shadows.as_ref().map(|sh| visible_shadows(sh, s, palette)).unwrap_or_default();
@@ -449,9 +492,6 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
             }
             if shadows.is_empty() { d } else { d.shadow(shadows) }
         })
-        .flex_grow(s.flex_grow)
-        .flex_shrink(s.flex_shrink)
-        .when(!s.flex_basis.is_auto(), |d| d.flex_basis(len(s.flex_basis)))
         // `width: fit-content` in a column: don't stretch across it (auto
         // margins still center it).
         .when(s.fit_width && s.align_self.is_none(), |d| d.self_start())
@@ -793,6 +833,7 @@ pub(crate) fn is_out_of_flow(b: &LayoutBox) -> bool {
 
 /// Render a box with the margins its parent's layout decided on.
 fn render_box(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    RENDERED.with(|n| n.set(n.get() + 1));
     match b {
         LayoutBox::Paragraph(p) => render_paragraph(p, cx),
         LayoutBox::Block(block) => render_block(block, cx, margin, in_flow),
@@ -1083,6 +1124,114 @@ fn round_clip(s: &ComputedStyle) -> Option<(f32, f32, f32)> {
 }
 
 fn render_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
+    // Far off screen last frame: its place kept, its contents skipped.
+    if let Some(cull) = cx.cull.as_ref().filter(|_| {
+        !block.children.is_empty() && !IN_SCROLLER.get() && !matches!(block.style.position, style::Position::Absolute | style::Position::Fixed)
+    }) {
+        let hollow = cull.hollow(block);
+        let child = match hollow {
+            Some(size) => hollow_block(block, cx, margin, size),
+            None => render_block_filtered(block, cx, margin, in_flow),
+        };
+        return Recorded { child, id: block.id, cull: cull.clone(), hollow: hollow.is_some() }.into_any_element();
+    }
+    render_block_filtered(block, cx, margin, in_flow)
+}
+
+thread_local! {
+    /// Inside a box that scrolls on its own: what's on screen there changes
+    /// without the page drawing anew, so nothing's skipped.
+    static IN_SCROLLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A block kept out of this frame: its box, at the size it was drawn last
+/// frame, with nothing in it.
+fn hollow_block(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, size: Size<Pixels>) -> AnyElement {
+    let mut d = apply_box(div(), &invisible(&block.style), margin, cx);
+    let st = d.style();
+    st.size.width = Some(size.width.into());
+    st.size.height = Some(size.height.into());
+    st.min_size.width = Some(size.width.into());
+    st.min_size.height = Some(size.height.into());
+    st.max_size.width = Some(Length::Auto);
+    st.max_size.height = Some(Length::Auto);
+    st.flex_grow = Some(0.0);
+    st.flex_shrink = Some(0.0);
+    st.flex_basis = Some(Length::Auto);
+    // (Its size is the border box's.)
+    st.content_box = Some(false);
+    d.into_any_element()
+}
+
+/// A block that notes where it's drawn (laid out as the block itself).
+struct Recorded {
+    child: AnyElement,
+    id: usize,
+    cull: Rc<crate::cull::Cull>,
+    hollow: bool,
+}
+
+impl IntoElement for Recorded {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Recorded {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // Skipped, but it came near: draw it properly next frame.
+        if self.cull.drawn(self.id, bounds) && self.hollow {
+            window.refresh();
+        }
+        self.child.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        _inspector_id: Option<&InspectorElementId>,
+        _bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.child.paint(window, cx);
+    }
+}
+
+fn render_block_filtered(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in_flow: bool) -> AnyElement {
     // `filter`: its colors change everything drawn in the box.
     if let Some(filters) = block.style.filter.as_ref().filter(|f| f.iter().any(|f| f.is_color())) {
         let inner = RenderCx { palette: cx.palette.under(filters), ..cx.clone() };
@@ -1318,6 +1467,7 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
         None => base,
     };
 
+    let outer_scroller = IN_SCROLLER.replace(IN_SCROLLER.get() || scrolls);
     let el = match &block.kind {
         BlockKind::Control(control) => base.child(ControlHost {
             control: control.clone(),
@@ -1395,6 +1545,7 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
             apply_gap(apply_alignment(d, s), s).children(render_items(&block.children, cx))
         }
     };
+    IN_SCROLLER.set(outer_scroller);
 
     let el = match cursor_style(s.cursor) {
         Some(c) => el.cursor(c),

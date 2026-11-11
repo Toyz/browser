@@ -160,6 +160,8 @@ pub struct Tab {
     debug_scroll_top: std::cell::Cell<Option<(usize, f32, usize)>>,
     /// (FEATHER_PERF) frame statistics, printed each second.
     perf: Option<Perf>,
+    /// What was drawn far off screen last frame (skipped this one).
+    cull: Option<Rc<render::cull::Cull>>,
     /// Sound is playing in the page (the tab strip shows a speaker).
     pub(super) audible: bool,
     /// The user muted the tab (kept across its pages).
@@ -332,6 +334,7 @@ impl Tab {
             layout_gone: Vec::new(),
             debug_scroll_top: Default::default(),
             perf: std::env::var_os("FEATHER_PERF").map(|_| Perf::default()),
+            cull: std::env::var_os("FEATHER_NO_CULL").is_none().then(Rc::default),
             audible: false,
             muted: false,
             layout_painted: HashSet::new(),
@@ -964,6 +967,7 @@ impl Tab {
                 old.size(0) == gpui::size(gpui::DevicePixels(c.width as i32), gpui::DevicePixels(c.height as i32))
             };
             if let Some(old) = self.canvas_frames.get(&node)
+                && std::env::var_os("FEATHER_NO_INPLACE").is_none()
                 && same_size(old)
                 && window.update_image(old, 0, &c.pixels).unwrap_or(false)
             {
@@ -1890,7 +1894,7 @@ impl Tab {
                         let d = t.elapsed();
                         (n, total, worst) = (n + 1, total + d, worst.max(d));
                         if since.elapsed() >= Duration::from_secs(1) {
-                            eprintln!("perf/s: {n} draws, {:?} avg, {worst:?} worst", total / n.max(1));
+                            eprintln!("perf/s: {n} draws, {:?} avg, {worst:?} worst, {} boxes a draw", total / n.max(1), render::view::take_rendered() / n.max(1) as usize);
                             (n, total, worst, since) = (0, Duration::ZERO, Duration::ZERO, std::time::Instant::now());
                         }
                     }
@@ -2162,6 +2166,9 @@ impl Tab {
     /// Give each `<iframe>` in the document a tab showing its `src`, drop
     /// the ones gone (or pointed elsewhere).
     pub(super) fn sync_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("FEATHER_NO_FRAMES").is_some() {
+            return;
+        }
         let Some(page) = &self.page else { return };
         let Some(doc) = page.doc.clone() else { return };
         let base = page.url.clone();
@@ -2244,6 +2251,7 @@ impl Tab {
         let page_gen = self.page_gen;
         let controls = cx.entity().downgrade();
         RenderCx {
+            cull: self.cull.clone(),
             embeds: self.embeds.clone(),
             controls: Rc::new(move |control, style, window, cx| {
                 controls
@@ -2413,6 +2421,19 @@ impl Tab {
         let layout = self.animations.display.clone().unwrap_or_else(|| page.layout.clone());
         // (Pinned boxes animate too: their frames are in it.)
         let shown = layout.clone();
+        if let Some(cull) = &self.cull {
+            // (Window coordinates: down to the list's bottom.)
+            let viewport = self.list_state.viewport_bounds();
+            let viewport = gpui_kit::size(viewport.size.width, viewport.origin.y + viewport.size.height);
+            cull.begin(render::cull::CullKey {
+                // (Not the in-between frames of animations: the same
+                // boxes, mostly moved by transforms.)
+                layout: Arc::as_ptr(&page.layout) as usize,
+                images: self.images_generation,
+                fonts: self.fonts_generation,
+                viewport: (f32::from(viewport.width), f32::from(viewport.height)),
+            });
+        }
         let rcx = self.render_cx(cx);
         let rcx_fixed = rcx.clone();
         let rcx_sticky = rcx.clone();
@@ -2563,6 +2584,7 @@ impl Tab {
         }
         let list_state = self.swipe_peek.as_ref().map(|(_, l)| l.clone()).expect("just set");
         let mut rcx = self.render_cx(cx);
+        rcx.cull = None;
         rcx.track_hover = false;
         rcx.controls = Rc::new(|_: &render::Control, _: &style::ComputedStyle, _: &mut Window, _: &mut App| {
             div().into_any_element()
