@@ -8,7 +8,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::source::{Feeder, Growing};
-use crate::{Demuxer, Info, Output, VideoFrame, audio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::mse::Mse;
+use crate::{Demuxer, Info, Output, Source, VideoFrame, audio};
 
 /// What the page asks of a player.
 pub enum Command {
@@ -43,39 +47,49 @@ pub enum Event {
     Error(String),
 }
 
+/// What a player plays.
+pub enum Input {
+    /// A file (downloading), with a hint at its format (its extension or
+    /// MIME subtype).
+    File(Growing, Option<String>),
+    /// What a page appends to a `MediaSource`.
+    Mse(Mse),
+}
+
 /// A playing media file; dropping it stops everything.
 pub struct Player {
     tx: mpsc::Sender<Command>,
-    feeder: Feeder,
+    feeder: Option<Feeder>,
+    stop: Arc<AtomicBool>,
 }
 
 impl Player {
-    /// Decode `source` (`hint`: its extension or MIME subtype), showing
-    /// pictures through `show` and reporting through `events` (both called
-    /// on the player's thread). It starts paused, showing its first picture.
-    pub fn start(
-        source: Growing,
-        hint: Option<String>,
-        show: impl FnMut(VideoFrame) + Send + 'static,
-        events: impl FnMut(Event) + Send + 'static,
-    ) -> Player {
-        Self::start_with(source, hint, show, events, std::env::var_os("MEDIA_NO_AUDIO").is_none())
+    /// Play `input`, showing pictures through `show` and reporting through
+    /// `events` (both called on the player's thread). It starts paused,
+    /// showing its first picture.
+    pub fn start(input: Input, show: impl FnMut(VideoFrame) + Send + 'static, events: impl FnMut(Event) + Send + 'static) -> Player {
+        Self::start_with(input, show, events, std::env::var_os("MEDIA_NO_AUDIO").is_none())
     }
 
-    fn start_with(
-        source: Growing,
-        hint: Option<String>,
-        show: impl FnMut(VideoFrame) + Send + 'static,
-        events: impl FnMut(Event) + Send + 'static,
-        sound: bool,
-    ) -> Player {
-        let feeder = source.feeder();
+    pub(crate) fn start_with(input: Input, show: impl FnMut(VideoFrame) + Send + 'static, events: impl FnMut(Event) + Send + 'static, sound: bool) -> Player {
+        let feeder = match &input {
+            Input::File(g, _) => Some(g.feeder()),
+            Input::Mse(_) => None,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel();
+        let stopped = stop.clone();
         std::thread::Builder::new()
             .name("feather-media".into())
-            .spawn(move || present(source, hint, rx, show, events, sound))
+            .spawn(move || {
+                let source: anyhow::Result<Box<dyn Source>> = match input {
+                    Input::File(g, hint) => Demuxer::open_source(Box::new(g), hint.as_deref()).map(|d| Box::new(d) as Box<dyn Source>),
+                    Input::Mse(m) => m.source(stopped).map(|s| Box::new(s) as Box<dyn Source>),
+                };
+                present(source, rx, show, events, sound)
+            })
             .ok();
-        Player { tx, feeder }
+        Player { tx, feeder, stop }
     }
 
     pub fn send(&self, c: Command) {
@@ -85,8 +99,11 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
-        // A decoder waiting on the download stops waiting.
-        self.feeder.close();
+        // A decoder waiting on the download (or appends) stops waiting.
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(f) = &self.feeder {
+            f.close();
+        }
     }
 }
 
@@ -94,7 +111,7 @@ impl Drop for Player {
 /// end).
 type Decoded = (u32, Result<Option<Output>, String>);
 
-fn decode(mut d: Demuxer, seeks: mpsc::Receiver<(u32, f64)>, out: mpsc::SyncSender<Decoded>) {
+fn decode(mut d: Box<dyn Source>, seeks: mpsc::Receiver<(u32, f64)>, out: mpsc::SyncSender<Decoded>) {
     let mut generation = 0;
     let mut ended = false;
     loop {
@@ -137,14 +154,13 @@ struct Clock {
 }
 
 fn present(
-    source: Growing,
-    hint: Option<String>,
+    source: anyhow::Result<Box<dyn Source>>,
     commands: mpsc::Receiver<Command>,
     mut show: impl FnMut(VideoFrame),
     mut events: impl FnMut(Event),
     sound: bool,
 ) {
-    let d = match Demuxer::open_source(Box::new(source), hint.as_deref()) {
+    let d = match source {
         Ok(d) => d,
         Err(e) => {
             events(Event::Error(format!("{e:#}")));
@@ -177,6 +193,8 @@ fn present(
     let mut announce = false;
     let mut last_tick = Instant::now();
     let mut last_shown = 0.0;
+    // The first sound's time (where silent-picture-less media starts).
+    let mut first_audio: Option<f64> = None;
     // Without a sound device: how far the (dropped) sound has been decoded.
     let mut heard_until = 0.0;
 
@@ -290,6 +308,7 @@ fn present(
                     frames.push_back(f);
                 }
                 Ok(Some(Output::Audio(mut a))) => {
+                    first_audio.get_or_insert(a.time);
                     let channels = usize::from(a.channels.max(1));
                     heard_until = a.time + (a.samples.len() / channels) as f64 / f64::from(a.rate.max(1));
                     if let Some(t) = seek_to {
@@ -315,7 +334,7 @@ fn present(
         // The picture for now.
         if show_next {
             let ready = frames.iter().position(|f| seek_to.is_none_or(|t| f.time + 0.001 >= t));
-            let done = !info.has_video || eof;
+            let done = (!info.has_video && first_audio.is_some()) || eof;
             if let Some(i) = ready.or(if done { frames.len().checked_sub(1) } else { None }) {
                 frames.drain(..i);
                 if let Some(f) = frames.pop_front() {
@@ -330,7 +349,13 @@ fn present(
                         clock.base = t;
                         events(Event::Seeked(t));
                     }
-                    None => events(Event::Ready),
+                    None => {
+                        // Time starts at the first picture (or sound): a
+                        // live stream's is well past 0.
+                        clock.base = if info.has_video { last_shown } else { first_audio.unwrap_or(0.0) };
+                        events(Event::Time(clock.base));
+                        events(Event::Ready);
+                    }
                 }
                 if std::mem::take(&mut announce) && playing {
                     events(Event::Playing);
@@ -433,9 +458,10 @@ mod tests {
         let (etx, events) = mpsc::channel();
         let s = shown.clone();
         let source = Growing::whole(include_bytes!("../tests/data/test.mp4").to_vec());
-        let player = Player::start_with(source, Some("mp4".into()), move |f| s.lock().unwrap().push(f.time), move |e| { etx.send(e).ok(); }, false);
+        let player = Player::start_with(Input::File(source, Some("mp4".into())), move |f| s.lock().unwrap().push(f.time), move |e| { etx.send(e).ok(); }, false);
         let next = || events.recv_timeout(Duration::from_secs(5)).expect("an event");
         assert!(matches!(next(), Event::Metadata(i) if i.has_video));
+        assert_eq!(next(), Event::Time(0.0));
         assert_eq!(next(), Event::Ready);
         assert_eq!(shown.lock().unwrap().as_slice(), &[0.0], "the first picture, paused");
         player.send(Command::Seek(1.0));
