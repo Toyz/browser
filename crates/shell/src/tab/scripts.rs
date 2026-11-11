@@ -225,6 +225,10 @@ impl Tab {
         // for its `mouseleave` / `mouseout`.
         let hears = host.hears_mouse(&path);
         let leaving = kind == "mousemove" && std::mem::replace(&mut self.script_hovering, hears);
+        if std::env::var_os("FEATHER_DEBUG_MOUSE").is_some() {
+            let tag = |n: page::NodeId| doc.element(n).map(|e| format!("{}.{}", e.name.local, e.attr("class").unwrap_or("").split(' ').next().unwrap_or(""))).unwrap_or_default();
+            eprintln!("mouse {kind} at {position:?}: target {} hears {hears} (path {} deep, top {})", tag(target), path.len(), path.iter().rev().take(4).map(|&n| tag(n)).collect::<Vec<_>>().join(">"));
+        }
         if !hears && !leaving {
             return;
         }

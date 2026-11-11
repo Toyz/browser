@@ -2677,14 +2677,10 @@ impl Builder<'_> {
             if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && self.opacity < 1.0 {
                 Arc::make_mut(&mut style).opacity *= self.opacity;
             }
-            if matches!(style.position, style::Position::Fixed | style::Position::Absolute)
-                && style.opacity <= 0.0
-                && style.transitions.is_none()
-                && !self.keep.contains(&child)
-            {
-                // Invisible and out of the way: nothing to build.
-                continue;
-            }
+            // (Transparent positioned boxes are still laid out, as in
+            // browsers: scripts measure them before fading them in, and
+            // YouTube's seek preview, measured as nothing, was placed at
+            // the player's left edge.)
             // Anchored to the page itself and spanning it from the top
             // (`position: absolute; top: 0; left: 0; right: 0`, app shells like
             // YouTube's): that's where it would be in flow anyway.

@@ -299,6 +299,26 @@ fn estimated_width(dom: &mut Dom, node: NodeId) -> f32 {
     if !matches!(display.as_str(), "block" | "flex" | "grid" | "list-item" | "flow-root") {
         return 0.0;
     }
+    // Absolute, fixed and floated boxes shrink to fit: their own width, or
+    // the widest sized child, at most their `max-width` (YouTube's seek
+    // preview, measured as wide as the player, was placed at its edge).
+    let position = super::computed_value(dom, node, "position", None);
+    let float = super::computed_value(dom, node, "float", None);
+    if matches!(position.as_str(), "absolute" | "fixed") || matches!(float.as_str(), "left" | "right") {
+        let px = |v: String| v.strip_suffix("px").and_then(|n| n.trim().parse::<f32>().ok()).filter(|n| *n > 0.0);
+        if let Some(w) = px(super::computed_value(dom, node, "width", None)) {
+            return w;
+        }
+        let max = px(super::computed_value(dom, node, "max-width", None));
+        let kids: Vec<NodeId> = dom.doc.children(node).iter().copied().filter(|&c| dom.doc.element(c).is_some()).collect();
+        let widest = kids.into_iter().filter_map(|c| px(super::computed_value(dom, c, "width", None))).fold(0.0f32, f32::max);
+        if widest > 0.0 {
+            return max.map_or(widest, |m| widest.min(m));
+        }
+        if let Some(m) = max {
+            return m;
+        }
+    }
     if let Some(parent) = dom.doc.parent(node).filter(|&p| dom.doc.element(p).is_some()) {
         let pd = super::computed_value(dom, parent, "display", None);
         let row = pd.contains("flex") && !super::computed_value(dom, parent, "flex-direction", None).contains("column");

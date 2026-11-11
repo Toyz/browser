@@ -846,7 +846,7 @@ impl Runtime {
     /// as in a browser's queue.
     fn handle_arrived(&mut self, limit: usize) -> bool {
         for _ in 0..limit {
-            let msg = match self.backlog.pop_front() {
+            let msg = match self.pop_backlog() {
                 Some(m) => m,
                 None => match self.rx.try_recv() {
                     Ok(m) => m,
@@ -863,9 +863,17 @@ impl Runtime {
         true
     }
 
+    /// What `take_input` set aside: its input first.
+    fn pop_backlog(&mut self) -> Option<ToJs> {
+        match self.backlog.iter().position(is_input) {
+            Some(i) => self.backlog.remove(i),
+            None => self.backlog.pop_front(),
+        }
+    }
+
     /// The next message: what `take_input` set aside first, then the channel.
     fn next_message(&mut self, timeout: Duration) -> Result<ToJs, RecvTimeoutError> {
-        match self.backlog.pop_front() {
+        match self.pop_backlog() {
             Some(msg) => Ok(msg),
             None => self.rx.recv_timeout(timeout),
         }
@@ -876,19 +884,13 @@ impl Runtime {
     /// set everything else aside, in order, for the event loop.
     fn take_input(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
-            match msg {
-                ToJs::Click { .. }
-                | ToJs::Submit { .. }
-                | ToJs::Key { .. }
-                | ToJs::Mouse { .. }
-                | ToJs::Focus { .. }
-                | ToJs::Input { .. }
-                | ToJs::Checked { .. }
-                    if self.backlog.is_empty() =>
-                {
-                    self.handle(msg)
-                }
-                other => self.backlog.push_back(other),
+            // Input goes ahead of the network and the rest, as in a
+            // browser (a busy page's responses kept the pointer waiting
+            // seconds), but not ahead of earlier input.
+            if is_input(&msg) && !self.backlog.iter().any(is_input) {
+                self.handle(msg);
+            } else {
+                self.backlog.push_back(msg);
             }
         }
     }
@@ -2468,6 +2470,14 @@ pub(crate) fn refresh_listening(d: &Shared, cx: &mut Context) {
 
 /// The DOM as it is now, as the page renders it: shadow trees flattened
 /// into their hosts (for the first paint and the tab).
+/// The user's input (handled ahead of other messages).
+fn is_input(msg: &ToJs) -> bool {
+    matches!(
+        msg,
+        ToJs::Click { .. } | ToJs::Submit { .. } | ToJs::Key { .. } | ToJs::Mouse { .. } | ToJs::Focus { .. } | ToJs::Input { .. } | ToJs::Checked { .. }
+    )
+}
+
 pub(crate) fn snapshot(d: &Shared, cx: &mut Context) -> Document {
     refresh_listening(d, cx);
     let adopted = call_global(d, "__adoptedSheets", &[], cx);

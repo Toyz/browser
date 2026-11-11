@@ -297,9 +297,11 @@ pub struct Styler {
     root_font_size: Cell<f32>,
     /// The document's base URL, for `url()`s in `style=""` and `var()` values.
     base: Option<Url>,
-    /// Each styled element's own bloom hashes (tag, namespace, id, classes).
-    /// Styling runs top-down, so ancestors are always already here.
-    element_hashes: RefCell<HashMap<NodeId, Vec<u32>>>,
+    /// Each styled element's own bloom hashes (tag, namespace, id, classes),
+    /// with a hash of the `id` and `class` they were made from: a styler
+    /// kept across DOM changes (`getComputedStyle`'s) recomputes them when
+    /// those change (else a parent's new class never matched `.a .b`).
+    element_hashes: RefCell<HashMap<NodeId, (u64, Vec<u32>)>>,
     attr_cache: RefCell<HashMap<String, Rc<ParsedAttr>>>,
     var_cache: RefCell<HashMap<VarKey, Rc<Vec<Decl>>>>,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
@@ -658,7 +660,14 @@ impl Styler {
         let mut ancestor = doc.parent(id);
         while let Some(a) = ancestor {
             if let Some(e) = doc.element(a) {
-                let hashes = cache.entry(a).or_insert_with(|| {
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut k = std::collections::hash_map::DefaultHasher::new();
+                    (e.attr("id"), e.attr("class")).hash(&mut k);
+                    k.finish()
+                };
+                let entry = cache.entry(a).or_insert_with(|| (key.wrapping_add(1), Vec::new()));
+                if entry.0 != key {
                     let mut h = vec![e.name.local.precomputed_hash(), e.name.ns.precomputed_hash()];
                     if let Some(id) = e.attr("id") {
                         h.push(LocalName::from(id).precomputed_hash());
@@ -666,9 +675,9 @@ impl Styler {
                     if let Some(classes) = e.attr("class") {
                         h.extend(classes.split_ascii_whitespace().map(|c| LocalName::from(c).precomputed_hash()));
                     }
-                    h
-                });
-                for &h in hashes.iter() {
+                    *entry = (key, h);
+                }
+                for &h in entry.1.iter() {
                     bloom.insert_hash(h);
                 }
             }
