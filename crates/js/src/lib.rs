@@ -278,6 +278,8 @@ pub fn has_scripts(doc: &Document) -> bool {
 /// or the untouched document if they're still busy after the budget) and
 /// the handle for everything after.
 pub fn start(doc: Document, opts: Options) -> (Document, Option<ScriptHost>) {
+    // Pictures, canvases and the tab load `blob:` URLs pages make.
+    net::set_blob_resolver(|url| blob::picture_bytes(url).map(|bytes| bytes.to_vec()));
     if !has_scripts(&doc) {
         return (doc, None);
     }

@@ -76,9 +76,30 @@ pub(crate) fn object_url_data(url: &str) -> Option<(Arc<[u8]>, String)> {
 }
 
 pub(crate) fn revoke_object_url(url: &str) {
-    if let Some(urls) = OBJECT_URLS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-        urls.remove(url);
+    let gone = OBJECT_URLS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|urls| urls.remove(url));
+    if let Some((bytes, _)) = gone {
+        let mut kept = REVOKED.lock().unwrap_or_else(|e| e.into_inner());
+        kept.push_back((url.to_owned(), bytes));
+        while kept.iter().map(|(_, b)| b.len()).sum::<usize>() > REVOKED_BYTES && kept.len() > 1 {
+            kept.pop_front();
+        }
     }
+}
+
+/// Revoked blobs, newest last, a while longer: a picture loaded from one
+/// is still that picture after its URL is revoked (pages revoke it once
+/// it's loaded), and a canvas it's drawn into is painted after that.
+/// Google Maps' tiles and labels, drawn so, were missing.
+static REVOKED: std::sync::Mutex<std::collections::VecDeque<(String, Arc<[u8]>)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+const REVOKED_BYTES: usize = 64 << 20;
+
+/// The bytes behind a `blob:` URL a picture was (or is being) loaded
+/// from: a live one, or one revoked lately.
+pub(crate) fn picture_bytes(url: &str) -> Option<Arc<[u8]>> {
+    if let Some((bytes, _)) = object_url_data(url) {
+        return Some(bytes);
+    }
+    REVOKED.lock().unwrap_or_else(|e| e.into_inner()).iter().rev().find(|(u, _)| u == url).map(|(_, b)| b.clone())
 }
 
 /// Whether `o` is a `File`.

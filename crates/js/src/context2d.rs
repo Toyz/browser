@@ -472,8 +472,18 @@ const METHODS: &[(&str, usize, Method)] = &[
         Ok(o.into())
     }),
     ("drawImage", 3, |this, a, cx| {
-        let Some(source) = image_source(&a.first().cloned().unwrap_or_default(), cx)? else { return Ok(JsValue::undefined()) };
+        let Some(mut source) = image_source(&a.first().cloned().unwrap_or_default(), cx)? else { return Ok(JsValue::undefined()) };
         let Some(rest) = numbers(&a[1.min(a.len())..], 0, cx)? else { return Ok(JsValue::undefined()) };
+        // A canvas is drawn as it is now: what's been drawn on it so far
+        // (painted first), not what it holds when this canvas is painted.
+        // Google Maps draws each label on one small canvas, copies it onto
+        // the map, and clears it for the next: replayed in no particular
+        // order, the copies were blank.
+        if let Source::Canvas(key) = source
+            && let Some(pixels) = snapshot(&page(cx), node_from_number(key as f64))
+        {
+            source = Source::Pixels(pixels);
+        }
         record(this, [Op::DrawImage(source, rest)], cx).map(undefined)
     }),
     ("createLinearGradient", 4, |_, a, cx| {
@@ -709,6 +719,16 @@ fn canvas_size(dom: &Dom, node: NodeId) -> (u32, u32) {
     (size("width", 300.0).max(0.0) as u32, size("height", 150.0).max(0.0) as u32)
 }
 
+/// Canvas `node`'s pixels now: what's recorded for it painted first.
+fn snapshot(d: &Shared, node: NodeId) -> Option<std::sync::Arc<tiny_skia::Pixmap>> {
+    let mut dom = d.borrow_mut();
+    if let Some(ops) = dom.canvas_ops.remove(&node) {
+        let base = dom.doc.url.clone();
+        apply_ops(&mut dom, &base, node, ops);
+    }
+    dom.canvases.get(&node).map(|c| std::sync::Arc::new(c.pixmap().clone()))
+}
+
 /// Replay the operations recorded since the last time onto the canvases'
 /// bitmaps.
 pub(crate) fn draw_pending(d: &Shared) {
@@ -719,8 +739,15 @@ pub(crate) fn draw_pending(d: &Shared) {
     let pending: Vec<(NodeId, Vec<Op>)> = dom.canvas_ops.drain().collect();
     let base = dom.doc.url.clone();
     for (node, ops) in pending {
+        apply_ops(&mut dom, &base, node, ops);
+    }
+}
+
+/// Paint `ops` onto canvas `node`'s bitmap.
+fn apply_ops(dom: &mut Dom, base: &url::Url, node: NodeId, ops: Vec<Op>) {
+    {
         if dom.doc.get(node).is_none() {
-            continue;
+            return;
         }
         dom.drawn.insert(node);
         let (w, h) = canvas_size(&dom, node);
@@ -741,7 +768,7 @@ pub(crate) fn draw_pending(d: &Shared) {
             })
             .collect();
         if let Some(canvas) = dom.canvases.get_mut(&node) {
-            canvas.apply(&ops, &others, &|src| canvas_image(&base, src));
+            canvas.apply(&ops, &others, &|src| canvas_image(base, src));
         }
     }
 }

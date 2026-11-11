@@ -487,11 +487,24 @@ pub fn fetch_text_cached(url: &Url) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// What a `blob:` URL is, from whoever makes them (the script engine's
+/// `URL.createObjectURL`).
+static BLOB_URLS: std::sync::OnceLock<fn(&str) -> Option<Vec<u8>>> = std::sync::OnceLock::new();
+
+/// Set where `blob:` URLs are looked up (once).
+pub fn set_blob_resolver(resolve: fn(&str) -> Option<Vec<u8>>) {
+    BLOB_URLS.set(resolve).ok();
+}
+
 /// Fetch a subresource as raw bytes (images etc), through the cache.
-/// Supports `data:` URLs. Fails on non-2xx responses.
+/// Supports `data:` and `blob:` URLs. Fails on non-2xx responses.
 pub fn fetch_bytes(url: &Url) -> Result<Vec<u8>> {
     if url.scheme() == "data" {
         return decode_data_url(url.as_str());
+    }
+    if url.scheme() == "blob" {
+        // (Google Maps' tiles are pictures made into blobs: every one failed.)
+        return BLOB_URLS.get().and_then(|resolve| resolve(url.as_str())).ok_or_else(|| anyhow::anyhow!("no such blob: {url}"));
     }
     if url.scheme() == "file" {
         // Not cached: local files change under you while you edit them.

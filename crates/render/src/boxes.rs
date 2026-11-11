@@ -2792,9 +2792,13 @@ impl Builder<'_> {
                     // static position), not at its containing block's
                     // corner. Anchored there: a box in the flow, no taller
                     // than nothing, it's placed in (Google's sign-in footer,
-                    // below its card, was drawn at the card's top).
+                    // below its card, was drawn at the card's top). Not one
+                    // whose height is a percentage: that's of its containing
+                    // block, which the anchor would be, 0 high (Google Maps'
+                    // map, `height: 100%`, was cut to nothing).
                     let inset = block.style.inset;
-                    if [inset.top, inset.right, inset.bottom, inset.left].iter().all(|l| l.is_auto()) && c.inline.is_empty() {
+                    let percent_height = [block.style.height, block.style.min_height, block.style.max_height].iter().any(|l| matches!(l, Length::Percent(_)));
+                    if [inset.top, inset.right, inset.bottom, inset.left].iter().all(|l| l.is_auto()) && c.inline.is_empty() && !percent_height {
                         let mut st = ComputedStyle::initial();
                         st.display = Display::Block;
                         st.position = style::Position::Relative;

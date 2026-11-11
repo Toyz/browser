@@ -22,6 +22,9 @@ pub enum Source {
     Url(String),
     /// Another canvas (its key: `node_to_number`).
     Canvas(u64),
+    /// Another canvas's pixels as they were when the call was made (it may
+    /// be drawn over again before this is painted).
+    Pixels(Arc<Pixmap>),
 }
 
 /// One recorded drawing operation.
@@ -303,6 +306,7 @@ impl Canvas {
                     let src: Option<Arc<Pixmap>> = match source {
                         Source::Canvas(key) => others.get(key).map(|p| Arc::new(p.clone())),
                         Source::Url(url) => images(url),
+                        Source::Pixels(p) => Some(p.clone()),
                     };
                     let Some(src) = src else { continue };
                     let (iw, ih) = (src.width() as f32, src.height() as f32);

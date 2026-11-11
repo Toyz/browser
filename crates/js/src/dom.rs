@@ -2404,10 +2404,14 @@ pub fn canvas_url(node: NodeId) -> String {
 
 /// Canvases that left the document (an app re-rendering its <canvas> makes
 /// a new one each time: Badge Directory's graph left hundreds of 4 MB
-/// bitmaps behind) are let go of, but for the 16 drawn on most recently:
-/// a detached canvas can be an offscreen buffer the page draws from.
+/// bitmaps behind) are let go of, but for those drawn on most recently, up
+/// to a memory budget (and at least 16): a detached canvas can be an
+/// offscreen buffer the page draws from. (By count, 16 of them: Google
+/// Maps keeps a small canvas for each of its ~120 labels, and the rest
+/// were drawn onto the map blank.)
 fn forget_canvases(dom: &mut Dom, drawn: &HashSet<NodeId>) {
     const KEEP_DETACHED: usize = 16;
+    const DETACHED_BYTES: usize = 96 << 20;
     let now = Instant::now();
     for &n in drawn {
         dom.canvas_used.insert(n, now);
@@ -2433,9 +2437,14 @@ fn forget_canvases(dom: &mut Dom, drawn: &HashSet<NodeId>) {
         return;
     }
     detached.sort_by_key(|&(_, used)| std::cmp::Reverse(used));
-    for (n, _) in detached.into_iter().skip(KEEP_DETACHED) {
-        dom.canvases.remove(&n);
-        dom.canvas_used.remove(&n);
+    let mut bytes = 0usize;
+    for (i, (n, _)) in detached.into_iter().enumerate() {
+        let (w, h) = dom.canvases.get(&n).map_or((0, 0), |c| c.size());
+        bytes += w as usize * h as usize * 4;
+        if i >= KEEP_DETACHED && bytes > DETACHED_BYTES {
+            dom.canvases.remove(&n);
+            dom.canvas_used.remove(&n);
+        }
     }
 }
 

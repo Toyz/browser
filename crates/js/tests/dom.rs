@@ -2032,3 +2032,23 @@ fn xpath_evaluates_paths_predicates_and_functions() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "out"), "/a|2|three|one|3|two|a b|false|two|2|7.5|SyntaxError");
 }
+
+/// `drawImage(canvas)` draws the canvas as it is at the call, though it's
+/// cleared and drawn on again afterwards (Google Maps paints each label on
+/// one small canvas and copies it onto the map).
+#[test]
+fn canvas_drawn_from_is_drawn_as_it_was() {
+    let doc = run(r##"<body><p id="out"></p>
+        <script>
+          const small = document.createElement("canvas"); small.width = 4; small.height = 4;
+          const big = document.createElement("canvas"); big.width = 8; big.height = 4;
+          const s = small.getContext("2d"), b = big.getContext("2d");
+          s.fillStyle = "rgb(255,0,0)"; s.fillRect(0, 0, 4, 4);
+          b.drawImage(small, 0, 0);
+          s.clearRect(0, 0, 4, 4); s.fillStyle = "rgb(0,0,255)"; s.fillRect(0, 0, 4, 4);
+          b.drawImage(small, 4, 0);
+          const px = (x) => Array.from(b.getImageData(x, 1, 1, 1).data.slice(0, 3)).join(",");
+          document.getElementById("out").textContent = px(1) + "|" + px(5);
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "out"), "255,0,0|0,0,255");
+}
