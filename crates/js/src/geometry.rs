@@ -346,9 +346,9 @@ fn root_size(dom: &mut Dom, node: NodeId, axis: usize) -> f32 {
     if axis == 0 { estimated_width(dom, node) } else { 0.0 }
 }
 
-/// The element `this` is (a wrapper's `__id`).
+/// The element `this` is (a wrapper's `__featherNode`).
 pub(super) fn this_node(d: &Shared, this: &JsValue, cx: &mut Context) -> Option<NodeId> {
-    let id = this.as_object()?.get(js_string!("__id"), cx).ok()?.as_number()?;
+    let id = this.as_object()?.get(js_string!("__featherNode"), cx).ok()?.as_number()?;
     let id = node_from_number(id);
     d.borrow().doc.get(id).map(|_| id)
 }

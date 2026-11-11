@@ -137,7 +137,7 @@ fn state(cx: &Context) -> Rc<Media> {
 
 fn node_of(this: &JsValue, cx: &mut Context) -> JsResult<NodeId> {
     let o = this.as_object().ok_or_else(|| JsNativeError::typ().with_message("not a media element"))?;
-    let id = o.get(js_string!("__id"), cx)?.as_number().ok_or_else(|| JsNativeError::typ().with_message("not a media element"))?;
+    let id = o.get(js_string!("__featherNode"), cx)?.as_number().ok_or_else(|| JsNativeError::typ().with_message("not a media element"))?;
     Ok(node_from_number(id))
 }
 

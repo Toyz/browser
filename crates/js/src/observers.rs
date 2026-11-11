@@ -157,7 +157,7 @@ impl Class for IntersectionObserver {
         let callback = args.first().and_then(|c| c.as_callable()).ok_or_else(|| JsNativeError::typ().with_message("IntersectionObserver needs a callback"))?;
         let opts = args.get(1).and_then(|o| o.as_object());
         let get = |k: &str, cx: &mut Context| opts.as_ref().map(|o| o.get(JsString::from(k), cx).unwrap_or_default()).unwrap_or_default();
-        let root = get("root", cx).as_object().filter(|r| r.has_property(js_string!("__id"), cx).unwrap_or(false));
+        let root = get("root", cx).as_object().filter(|r| r.has_property(js_string!("__featherNode"), cx).unwrap_or(false));
         let margin = get("rootMargin", cx);
         let margin = if margin.is_undefined() || margin.is_null() { "0px".to_owned() } else { super::js_value_string(&margin, cx) };
         let t = get("threshold", cx);

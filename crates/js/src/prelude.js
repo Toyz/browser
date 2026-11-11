@@ -366,17 +366,17 @@
       this._targets = new Set();
     }
     observe(target, options = {}) {
-      if (!target || target.__id === undefined) throw new TypeError("MutationObserver.observe: not a Node");
+      if (!target || target.__featherNode === undefined) throw new TypeError("MutationObserver.observe: not a Node");
       const o = { ...options };
       if (o.attributeOldValue || o.attributeFilter) o.attributes = o.attributes !== false;
       if (o.characterDataOldValue) o.characterData = o.characterData !== false;
       if (!o.childList && !o.attributes && !o.characterData) throw new TypeError("MutationObserver.observe: nothing to observe");
       if (o.attributeFilter) o.attributeFilter = Array.from(o.attributeFilter, String);
-      const regs = mutationRegs.get(target.__id) || [];
+      const regs = mutationRegs.get(target.__featherNode) || [];
       const existing = regs.find((r) => r.observer === this);
       if (existing) existing.options = o; else regs.push({ observer: this, options: o });
-      mutationRegs.set(target.__id, regs);
-      this._targets.add(target.__id);
+      mutationRegs.set(target.__featherNode, regs);
+      this._targets.add(target.__featherNode);
     }
     disconnect() {
       for (const id of this._targets) {
@@ -401,7 +401,7 @@
   }
 
   const wrappers = new Map();
-  const isNode = (v) => v && typeof v === "object" && v.__id !== undefined;
+  const isNode = (v) => v && typeof v === "object" && v.__featherNode !== undefined;
 
   // ---- events ----------------------------------------------------------
 
@@ -462,8 +462,8 @@
       const list = l[type] || (l[type] = []);
       if (list.some((e) => e.fn === fn && e.capture === capture)) return;
       list.push({ fn, capture, once });
-      if (type === "click" && this.__id !== undefined) clickListeners.add(this.__id);
-      if (MOUSE_TYPES.includes(type)) { if (this.__id !== undefined) mouseListeners.add(this.__id); N.touch(); }
+      if (type === "click" && this.__featherNode !== undefined) clickListeners.add(this.__featherNode);
+      if (MOUSE_TYPES.includes(type)) { if (this.__featherNode !== undefined) mouseListeners.add(this.__featherNode); N.touch(); }
     }
     removeEventListener(type, fn, opts) {
       const capture = typeof opts === "boolean" ? opts : !!(opts && opts.capture);
@@ -558,7 +558,7 @@
   function inlineHandler(node, type) {
     const own = node["_on" + type];
     if (typeof own === "function") return own;
-    if (node.__id === undefined || !node.getAttribute) return null;
+    if (node.__featherNode === undefined || !node.getAttribute) return null;
     const code = node.getAttribute("on" + type);
     if (!code) return null;
     try { return new Function("event", code); } catch (e) { reportError(e); return null; }
@@ -611,7 +611,7 @@
     else if (type === 11) proto = N.shadowHost(id) !== null ? ShadowRoot.prototype : DocumentFragment.prototype;
     else proto = Node.prototype;
     w = Object.create(proto);
-    Object.defineProperty(w, "__id", { value: id });
+    Object.defineProperty(w, "__featherNode", { value: id });
     wrappers.set(id, w);
     if (type === 1 && registry.size && !creatingInert && registry.has(N.tag(id)) && !inert(id)) upgrade(w);
     return w;
@@ -662,44 +662,44 @@
       return Array.from(this.childNodes);
     }
     assignedElements(opts) { return this.assignedNodes(opts).filter((n) => n.nodeType === 1); }
-    get nodeType() { return N.nodeType(this.__id); }
-    get nodeName() { const t = N.tag(this.__id); return t ? t.toUpperCase() : (this.nodeType === 3 ? "#text" : this.nodeType === 9 ? "#document" : "#node"); }
-    get parentNode() { return wrap(N.parent(this.__id)); }
+    get nodeType() { return N.nodeType(this.__featherNode); }
+    get nodeName() { const t = N.tag(this.__featherNode); return t ? t.toUpperCase() : (this.nodeType === 3 ? "#text" : this.nodeType === 9 ? "#document" : "#node"); }
+    get parentNode() { return wrap(N.parent(this.__featherNode)); }
     get parentElement() { const p = this.parentNode; return p && p.nodeType === 1 ? p : null; }
-    get childNodes() { return nodeList(ids(N.children(this.__id))); }
-    get firstChild() { const c = N.children(this.__id); return wrap(c.length ? c[0] : null); }
-    get lastChild() { const c = N.children(this.__id); return wrap(c.length ? c[c.length - 1] : null); }
+    get childNodes() { return nodeList(ids(N.children(this.__featherNode))); }
+    get firstChild() { const c = N.children(this.__featherNode); return wrap(c.length ? c[0] : null); }
+    get lastChild() { const c = N.children(this.__featherNode); return wrap(c.length ? c[c.length - 1] : null); }
     get nextSibling() { return sibling(this, 1, false); }
     get previousSibling() { return sibling(this, -1, false); }
     get ownerDocument() {
       // Template contents belong to an inert document of their own.
-      const id = this.__id;
+      const id = this.__featherNode;
       // A document has none (jQuery climbs `parentNode || ownerDocument`).
       if (N.nodeType(id) === 9) return null;
       return inertFragments.has(id) || inert(id) ? inertDocument : document;
     }
-    get isConnected() { return N.connected(this.__id); }
-    get textContent() { return N.text(this.__id); }
-    set textContent(v) { N.setText(this.__id, v === null || v === undefined ? "" : String(v)); }
-    get nodeValue() { return this.nodeType === 1 ? null : N.text(this.__id); }
-    set nodeValue(v) { if (this.nodeType !== 1) N.setText(this.__id, String(v)); }
-    hasChildNodes() { return N.children(this.__id).length > 0; }
+    get isConnected() { return N.connected(this.__featherNode); }
+    get textContent() { return N.text(this.__featherNode); }
+    set textContent(v) { N.setText(this.__featherNode, v === null || v === undefined ? "" : String(v)); }
+    get nodeValue() { return this.nodeType === 1 ? null : N.text(this.__featherNode); }
+    set nodeValue(v) { if (this.nodeType !== 1) N.setText(this.__featherNode, String(v)); }
+    hasChildNodes() { return N.children(this.__featherNode).length > 0; }
     contains(other) { for (let n = other; n; n = n.parentNode) if (n === this) return true; return false; }
-    appendChild(c) { N.insert(this.__id, c.__id, null); return c; }
-    insertBefore(c, ref) { N.insert(this.__id, c.__id, ref ? ref.__id : null); return c; }
+    appendChild(c) { N.insert(this.__featherNode, c.__featherNode, null); return c; }
+    insertBefore(c, ref) { N.insert(this.__featherNode, c.__featherNode, ref ? ref.__featherNode : null); return c; }
     // Only a child can be removed or replaced (anything else is an error,
     // not a removal from wherever it is).
     removeChild(c) {
       if (!c || c.parentNode !== this) throw new DOMException("The node to be removed is not a child of this node.", "NotFoundError");
-      N.remove(c.__id);
+      N.remove(c.__featherNode);
       return c;
     }
     replaceChild(n, old) {
       if (!old || old.parentNode !== this) throw new DOMException("The node to be replaced is not a child of this node.", "NotFoundError");
-      N.insert(this.__id, n.__id, old.__id); N.remove(old.__id);
+      N.insert(this.__featherNode, n.__featherNode, old.__featherNode); N.remove(old.__featherNode);
       return old;
     }
-    cloneNode(deep) { return wrap(N.clone(this.__id, !!deep)); }
+    cloneNode(deep) { return wrap(N.clone(this.__featherNode, !!deep)); }
     isEqualNode(o) { return o === this; }
     isSameNode(o) { return o === this; }
     getRootNode() { let n = this; while (n.parentNode) n = n.parentNode; return n; }
@@ -708,10 +708,10 @@
   Object.assign(Node, { ELEMENT_NODE: 1, TEXT_NODE: 3, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_FRAGMENT_NODE: 11 });
 
   function sibling(node, dir, elementsOnly) {
-    const p = N.parent(node.__id);
+    const p = N.parent(node.__featherNode);
     if (p === null) return null;
     const kids = N.children(p);
-    let i = kids.indexOf(node.__id) + dir;
+    let i = kids.indexOf(node.__featherNode) + dir;
     while (i >= 0 && i < kids.length) {
       if (!elementsOnly || N.nodeType(kids[i]) === 1) return wrap(kids[i]);
       i += dir;
@@ -722,28 +722,28 @@
 
   // append/prepend/before/after/replaceWith/remove, children & queries.
   const ParentMixin = {
-    get children() { return nodeList(ids(elementChildren(this.__id))); },
-    get childElementCount() { return elementChildren(this.__id).length; },
-    get firstElementChild() { const c = elementChildren(this.__id); return wrap(c.length ? c[0] : null); },
-    get lastElementChild() { const c = elementChildren(this.__id); return wrap(c.length ? c[c.length - 1] : null); },
-    append(...nodes) { for (const n of nodes) N.insert(this.__id, toNode(n).__id, null); },
-    prepend(...nodes) { const first = N.children(this.__id)[0]; for (const n of nodes) N.insert(this.__id, toNode(n).__id, first === undefined ? null : first); },
-    replaceChildren(...nodes) { for (const c of N.children(this.__id)) N.remove(c); this.append(...nodes); },
-    querySelector(sel) { return wrap(N.query(this.__id, String(sel), false)); },
-    querySelectorAll(sel) { return nodeList(ids(N.query(this.__id, String(sel), true))); },
-    getElementsByTagName(tag) { return nodeList(ids(N.query(this.__id, tag === "*" ? "*" : String(tag), true))); },
+    get children() { return nodeList(ids(elementChildren(this.__featherNode))); },
+    get childElementCount() { return elementChildren(this.__featherNode).length; },
+    get firstElementChild() { const c = elementChildren(this.__featherNode); return wrap(c.length ? c[0] : null); },
+    get lastElementChild() { const c = elementChildren(this.__featherNode); return wrap(c.length ? c[c.length - 1] : null); },
+    append(...nodes) { for (const n of nodes) N.insert(this.__featherNode, toNode(n).__featherNode, null); },
+    prepend(...nodes) { const first = N.children(this.__featherNode)[0]; for (const n of nodes) N.insert(this.__featherNode, toNode(n).__featherNode, first === undefined ? null : first); },
+    replaceChildren(...nodes) { for (const c of N.children(this.__featherNode)) N.remove(c); this.append(...nodes); },
+    querySelector(sel) { return wrap(N.query(this.__featherNode, String(sel), false)); },
+    querySelectorAll(sel) { return nodeList(ids(N.query(this.__featherNode, String(sel), true))); },
+    getElementsByTagName(tag) { return nodeList(ids(N.query(this.__featherNode, tag === "*" ? "*" : String(tag), true))); },
     getElementsByClassName(names) {
       const sel = String(names).trim().split(/\s+/).filter(Boolean).map((c) => "." + cssEscape(c)).join("");
-      return sel ? nodeList(ids(N.query(this.__id, sel, true))) : nodeList([]);
+      return sel ? nodeList(ids(N.query(this.__featherNode, sel, true))) : nodeList([]);
     },
   };
   const ChildMixin = {
-    remove() { N.remove(this.__id); },
-    before(...nodes) { const p = N.parent(this.__id); if (p !== null) for (const n of nodes) N.insert(p, toNode(n).__id, this.__id); },
+    remove() { N.remove(this.__featherNode); },
+    before(...nodes) { const p = N.parent(this.__featherNode); if (p !== null) for (const n of nodes) N.insert(p, toNode(n).__featherNode, this.__featherNode); },
     after(...nodes) {
-      const p = N.parent(this.__id); if (p === null) return;
+      const p = N.parent(this.__featherNode); if (p === null) return;
       const next = this.nextSibling;
-      for (const n of nodes) N.insert(p, toNode(n).__id, next ? next.__id : null);
+      for (const n of nodes) N.insert(p, toNode(n).__featherNode, next ? next.__featherNode : null);
     },
     replaceWith(...nodes) { this.before(...nodes); this.remove(); },
     get nextElementSibling() { return sibling(this, 1, true); },
@@ -757,8 +757,8 @@
   function cssEscape(s) { return String(s).replace(/([^a-zA-Z0-9_\-])/g, "\\$1"); }
 
   class CharacterData extends Node {
-    get data() { return N.text(this.__id); }
-    set data(v) { N.setText(this.__id, String(v)); }
+    get data() { return N.text(this.__featherNode); }
+    set data(v) { N.setText(this.__featherNode, String(v)); }
     get length() { return this.data.length; }
   }
   mixin(CharacterData, ChildMixin);
@@ -837,14 +837,14 @@
   }
 
   class Element extends Node {
-    get tagName() { return N.tag(this.__id).toUpperCase(); }
-    get localName() { return N.tag(this.__id); }
-    get namespaceURI() { return N.namespace(this.__id); }
-    getAttribute(name) { return N.getAttr(this.__id, String(name)); }
-    setAttribute(name, value) { N.setAttr(this.__id, String(name), String(value)); }
-    removeAttribute(name) { N.removeAttr(this.__id, String(name)); }
-    hasAttribute(name) { return N.getAttr(this.__id, String(name)) !== null; }
-    hasAttributes() { return N.attrNames(this.__id).length > 0; }
+    get tagName() { return N.tag(this.__featherNode).toUpperCase(); }
+    get localName() { return N.tag(this.__featherNode); }
+    get namespaceURI() { return N.namespace(this.__featherNode); }
+    getAttribute(name) { return N.getAttr(this.__featherNode, String(name)); }
+    setAttribute(name, value) { N.setAttr(this.__featherNode, String(name), String(value)); }
+    removeAttribute(name) { N.removeAttr(this.__featherNode, String(name)); }
+    hasAttribute(name) { return N.getAttr(this.__featherNode, String(name)) !== null; }
+    hasAttributes() { return N.attrNames(this.__featherNode).length > 0; }
     getAttributeNode(name) { const value = this.getAttribute(name); return value === null ? null : { name, localName: name, value, ownerElement: this, specified: true }; }
     lookupNamespaceURI() { return null; }
     getAnimations() { return []; }
@@ -856,11 +856,11 @@
       if (want && !has) this.setAttribute(name, ""); else if (!want && has) this.removeAttribute(name);
       return want;
     }
-    getAttributeNames() { return N.attrNames(this.__id); }
+    getAttributeNames() { return N.attrNames(this.__featherNode); }
     get attributes() {
       // A NamedNodeMap: indexed, and by name (`attributes.class`).
       const el = this;
-      const list = N.attrNames(this.__id).map((name) => ({
+      const list = N.attrNames(this.__featherNode).map((name) => ({
         name, localName: name, namespaceURI: null, prefix: null, specified: true, ownerElement: el,
         get value() { return el.getAttribute(name) ?? ""; },
         set value(v) { el.setAttribute(name, v); },
@@ -884,27 +884,27 @@
     get className() { return this.getAttribute("class") || ""; }
     set className(v) { this.setAttribute("class", v); }
     get classList() { return this._classList || (this._classList = new DOMTokenList(this, "class")); }
-    get innerHTML() { return N.innerHTML(this.__id); }
+    get innerHTML() { return N.innerHTML(this.__featherNode); }
     set innerHTML(html) {
-      for (const c of N.children(this.__id)) N.remove(c);
-      N.insert(this.__id, N.parseHTML(this.localName, String(html), N.namespace(this.__id)), null);
+      for (const c of N.children(this.__featherNode)) N.remove(c);
+      N.insert(this.__featherNode, N.parseHTML(this.localName, String(html), N.namespace(this.__featherNode)), null);
     }
-    get outerHTML() { return N.outerHTML(this.__id); }
+    get outerHTML() { return N.outerHTML(this.__featherNode); }
     set outerHTML(html) {
-      const p = N.parent(this.__id); if (p === null) return;
-      N.insert(p, N.parseHTML("div", String(html)), this.__id);
-      N.remove(this.__id);
+      const p = N.parent(this.__featherNode); if (p === null) return;
+      N.insert(p, N.parseHTML("div", String(html)), this.__featherNode);
+      N.remove(this.__featherNode);
     }
     insertAdjacentHTML(where, html) {
       const frag = N.parseHTML("div", String(html));
       insertAdjacent(this, where, frag);
     }
-    insertAdjacentElement(where, el) { insertAdjacent(this, where, el.__id); return el; }
+    insertAdjacentElement(where, el) { insertAdjacent(this, where, el.__featherNode); return el; }
     insertAdjacentText(where, text) { insertAdjacent(this, where, N.createText(String(text))); }
-    matches(sel) { return N.matches(this.__id, String(sel)); }
+    matches(sel) { return N.matches(this.__featherNode, String(sel)); }
     webkitMatchesSelector(sel) { return this.matches(sel); }
     closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
-    focus() { if (focusedElement !== this) { moveFocus(this); N.setFocus(this.__id); } }
+    focus() { if (focusedElement !== this) { moveFocus(this); N.setFocus(this.__featherNode); } }
     blur() { if (focusedElement === this) { moveFocus(null); N.setFocus(null); } }
     click() { this.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
     attachShadow(init) {
@@ -917,7 +917,7 @@
         return root;
       }
       if (this._shadow) throw new DOMException("Shadow root cannot be created on a host which already hosts a shadow tree.", "NotSupportedError");
-      const root = wrap(N.attachShadow(this.__id));
+      const root = wrap(N.attachShadow(this.__featherNode));
       root._mode = (init && init.mode) || "open";
       this._shadow = root;
       shadowRoots.add(root);
@@ -939,7 +939,7 @@
     // The body (no positions known here), but never the body's or root's
     // own: `while (el = el.offsetParent)` loops have to end.
     get offsetParent() {
-      if (this === document.body || this === document.documentElement || !N.connected(this.__id)) return null;
+      if (this === document.body || this === document.documentElement || !N.connected(this.__featherNode)) return null;
       return document.body;
     }
   }
@@ -951,10 +951,10 @@
   mixin(Element, ParentMixin, ChildMixin);
   function insertAdjacent(el, where, id) {
     switch (String(where).toLowerCase()) {
-      case "beforebegin": { const p = N.parent(el.__id); if (p !== null) N.insert(p, id, el.__id); break; }
-      case "afterbegin": { const first = N.children(el.__id)[0]; N.insert(el.__id, id, first === undefined ? null : first); break; }
-      case "beforeend": N.insert(el.__id, id, null); break;
-      case "afterend": { const p = N.parent(el.__id); if (p === null) break; const next = el.nextSibling; N.insert(p, id, next ? next.__id : null); break; }
+      case "beforebegin": { const p = N.parent(el.__featherNode); if (p !== null) N.insert(p, id, el.__featherNode); break; }
+      case "afterbegin": { const first = N.children(el.__featherNode)[0]; N.insert(el.__featherNode, id, first === undefined ? null : first); break; }
+      case "beforeend": N.insert(el.__featherNode, id, null); break;
+      case "afterend": { const p = N.parent(el.__featherNode); if (p === null) break; const next = el.nextSibling; N.insert(p, id, next ? next.__featherNode : null); break; }
     }
   }
 
@@ -991,7 +991,7 @@
       const tag = tagOf.get(new.target);
       if (!tag) throw new TypeError("Illegal constructor");
       const id = N.createElement(tag);
-      Object.defineProperty(this, "__id", { value: id });
+      Object.defineProperty(this, "__featherNode", { value: id });
       wrappers.set(id, this);
       upgraded.add(this);
     }
@@ -1018,7 +1018,7 @@
       Object.defineProperty(target, "on" + ev, {
         configurable: true,
         get() { return this["_on" + ev] || null; },
-        set(fn) { this["_on" + ev] = fn; if (ev === "click" && this.__id !== undefined) clickListeners.add(this.__id); },
+        set(fn) { this["_on" + ev] = fn; if (ev === "click" && this.__featherNode !== undefined) clickListeners.add(this.__featherNode); },
       });
     }
   }
@@ -1128,8 +1128,8 @@
   // Form fields: `value` lives in the tab's widget (the page tells us as
   // it changes); writing it updates the widget through the attribute.
   class HTMLInputElement extends HTMLElement {
-    get value() { const v = N.value(this.__id); return v !== null ? v : (this.getAttribute("value") || ""); }
-    set value(v) { N.setValue(this.__id, String(v)); }
+    get value() { const v = N.value(this.__featherNode); return v !== null ? v : (this.getAttribute("value") || ""); }
+    set value(v) { N.setValue(this.__featherNode, String(v)); }
     get checked() { return this.hasAttribute("checked"); }
     set checked(v) { if (v) this.setAttribute("checked", ""); else this.removeAttribute("checked"); }
     get form() { return this.closest("form"); }
@@ -1142,8 +1142,8 @@
   }
   reflect(HTMLInputElement, [["type", "type"], ["name", "name"], ["placeholder", "placeholder"], ["disabled", "disabled", "bool"], ["required", "required", "bool"], ["readOnly", "readonly", "bool"], ["defaultValue", "value"], ["min", "min"], ["max", "max"], ["step", "step"], ["autocomplete", "autocomplete"]]);
   class HTMLTextAreaElement extends HTMLInputElement {
-    get value() { const v = N.value(this.__id); return v !== null ? v : this.textContent; }
-    set value(v) { N.setValue(this.__id, String(v)); }
+    get value() { const v = N.value(this.__featherNode); return v !== null ? v : this.textContent; }
+    set value(v) { N.setValue(this.__featherNode, String(v)); }
   }
   class HTMLSelectElement extends HTMLElement {
     get options() { return this.querySelectorAll("option"); }
@@ -1167,7 +1167,7 @@
   reflect(HTMLButtonElement, [["type", "type"], ["name", "name"], ["value", "value"], ["disabled", "disabled", "bool"]]);
   class HTMLFormElement extends HTMLElement {
     // `elements`: native (forms.rs).
-    submit() { N.submitForm(this.__id); }
+    submit() { N.submitForm(this.__featherNode); }
     requestSubmit() { if (this.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))) this.submit(); }
     reset() {}
   }
@@ -1175,11 +1175,11 @@
   class HTMLTemplateElement extends HTMLElement {
     get content() {
       // Parsed templates keep their contents in a fragment of their own.
-      const parsed = N.templateContent(this.__id);
+      const parsed = N.templateContent(this.__featherNode);
       if (parsed !== null) { inertFragments.add(parsed); return wrap(parsed); }
       // A script-made template: one fragment for good, holding what
       // innerHTML/appendChild put in the element.
-      if (!this._content) { this._content = document.createDocumentFragment(); inertFragments.add(this._content.__id); }
+      if (!this._content) { this._content = document.createDocumentFragment(); inertFragments.add(this._content.__featherNode); }
       while (this.firstChild) this._content.appendChild(this.firstChild);
       return this._content;
     }
@@ -1188,7 +1188,7 @@
       // A script-made template's contents are ours to copy.
       if (deep && this._content) {
         copy._content = this._content.cloneNode(true);
-        inertFragments.add(copy._content.__id);
+        inertFragments.add(copy._content.__featherNode);
       }
       return copy;
     }
@@ -1323,12 +1323,12 @@
 
   const shadowRoots = new Set();
   class ShadowRoot extends DocumentFragment {
-    get host() { return wrap(N.shadowHost(this.__id)); }
+    get host() { return wrap(N.shadowHost(this.__featherNode)); }
     get mode() { return this._mode || "open"; }
-    get innerHTML() { return N.innerHTML(this.__id); }
+    get innerHTML() { return N.innerHTML(this.__featherNode); }
     set innerHTML(html) {
-      for (const c of N.children(this.__id)) N.remove(c);
-      N.insert(this.__id, N.parseHTML("div", String(html)), null);
+      for (const c of N.children(this.__featherNode)) N.remove(c);
+      N.insert(this.__featherNode, N.parseHTML("div", String(html)), null);
     }
     get adoptedStyleSheets() { return this._sheets || (this._sheets = []); }
     set adoptedStyleSheets(v) { this._sheets = Array.from(v); N.touch(); }
@@ -1409,17 +1409,17 @@
   };
   function upgrade(el) {
     if (upgraded.has(el)) return;
-    const def = registry.get(N.tag(el.__id));
+    const def = registry.get(N.tag(el.__featherNode));
     if (!def) return;
     upgraded.add(el);
     Object.setPrototypeOf(el, def.ctor.prototype);
     upgrading = el;
     try { Reflect.construct(def.ctor, []); } catch (e) { reportError(e); } finally { upgrading = null; }
     for (const name of def.observed) {
-      const v = N.getAttr(el.__id, name);
+      const v = N.getAttr(el.__featherNode, name);
       if (v !== null) callback(el, "attributeChangedCallback", name, null, v);
     }
-    if (N.connected(el.__id)) callback(el, "connectedCallback");
+    if (N.connected(el.__featherNode)) callback(el, "connectedCallback");
   }
   // Custom elements in a subtree that just joined (or left) the document,
   // through their shadow trees too.
@@ -1428,7 +1428,7 @@
     for (const n of all) {
       if (registry.has(N.tag(n))) fn(n);
       const w = wrappers.get(n);
-      if (w && w._shadow) for (const c of N.children(w._shadow.__id)) forEachCustom(c, fn);
+      if (w && w._shadow) for (const c of N.children(w._shadow.__featherNode)) forEachCustom(c, fn);
     }
   }
   function connected(id) {
@@ -1488,7 +1488,7 @@
       tagOf.set(ctor, tag);
       // Upgrade the ones already there, in the document and shadow trees.
       const found = N.query(N.root(), tag, true);
-      for (const r of shadowRoots) found.push(...N.query(r.__id, tag, true));
+      for (const r of shadowRoots) found.push(...N.query(r.__featherNode, tag, true));
       for (const id of found) upgrade(wrap(id));
       const waiter = definedWaiters.get(tag);
       if (waiter) { waiter.resolve(ctor); definedWaiters.delete(tag); }
@@ -1502,13 +1502,13 @@
       if (!w) { let resolve; const promise = new Promise((r) => { resolve = r; }); w = { promise, resolve }; definedWaiters.set(tag, w); }
       return w.promise;
     },
-    upgrade(root) { if (root && root.__id !== undefined) forEachCustom(root.__id, (n) => upgrade(wrap(n))); },
+    upgrade(root) { if (root && root.__featherNode !== undefined) forEachCustom(root.__featherNode, (n) => upgrade(wrap(n))); },
   };
 
   let readyState = "loading";
   let currentScript = null;
   class Document extends Node {
-    get documentElement() { return wrap(elementChildren(this.__id)[0] === undefined ? null : elementChildren(this.__id)[0]); }
+    get documentElement() { return wrap(elementChildren(this.__featherNode)[0] === undefined ? null : elementChildren(this.__featherNode)[0]); }
     get head() { return this.querySelector("head"); }
     get body() { return this.querySelector("body"); }
     get title() { const t = this.querySelector("title"); return t ? t.textContent.trim() : ""; }
@@ -1602,17 +1602,17 @@
     write(...html) {
       const target = currentScript && currentScript.parentNode ? currentScript : null;
       const frag = N.parseHTML("body", html.join(""));
-      if (target) N.insert(N.parent(target.__id), frag, target.nextSibling ? target.nextSibling.__id : null);
-      else if (this.body) N.insert(this.body.__id, frag, null);
+      if (target) N.insert(N.parent(target.__featherNode), frag, target.nextSibling ? target.nextSibling.__featherNode : null);
+      else if (this.body) N.insert(this.body.__featherNode, frag, null);
     }
     writeln(...html) { this.write(...html, "\n"); }
     open() { return this; }
     close() {}
     execCommand() { return false; }
     elementFromPoint() { return null; }
-    querySelector(sel) { return wrap(N.query(this.__id, String(sel), false)); }
+    querySelector(sel) { return wrap(N.query(this.__featherNode, String(sel), false)); }
   }
-  mixin(Document, { get children() { return nodeList(ids(elementChildren(this.__id))); } });
+  mixin(Document, { get children() { return nodeList(ids(elementChildren(this.__featherNode))); } });
   for (const key of ["querySelectorAll", "getElementsByTagName", "getElementsByClassName", "append", "prepend"]) {
     Object.defineProperty(Document.prototype, key, Object.getOwnPropertyDescriptor(ParentMixin, key));
   }
@@ -1672,10 +1672,10 @@
   // the tab laid the element out at (or, before that, a block's estimate).
   function computedStyleOf(el) {
     const read = (name) => {
-      if (!el || el.__id === undefined || el.nodeType !== 1) return "";
+      if (!el || el.__featherNode === undefined || el.nodeType !== 1) return "";
       name = String(name);
       const prop = name.startsWith("--") ? name : kebab(name);
-      return N.computedStyle(el.__id, prop);
+      return N.computedStyle(el.__featherNode, prop);
     };
     const api = {
       getPropertyValue: (n) => read(n), getPropertyPriority: () => "", item: () => "", length: 0, cssText: "",
@@ -2384,7 +2384,7 @@
     __adoptedSheets() {
       const out = [];
       for (const root of shadowRoots) {
-        const host = N.shadowHost(root.__id);
+        const host = N.shadowHost(root.__featherNode);
         if (host === null || !N.connected(host)) continue;
         for (const sheet of root.adoptedStyleSheets) if (sheet && !sheet.disabled) out.push([host, sheet._text]);
       }
@@ -2397,8 +2397,8 @@
       const out = [];
       for (const el of cssomStyles) {
         const sheet = el._sheet;
-        if (!sheet || !sheet._cssom || sheet._source !== el.textContent || !N.connected(el.__id)) continue;
-        out.push([el.__id, sheet._text]);
+        if (!sheet || !sheet._cssom || sheet._source !== el.textContent || !N.connected(el.__featherNode)) continue;
+        out.push([el.__featherNode, sheet._text]);
       }
       return out;
     },

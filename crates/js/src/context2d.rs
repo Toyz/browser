@@ -286,7 +286,7 @@ fn set_prop(this: &JsValue, i: usize, v: &JsValue, cx: &mut Context) -> JsResult
 fn image_source(v: &JsValue, cx: &mut Context) -> JsResult<Option<Source>> {
     let Some(o) = v.as_object() else { return Ok(None) };
     let d = page(cx);
-    let id = o.get(js_string!("__id"), cx)?.as_number().map(node_from_number);
+    let id = o.get(js_string!("__featherNode"), cx)?.as_number().map(node_from_number);
     if let Some(id) = id {
         let dom = d.borrow();
         if let Some(e) = dom.doc.element(id) {
@@ -655,7 +655,7 @@ fn context_for(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue
     if existing.is_object() {
         return Ok(existing);
     }
-    let Some(node) = canvas.get(js_string!("__id"), cx)?.as_number().map(node_from_number) else { return Ok(JsValue::null()) };
+    let Some(node) = canvas.get(js_string!("__featherNode"), cx)?.as_number().map(node_from_number) else { return Ok(JsValue::null()) };
     let data = Context2d {
         canvas: canvas.clone(),
         node,
@@ -673,7 +673,7 @@ fn context_for(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue
 /// The canvas's size was set: its bitmap is blank, its context as new.
 fn reset(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let Some(canvas) = a.first().and_then(|v| v.as_object()) else { return Ok(JsValue::undefined()) };
-    let Some(node) = canvas.get(js_string!("__id"), cx)?.as_number().map(node_from_number) else { return Ok(JsValue::undefined()) };
+    let Some(node) = canvas.get(js_string!("__featherNode"), cx)?.as_number().map(node_from_number) else { return Ok(JsValue::undefined()) };
     let ctx = canvas.get(js_string!("__ctx"), cx)?;
     if let Some(c) = ctx.as_object().as_ref().and_then(|o| o.downcast_ref::<Context2d>()) {
         c.reset();
@@ -690,7 +690,7 @@ fn reset(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
 /// `canvas.toDataURL()`: its drawing so far, as a PNG.
 fn data_url(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let node = match a.first().and_then(|v| v.as_object()) {
-        Some(c) => c.get(js_string!("__id"), cx)?.as_number().map(node_from_number),
+        Some(c) => c.get(js_string!("__featherNode"), cx)?.as_number().map(node_from_number),
         None => None,
     };
     let d = page(cx);

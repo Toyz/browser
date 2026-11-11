@@ -41,7 +41,7 @@ fn controls(form: NodeId, cx: &Context) -> Vec<NodeId> {
 
 fn get_elements(this: &JsValue, _: &[JsValue], cx: &mut Context) -> JsResult<JsValue> {
     let o = this.as_object().ok_or_else(|| JsNativeError::typ().with_message("not a form"))?;
-    let id = o.get(js_string!("__id"), cx)?.as_number().ok_or_else(|| JsNativeError::typ().with_message("not a form"))?;
+    let id = o.get(js_string!("__featherNode"), cx)?.as_number().ok_or_else(|| JsNativeError::typ().with_message("not a form"))?;
     let nodes = controls(node_from_number(id), cx);
     let d = crate::dom::page(cx);
     let names: Vec<(Option<String>, Option<String>)> = {

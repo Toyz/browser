@@ -205,7 +205,7 @@ impl Class for FormData {
     fn data_constructor(_: &JsValue, a: &[JsValue], cx: &mut Context) -> JsResult<Self> {
         let data = FormData::default();
         if let Some(form) = a.first().and_then(JsValue::as_object)
-            && !form.get(js_string!("__id"), cx)?.is_undefined()
+            && !form.get(js_string!("__featherNode"), cx)?.is_undefined()
         {
             fill_from_form(&data, &form, cx)?;
         }
