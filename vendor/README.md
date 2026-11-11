@@ -197,3 +197,10 @@ Drop these when Boa releases include equivalent fixes.
 - `src/style/mod.rs` (`percent_plus_length`), `src/tree/taffy_tree.rs`:
   `calc()` handles that are a fraction of the basis plus a length (interned,
   8-aligned), resolved by `TaffyTree::resolve_calc_value` (it returned 0).
+
+## symphonia-format-isomp4 0.6.1
+
+One change, in `src/atoms/hvcc.rs`: an `hvcC` (HEVC decoder configuration)
+box may be up to 64 kB, not 1 kB. A record carrying SEI messages besides its
+parameter sets is bigger; GitHub's hero video (HEVC, 2560x1726) was refused
+as malformed. Feather decodes HEVC on the Mac's VideoToolbox.

@@ -143,6 +143,23 @@ impl Demuxer {
                     info.height = u32::from(p.height.unwrap_or(0));
                     video = Some(VideoTrack { id: track.id, time_base: track.time_base, h264: H264::new(avcc)? });
                 }
+                // HEVC: on the Mac's hardware decoder (Safari-first sites
+                // serve only that: GitHub's hero).
+                #[cfg(target_os = "macos")]
+                Some(CodecParameters::Video(p))
+                    if video.is_none() && p.codec == symphonia::core::codecs::video::well_known::CODEC_ID_HEVC =>
+                {
+                    let hvcc = p
+                        .extra_data
+                        .iter()
+                        .find(|e| e.id == symphonia::core::codecs::video::well_known::extra_data::VIDEO_EXTRA_DATA_ID_HEVC_DECODER_CONFIG)
+                        .map(|e| &*e.data)
+                        .ok_or_else(|| anyhow!("HEVC without its hvcC"))?;
+                    info.has_video = true;
+                    info.width = u32::from(p.width.unwrap_or(0));
+                    info.height = u32::from(p.height.unwrap_or(0));
+                    video = Some(VideoTrack { id: track.id, time_base: track.time_base, h264: H264::hevc(hvcc)? });
+                }
                 Some(CodecParameters::Audio(p)) if audio.is_none() => {
                     if let Ok(decoder) = symphonia::default::get_codecs().make_audio_decoder(p, &AudioDecoderOptions::default()) {
                         info.has_audio = true;
@@ -151,7 +168,9 @@ impl Demuxer {
                 }
                 _ => {}
             }
-            if let (Some(n), Some(tb)) = (track.num_frames, track.time_base)
+            // The track's duration as the container states it, else its
+            // frame count (GitHub's HEVC hero has only the former).
+            if let (Some(n), Some(tb)) = (track.duration.map(|d| d.get()).or(track.num_frames), track.time_base)
                 && let Ok(ts) = i64::try_from(n)
                 && let Some(t) = tb.calc_time(ts.into())
             {

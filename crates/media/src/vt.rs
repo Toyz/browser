@@ -60,6 +60,15 @@ unsafe extern "C" {
         nal_header_length: i32,
         out: *mut CFTypeRef,
     ) -> OSStatus;
+    fn CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        alloc: CFTypeRef,
+        count: usize,
+        pointers: *const *const u8,
+        sizes: *const usize,
+        nal_header_length: i32,
+        extensions: CFTypeRef,
+        out: *mut CFTypeRef,
+    ) -> OSStatus;
     fn CMBlockBufferCreateWithMemoryBlock(
         alloc: CFTypeRef,
         memory: *mut c_void,
@@ -192,6 +201,29 @@ fn nv12_to_bgra(y: &[u8], ys: usize, uv: &[u8], uvs: usize, w: usize, h: usize) 
 }
 
 /// `avcC`'s parameter sets (SPS, then PPS) and its length prefix size.
+/// `hvcC`'s video, sequence and picture parameter sets (NAL types 32-34)
+/// and its length prefix size.
+fn hevc_parameter_sets(hvcc: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
+    let length_size = usize::from(*hvcc.get(21)? & 3) + 1;
+    let arrays = *hvcc.get(22)?;
+    let mut at = 23;
+    let mut sets = Vec::new();
+    for _ in 0..arrays {
+        let kind = *hvcc.get(at)? & 0x3f;
+        let count = u16::from_be_bytes([*hvcc.get(at + 1)?, *hvcc.get(at + 2)?]);
+        at += 3;
+        for _ in 0..count {
+            let len = usize::from(u16::from_be_bytes([*hvcc.get(at)?, *hvcc.get(at + 1)?]));
+            at += 2;
+            if (32..=34).contains(&kind) {
+                sets.push(hvcc.get(at..at + len)?.to_vec());
+            }
+            at += len;
+        }
+    }
+    (sets.len() >= 3).then_some((sets, length_size))
+}
+
 fn parameter_sets(avcc: &[u8]) -> Option<(Vec<Vec<u8>>, usize)> {
     let length_size = usize::from(*avcc.get(4)? & 3) + 1;
     let mut at = 5;
@@ -230,6 +262,35 @@ impl Session {
         if status != 0 || format.is_null() {
             return Err(anyhow!("format description: {status}"));
         }
+        Self::with_format(format, length_size)
+    }
+
+    /// An HEVC (H.265) decoder for the stream its `hvcC` describes. The
+    /// hardware is the only HEVC decoder there is (GitHub's hero video).
+    pub fn new_hevc(hvcc: &[u8]) -> Result<Session> {
+        let (sets, length_size) = hevc_parameter_sets(hvcc).ok_or_else(|| anyhow!("no HEVC parameter sets"))?;
+        let pointers: Vec<*const u8> = sets.iter().map(|s| s.as_ptr()).collect();
+        let sizes: Vec<usize> = sets.iter().map(Vec::len).collect();
+        let mut format: CFTypeRef = std::ptr::null();
+        // SAFETY: the pointers and sizes describe `sets`, alive for the call.
+        let status = unsafe {
+            CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                std::ptr::null(),
+                sets.len(),
+                pointers.as_ptr(),
+                sizes.as_ptr(),
+                length_size as i32,
+                std::ptr::null(),
+                &mut format,
+            )
+        };
+        if status != 0 || format.is_null() {
+            return Err(anyhow!("HEVC format description: {status}"));
+        }
+        Self::with_format(format, length_size)
+    }
+
+    fn with_format(format: CFTypeRef, length_size: usize) -> Result<Session> {
         let out: Box<Mutex<Vec<Picture>>> = Box::default();
         let record = OutputCallbackRecord { callback: on_picture, refcon: &*out as *const Mutex<Vec<Picture>> as *mut c_void };
         let mut session: CFTypeRef = std::ptr::null();

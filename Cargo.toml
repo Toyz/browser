@@ -59,3 +59,4 @@ gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 gpui-component = { path = "vendor/gpui-component" }
 taffy = { path = "vendor/taffy" }
+symphonia-format-isomp4 = { path = "vendor/symphonia-format-isomp4" }

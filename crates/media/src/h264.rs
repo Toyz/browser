@@ -39,6 +39,8 @@ pub(crate) struct H264 {
     /// The hardware decoder's pictures, in decode order: shown by time once
     /// enough are in that none decoded later can come before them.
     held: Vec<VideoFrame>,
+    /// HEVC (H.265): the hardware decoder only.
+    hevc: bool,
 }
 
 /// Pictures held to put the hardware decoder's in presentation order
@@ -127,6 +129,27 @@ impl H264 {
             hard: hardware(&avcc),
             avcc,
             held: Vec::new(),
+            hevc: false,
+        })
+    }
+
+    /// An HEVC decoder for the stream `hvcc` (its `hvcC` box) describes:
+    /// VideoToolbox's (there's no software one).
+    #[cfg(target_os = "macos")]
+    pub fn hevc(hvcc: &[u8]) -> Result<H264> {
+        let hard = crate::vt::Session::new_hevc(hvcc)?;
+        let length_size = usize::from(*hvcc.get(21).unwrap_or(&3) & 3) + 1;
+        Ok(H264 {
+            decoder: decoder(&[])?,
+            sets: Vec::new(),
+            length_size,
+            pending: BinaryHeap::new(),
+            flushed: Vec::new(),
+            drained: false,
+            hard: Some(hard),
+            avcc: hvcc.to_vec(),
+            held: Vec::new(),
+            hevc: true,
         })
     }
 
@@ -236,7 +259,9 @@ impl H264 {
         self.held.clear();
         self.drained = false;
         #[cfg(target_os = "macos")]
-        if self.hard.is_some() {
+        if self.hevc {
+            self.hard = crate::vt::Session::new_hevc(&self.avcc).ok();
+        } else if self.hard.is_some() {
             self.hard = hardware(&self.avcc);
         }
         Ok(())
@@ -251,7 +276,7 @@ impl H264 {
         }
         self.avcc = avcc.to_vec();
         #[cfg(target_os = "macos")]
-        {
+        if !self.hevc {
             self.hard = hardware(&self.avcc);
         }
         self.reset()
