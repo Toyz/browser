@@ -105,8 +105,15 @@ impl Drop for BoaGc {
 #[derive(Debug, Clone)]
 struct DropGuard;
 
+/// (Feather) How many threads are sweeping right now. Every `Gc` drop asks
+/// whether its thread is; a thread-local read is a call on macOS, a few
+/// percent of a busy script thread. Sweeps are rare: with none anywhere,
+/// none here.
+static SWEEPING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl DropGuard {
     fn new() -> Self {
+        SWEEPING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         GC_DROPPING.with(|dropping| dropping.set(true));
         Self
     }
@@ -115,6 +122,7 @@ impl DropGuard {
 impl Drop for DropGuard {
     fn drop(&mut self) {
         GC_DROPPING.with(|dropping| dropping.set(false));
+        SWEEPING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -122,7 +130,7 @@ impl Drop for DropGuard {
 #[must_use]
 #[inline]
 pub fn finalizer_safe() -> bool {
-    GC_DROPPING.with(|dropping| !dropping.get())
+    SWEEPING.load(std::sync::atomic::Ordering::Relaxed) == 0 || GC_DROPPING.with(|dropping| !dropping.get())
 }
 
 /// The Allocator handles allocation of garbage collected values.

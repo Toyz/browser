@@ -110,6 +110,11 @@ declaration and expression parsers to record their source span.
 
 ## boa_gc 0.22.0
 
+(Also, `src/lib.rs` `finalizer_safe`: a global count of sweeping threads is
+read first, and the thread-local flag only while some thread sweeps. Every
+`Gc` drop asked the thread-local, a call on macOS: ~5% of a script-heavy
+benchmark.)
+
 One change, in `src/lib.rs` (`GcConfig::default`): collections start at
 16 MB rather than 1 MB, and after one the next is due when the heap reaches
 about 3x what survived rather than 1.4x. Each collection marks the whole live
