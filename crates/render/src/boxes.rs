@@ -2652,7 +2652,11 @@ impl Builder<'_> {
             // YouTube's): that's where it would be in flow anyway.
             if style.position == style::Position::Absolute && self.positioned == 0 && page_spanning(&style) {
                 let s = Arc::make_mut(&mut style);
-                s.position = style::Position::Static;
+                // Relative, not static: still the box its own positioned
+                // children are placed in. (Static, a consent dialog's
+                // absolute overlay inside one became a flex item beside the
+                // dialog, squeezing it to the side.)
+                s.position = style::Position::Relative;
                 s.inset = Edges::all(Length::Auto);
             }
             // A fixed box inside a fixed one that's a stacking context (a
@@ -2723,6 +2727,41 @@ impl Builder<'_> {
 
             if tag == "img" {
                 self.build_image(child, element, style, c, link);
+                continue;
+            }
+            // An `<iframe>`: a box (300x150 unless sized) the tab shows its
+            // document in (see `RenderCx::embeds`). Block-level: the view
+            // embeds into blocks.
+            if tag == "iframe" {
+                let mut style = style;
+                let st = Arc::make_mut(&mut style);
+                let positioned = matches!(st.position, style::Position::Absolute | style::Position::Fixed);
+                if st.width.is_auto() && !(positioned && !st.inset.left.is_auto() && !st.inset.right.is_auto()) {
+                    st.width = Length::Px(300.0);
+                }
+                if st.height.is_auto() && !(positioned && !st.inset.top.is_auto() && !st.inset.bottom.is_auto()) {
+                    st.height = Length::Px(150.0);
+                }
+                if !st.display.is_block_level() {
+                    st.display = Display::Block;
+                }
+                let frame = Block {
+                    id: self.next_id(),
+                    node: Some(child),
+                    style,
+                    kind: BlockKind::Normal,
+                    children: Vec::new(),
+                    anchors: Vec::new(),
+                    min_content: 0.0,
+                    max_content: 0.0,
+                    colspan: 1,
+                    cell: None,
+                    heading: false,
+                    pseudo: None,
+                    float_split: None,
+                };
+                self.flush(c);
+                Generated::place(Some(frame), c, link);
                 continue;
             }
             // A canvas scripts drew on carries its pixels as `src`; one they

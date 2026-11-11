@@ -55,6 +55,9 @@ impl Tab {
                         }
                         js::FromJs::CanvasFrames => this.canvas_frames(window, cx),
                         js::FromJs::AfterLayout(reply) => this.wait_for_layout(reply, cx),
+                        js::FromJs::PostMessage { to_frame, data, origin, target_origin } => {
+                            this.post_message(to_frame, data, origin, target_origin, cx)
+                        }
                         js::FromJs::Audible(audible) => {
                             this.audible = audible;
                             cx.notify();
@@ -92,6 +95,7 @@ impl Tab {
         page.title = doc.title();
         page.doc = Some(doc.clone());
         cx.notify();
+        self.sync_frames(window, cx);
         if !sheets_changed {
             self.restyle(Duration::ZERO, window, cx);
             return;

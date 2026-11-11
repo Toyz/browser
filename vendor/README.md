@@ -140,11 +140,6 @@ Drop these when Boa releases include equivalent fixes.
   elements are and `window.scrollTo` can scroll past rows not yet measured.
 - `src/elements/img.rs`: animated images keep playing while the window
   isn't the focused one (GPUI paused them, which browsers don't).
-- `src/elements/img.rs`: a picture's own aspect ratio is applied only when
-  a side is `auto`, as in CSS. With both sides given (`size_full()`), a
-  percentage height the layout couldn't resolve came from the width: a
-  canvas stretched by CSS (Badge Directory's graph) drew at its bitmap's
-  shape, twice the size.
 - `src/platform.rs` (`PlatformAtlas::update`, `AtlasState::tile`),
   `src/window.rs` (`Window::update_image`): an image's next frame of the same
   size overwrites its atlas tile and the window is only presented again, not

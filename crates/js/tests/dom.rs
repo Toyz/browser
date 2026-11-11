@@ -13,6 +13,7 @@ fn run(html: &str) -> page::Document {
         session: 0,
         viewport: None,
         activated: false,
+        frame: false,
     };
     js::start(doc, opts).0
 }
@@ -109,7 +110,7 @@ fn probe() {
     let html = std::fs::read_to_string(&path).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let doc = js::start(doc, opts).0;
     let root_el = doc.children(doc.root()).iter().copied().find(|&n| doc.element(n).is_some()).unwrap();
     println!("html class: {:?}", doc.element(root_el).unwrap().attr("class"));
@@ -149,7 +150,7 @@ fn probe_text() {
     let html = std::fs::read_to_string(std::env::var("PAGE").unwrap()).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(20), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let doc = js::start(doc, opts).0;
     println!("{}", text_of(&doc, "o"));
 }
@@ -183,7 +184,7 @@ fn cors_fetch_and_xhr() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(30), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(30), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     // The first paint waits for quick requests; the rest come as updates.
     let mut text = text_of(&doc, "o");
@@ -215,7 +216,7 @@ fn modules_static_dynamic_and_top_level_await() {
         base,
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let doc = js::start(doc, opts).0;
     assert_eq!(text_of(&doc, "o"), "hello modules true 42");
 }
@@ -278,7 +279,7 @@ fn websocket_echo() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     let mut text = text_of(&doc, "o");
     if let Some(host) = &host {
@@ -301,7 +302,7 @@ fn probe_tree() {
     let html = std::fs::read_to_string(std::env::var("PAGE").unwrap()).unwrap();
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (mut doc, host) = js::start(doc, opts);
     if let Some(host) = &host {
         let wait = std::env::var("PROBE_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
@@ -490,7 +491,7 @@ fn streaming_ndjson_and_event_source() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(10), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     let mut text = text_of(&doc, "o");
     if let Some(host) = &host {
@@ -549,7 +550,7 @@ fn slotted_clicks_reach_shadow_listeners_and_push_state() {
         Url::parse("https://example.com/start").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let label = doc
         .descendants(doc.root())
         .find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("label"))
@@ -716,7 +717,7 @@ fn layout_reaches_scripts() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let b = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("box")).unwrap();
     let (_, host) = js::start(doc, opts);
     let host = host.unwrap();
@@ -767,7 +768,7 @@ fn geometry_before_layout_is_estimated_natively() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), "true 1280 1280 1280 0 0 0 1280 800 1280 1280px 1280 800 0 function");
 }
@@ -789,7 +790,7 @@ fn observers_are_native_classes() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), "true true 10px 20% 10px 20% 0+0.5  function 0 true function function object true");
 }
@@ -819,7 +820,7 @@ fn canvas_context_is_native_with_state_and_pixels() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(
         text_of(&doc, "o"),
@@ -1188,7 +1189,7 @@ fn mouse_events_reach_scripts() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let c = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("c")).unwrap();
     let root = doc.root();
     let (_, host) = js::start(doc, opts);
@@ -1221,7 +1222,7 @@ fn keys_reach_scripts() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (_, host) = js::start(doc, opts);
     let host = host.unwrap();
     host.send(js::ToJs::Key { kind: "keydown", key: "Enter".into(), code: "Enter".into(), target: None, modifiers: [true, false, false, false] });
@@ -1294,7 +1295,7 @@ fn intersection_observer_follows_layout() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let id = |doc: &page::Document, name: &str| doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(name)).unwrap();
     let (a, b, c) = (id(&doc, "a"), id(&doc, "b"), id(&doc, "c"));
     let (_, host) = js::start(doc, opts);
@@ -1488,7 +1489,7 @@ fn focus_is_shared_with_the_tab() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let id = |doc: &page::Document, name: &str| doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some(name)).unwrap();
     let (a, b) = (id(&doc, "a"), id(&doc, "b"));
     let (_, host) = js::start(doc, opts);
@@ -1520,7 +1521,7 @@ fn probe_styles() {
     let base = Url::parse(&std::env::var("BASE").unwrap_or("https://example.com/".into())).unwrap();
     let want = std::env::var("PROBE_MATCH").unwrap_or_default();
     let doc = html::parse_scripted(&html, base, true);
-    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(net::fetch_text_cached), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (mut doc, host) = js::start(doc, opts);
     if let Some(host) = &host {
         let until = std::time::Instant::now() + Duration::from_secs(8);
@@ -1611,7 +1612,7 @@ fn match_media_evaluates_real_queries() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: true, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: true, budget: Duration::from_secs(5), debug: true, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), "1 1 1 1 1 1 1 0 | ");
     // Narrower: the list's answer flips and it says so.
@@ -1714,7 +1715,7 @@ fn window_scrolling_goes_to_the_tab_and_back() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     // Scripts see where they scrolled at once...
     assert_eq!(text_of(&doc, "o"), "520 520 0");
@@ -1754,7 +1755,7 @@ fn element_scrolling_reaches_the_tab() {
         true,
     );
     let box_node = doc.descendants(doc.root()).find(|&n| doc.element(n).and_then(|e| e.attr("id")) == Some("box")).unwrap();
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     // Before the tab has shown it, scripts can't read a box's scroll; the
     // page's they can (the body scrolls the page).
@@ -1785,7 +1786,7 @@ fn location_navigator_and_console_are_native() {
         Url::parse("https://example.com:8080/a/b?q=1#top").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(
         text_of(&doc, "o"),
@@ -1809,7 +1810,7 @@ fn web_storage_is_native_with_named_properties() {
         Url::parse("https://storage.example/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 77, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 77, viewport: None, activated: false, frame: false };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), r#"2 1 two a true false a+b  0 three function [["c","three"]]"#);
 }
@@ -1830,7 +1831,7 @@ fn history_is_native_with_state_and_popstate() {
         Url::parse("https://example.com/one").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), r#"3 {"page":33} /three "#);
     // The tab goes back one: the entry before is current again.
@@ -1864,7 +1865,7 @@ fn native_timers_call_back_in_order() {
         Url::parse("https://example.com/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_millis(200), debug: false, session: 0, viewport: None, activated: false };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_millis(200), debug: false, session: 0, viewport: None, activated: false, frame: false };
     let (doc, host) = js::start(doc, opts);
     let host = host.unwrap();
     let mut text = text_of(&doc, "o");

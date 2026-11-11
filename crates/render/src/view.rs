@@ -186,6 +186,8 @@ pub struct RenderCx {
     pub on_bounds: BoundsReport,
     pub on_inline_hover: InlineHover,
     pub controls: ControlRenderer,
+    /// What `<iframe>`s show: their documents' views, by element.
+    pub embeds: Rc<HashMap<page::NodeId, gpui_kit::AnyView>>,
 }
 
 pub(crate) fn cursor_style(c: style::Cursor) -> Option<CursorStyle> {
@@ -771,6 +773,20 @@ fn in_flow(b: &LayoutBox, cx: &RenderCx, margin: Edges<CssLength>, flow: bool) -
     render_box(b, cx, margin, flow)
 }
 
+/// An absolutely positioned box (`z-index` auto or 0) with a relatively
+/// positioned sibling after it: positioned boxes paint in tree order, so
+/// the sibling goes on top. Drawn in place, before it, not deferred above
+/// everything (a consent dialog's backdrop dimmed the dialog itself).
+fn under_later_sibling(children: &[LayoutBox], ix: usize) -> bool {
+    let auto = |b: &LayoutBox| matches!(b, LayoutBox::Block(block) if block.style.z_index.is_none_or(|z| z == 0));
+    auto(&children[ix])
+        && children[ix + 1..].iter().any(|c| {
+            matches!(c, LayoutBox::Block(block)
+                if matches!(block.style.position, style::Position::Relative | style::Position::Sticky)
+                    && block.style.z_index.is_none_or(|z| z >= 0))
+        })
+}
+
 pub(crate) fn is_out_of_flow(b: &LayoutBox) -> bool {
     matches!(b, LayoutBox::Block(b) if matches!(b.style.position, style::Position::Absolute | style::Position::Fixed))
 }
@@ -813,6 +829,9 @@ fn render_flow_children_in_order(children: &[LayoutBox], cx: &RenderCx) -> Vec<A
         .enumerate()
         .map(|(ix, child)| {
             if is_out_of_flow(child) {
+                if under_later_sibling(children, ix) {
+                    return render_box(child, cx, child.margin(), false);
+                }
                 // Positioned boxes paint above in-flow content (and their
                 // parent's border, which GPUI paints after children).
                 return positioned(child, cx, child.margin());
@@ -1012,7 +1031,8 @@ fn float_flow(key: (usize, usize), right: bool, float: &LayoutBox, items: &[Layo
 fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
     children
         .iter()
-        .map(|child| {
+        .enumerate()
+        .map(|(ix, child)| {
             // Unwrapped text as a flex item can't shrink below its width
             // (its automatic minimum size), so it needs no scroller.
             if let LayoutBox::Paragraph(p) = child
@@ -1021,6 +1041,9 @@ fn render_items(children: &[LayoutBox], cx: &RenderCx) -> Vec<AnyElement> {
                 return div().flex_none().child(crate::inline::InlineFlow::new(p.clone(), cx)).into_any_element();
             }
             if is_out_of_flow(child) {
+                if under_later_sibling(children, ix) {
+                    return render_box(child, cx, child.margin(), false);
+                }
                 return positioned(child, cx, child.margin());
             }
             in_flow(child, cx, child.margin(), false)
@@ -1375,6 +1398,11 @@ fn render_block_inner(block: &Block, cx: &RenderCx, margin: Edges<CssLength>, in
 
     let el = match cursor_style(s.cursor) {
         Some(c) => el.cursor(c),
+        None => el,
+    };
+    // An `<iframe>`: its document's view fills it.
+    let el = match block.node.and_then(|n| cx.embeds.get(&n)) {
+        Some(view) => el.relative().child(div().absolute().top_0().left_0().size_full().overflow_hidden().child(view.clone())),
         None => el,
     };
     // Scripts measure this one: an invisible child reports where it lands.

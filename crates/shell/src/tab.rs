@@ -128,6 +128,13 @@ pub struct Tab {
     measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
     /// The last restyle's element styles, for the next to reuse.
     style_cache: Arc<std::sync::Mutex<style::StyleCache>>,
+    /// This tab shows an `<iframe>`'s document: the page's tab and the
+    /// element (see `frames`).
+    pub(crate) frame: Option<(WeakEntity<Tab>, NodeId)>,
+    /// The page's `<iframe>`s: each one's address and the tab showing it.
+    frames: HashMap<NodeId, (Url, Entity<Tab>)>,
+    /// Their views, for the renderer.
+    embeds: Rc<HashMap<NodeId, AnyView>>,
     /// Bumped each time the tab paints (by an element painted before the
     /// page): bounds reported twice in one frame (a container split across
     /// rows) are unioned, and what a frame didn't paint is off screen.
@@ -294,6 +301,9 @@ impl Tab {
             stale_skips: 0,
             measured_bounds: Rc::default(),
             style_cache: Arc::default(),
+            frame: None,
+            frames: HashMap::new(),
+            embeds: Rc::default(),
             bounds_frame: Rc::default(),
             bounds_checked: 0,
             doc_gen: 0,
@@ -551,6 +561,7 @@ impl Tab {
                         }
                         this.page_ix = this.history_ix;
                         this.install(page, window, cx);
+                        this.sync_frames(window, cx);
                         this.scroll_to_fragment(fragment.as_deref());
                         // A prerender was styled for the window and pointer as they were.
                         this.viewport_changed(window, cx);
@@ -581,13 +592,17 @@ impl Tab {
         let referer = self.page.as_ref().map(|p| p.url.clone());
         // sessionStorage belongs to the tab.
         let session = cx.entity_id().as_u64();
-        let page = loader::deep(move || loader::load(&url, env, post.as_deref(), referer.as_ref(), session).map_err(Arc::new));
+        let frame = self.frame.is_some();
+        let page = loader::deep(move || loader::load(&url, env, post.as_deref(), referer.as_ref(), session, frame).map_err(Arc::new));
         cx.background_spawn(page).shared()
     }
 
     /// Put a loaded page on screen.
     fn install(&mut self, page: LoadedPage, window: &mut Window, cx: &mut Context<Self>) {
         render::view::scrolled::forget();
+        // The last page's frames go with it.
+        self.frames.clear();
+        self.embeds = Rc::default();
         if std::env::var_os("BROWSER_DEBUG").is_some() {
             eprintln!("install {} ({} rows, title {:?})", page.url, page.layout.rows.len(), page.title);
         }
@@ -2127,6 +2142,81 @@ impl Tab {
         self.list_state.scroll_to(ListOffset { item_ix: row, offset_in_item: px(0.) });
     }
 
+    /// Give each `<iframe>` in the document a tab showing its `src`, drop
+    /// the ones gone (or pointed elsewhere).
+    pub(super) fn sync_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = &self.page else { return };
+        let Some(doc) = page.doc.clone() else { return };
+        let base = page.url.clone();
+        let mut wanted: HashMap<NodeId, Url> = HashMap::new();
+        for n in doc.descendants(doc.root()) {
+            let Some(e) = doc.element(n) else { continue };
+            if &*e.name.local != "iframe" {
+                continue;
+            }
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("frame {n:?}: src {:?}", e.attr("src").map(|s| s.chars().take(100).collect::<String>()));
+            }
+            let Some(url) = e.attr("src").map(str::trim).filter(|s| !s.is_empty()).and_then(|s| base.join(s).ok()) else { continue };
+            // (A local page's local frames too.)
+            if matches!(url.scheme(), "http" | "https") || (url.scheme() == "file" && base.scheme() == "file") {
+                wanted.insert(n, url);
+            }
+        }
+        let before = self.frames.len();
+        self.frames.retain(|n, (url, _)| wanted.get(n) == Some(url));
+        let mut changed = self.frames.len() != before;
+        for (node, url) in wanted {
+            if self.frames.contains_key(&node) {
+                continue;
+            }
+            let parent = cx.entity().downgrade();
+            let palette = self.palette.clone();
+            let child = cx.new(|cx| {
+                let mut tab = Tab::new(palette, cx);
+                tab.frame = Some((parent, node));
+                tab
+            });
+            child.update(cx, |tab, cx| tab.script_navigate(url.clone(), window, cx));
+            self.frames.insert(node, (url, child));
+            changed = true;
+        }
+        if changed {
+            self.embeds = Rc::new(self.frames.iter().map(|(n, (_, t))| (*n, AnyView::from(t.clone()))).collect());
+            cx.notify();
+        }
+    }
+
+    /// A frame's `postMessage`: to one of this page's `<iframe>`s, or to
+    /// the page this one is framed in.
+    pub(super) fn post_message(&mut self, to_frame: Option<NodeId>, data: String, origin: String, target_origin: String, cx: &mut Context<Self>) {
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            eprintln!("postMessage to {} from {origin} (for {target_origin}): {}", if to_frame.is_some() { "frame" } else { "parent" }, data.chars().take(160).collect::<String>());
+        }
+        let deliver = move |tab: &mut Tab, from_frame: Option<NodeId>| {
+            let Some(page) = &tab.page else { return };
+            let theirs = page.url.origin().ascii_serialization();
+            if target_origin != "*" && target_origin.trim_end_matches('/') != theirs {
+                return;
+            }
+            if let Some(host) = &page.scripts {
+                host.send(js::ToJs::Message { data, origin, from_frame });
+            }
+        };
+        match to_frame {
+            Some(node) => {
+                if let Some((_, child)) = self.frames.get(&node) {
+                    child.update(cx, |tab, _| deliver(tab, None));
+                }
+            }
+            None => {
+                if let Some((parent, node)) = self.frame.clone() {
+                    parent.update(cx, |tab, _| deliver(tab, Some(node))).ok();
+                }
+            }
+        }
+    }
+
     fn render_cx(&self, cx: &Context<Self>) -> RenderCx {
         let this = cx.entity().downgrade();
         let (click, hover, block_hover, inline_hover) = (this.clone(), this.clone(), this.clone(), this);
@@ -2137,6 +2227,7 @@ impl Tab {
         let page_gen = self.page_gen;
         let controls = cx.entity().downgrade();
         RenderCx {
+            embeds: self.embeds.clone(),
             controls: Rc::new(move |control, style, window, cx| {
                 controls
                     .update(cx, |this, cx| this.control_element(control, style, window, cx))
@@ -2766,7 +2857,9 @@ impl Tab {
             .as_ref()
             .and_then(|p| p.layout.canvas)
             .map(|c| palette.color(c))
-            .unwrap_or(palette.canvas);
+            // A frame's document shows the page around it through itself
+            // unless it has a background (a consent dialog over BBC).
+            .unwrap_or(if self.frame.is_some() { gpui::transparent_black() } else { palette.canvas });
         let status = self.hovered_link.as_ref().map(|url| {
             div()
                 .absolute()

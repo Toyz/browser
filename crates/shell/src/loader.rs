@@ -97,7 +97,7 @@ fn activated(url: &Url) -> bool {
     set.as_ref().is_some_and(|s| s.contains(&url.origin().ascii_serialization()))
 }
 
-pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>, session: u64) -> anyhow::Result<LoadedPage> {
+pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option<&Url>, session: u64, frame: bool) -> anyhow::Result<LoadedPage> {
     if url.scheme() == "view-source" {
         let inner = Url::parse(url.path()).map_err(|e| anyhow::anyhow!("bad view-source URL: {e}"))?;
         let response = net::fetch(&inner)?;
@@ -161,6 +161,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
                 session,
                 viewport: Some((env.width, env.height)),
                 activated: activated(&response.url),
+                frame,
             },
         )
     } else {

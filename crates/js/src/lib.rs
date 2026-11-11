@@ -81,10 +81,16 @@ pub struct Options {
     pub viewport: Option<(f32, f32)>,
     /// The user has used this page's site: sound may start on its own.
     pub activated: bool,
+    /// The document is in an `<iframe>`: `window.parent` is its page's.
+    pub frame: bool,
 }
 
 /// To the script thread.
 pub enum ToJs {
+    /// `postMessage` from another frame: `data` as JSON, the sender's
+    /// origin, and which of this page's `<iframe>`s sent it (`None`: the
+    /// page this one is framed in).
+    Message { data: String, origin: String, from_frame: Option<NodeId> },
     /// The user clicked `node`; answers whether a handler cancelled the
     /// default action.
     Click { node: NodeId, reply: Option<mpsc::Sender<bool>> },
@@ -172,6 +178,10 @@ pub enum FromJs {
     /// Whether something on the page is playing sound now (the tab shows
     /// a speaker).
     Audible(bool),
+    /// `postMessage` to another frame: an `<iframe>` of this page, or
+    /// (`None`) the page this one is framed in. `data` as JSON; delivered
+    /// only if the receiver's origin matches `target_origin` (or it's `*`).
+    PostMessage { to_frame: Option<NodeId>, data: String, origin: String, target_origin: String },
 }
 
 /// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height` (handed

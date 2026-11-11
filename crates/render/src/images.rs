@@ -265,6 +265,16 @@ pub fn picture_fitted(
                     .object_fit(ObjectFit::Fill),
             )
             .into_any_element(),
+        // A canvas's or video's picture stretched to its box: placed in it,
+        // so the box's size holds whatever the picture's shape (in flow, a
+        // percentage height the layout couldn't resolve came from the
+        // picture's ratio: Badge Directory's 2x graph canvas showed its
+        // top-left quarter, doubled).
+        _ if matches!(&image, ImageSource::Render(r) if is_live(r)) => div()
+            .size_full()
+            .relative()
+            .child(round(img(image.clone())).absolute().top_0().left_0().size_full().object_fit(ObjectFit::Fill))
+            .into_any_element(),
         _ => animated(round(img(image.clone())).size_full().object_fit(ObjectFit::Fill), &image),
     }
 }

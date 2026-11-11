@@ -231,6 +231,8 @@ pub(crate) struct Dom {
     /// The user has interacted with the page (clicked, typed): sound may
     /// play.
     pub(crate) activated: bool,
+    /// In an `<iframe>` (see `Options::frame`).
+    pub(crate) frame: bool,
     /// When the user last clicked or typed: layout read soon after is worth
     /// a forced layout (see `geometry::reflow`).
     pub(crate) input_at: Option<Instant>,
@@ -355,6 +357,7 @@ impl Runtime {
             media_dirty: Vec::new(),
             media_frames: HashSet::new(),
             activated: opts.activated,
+            frame: opts.frame,
             input_at: None,
             submit: None,
             values: HashMap::new(),
@@ -914,6 +917,10 @@ impl Runtime {
             ToJs::Socket { id, event } => self.socket_event(id, event),
             ToJs::Media { node, generation, event } => crate::media_element::deliver(node, generation, event, &mut self.cx),
             ToJs::MuteTab(muted) => crate::media_element::mute_tab(muted, &mut self.cx),
+            ToJs::Message { data, origin, from_frame } => {
+                let from = from_frame.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
+                self.call_global("__frameMessage", &[js_str(&data), js_str(&origin), from]);
+            }
             ToJs::Worker { id, event } => {
                 if let Err(e) = crate::worker::deliver(id, event, &mut self.cx) {
                     self.log_error("worker message", e);
@@ -1624,6 +1631,18 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
         let Some(t) = arg_node(&dom, a, 0) else { return Ok(JsValue::null()) };
         Ok(dom.doc.element(t).and_then(|e| e.template_contents).map_or(JsValue::null(), |c| JsValue::from(node_to_number(c))))
     }));
+    // Cross-frame `postMessage`: to an `<iframe>` (its node) or to the
+    // page this one is framed in (`null`): `(frame, json, targetOrigin)`.
+    add("framePost", 3, Box::new(|d, a, cx| {
+        let to_frame = a.first().and_then(|v| v.as_number()).map(node_from_number);
+        let data = js_value_string(a.get(1).unwrap_or(&JsValue::undefined()), cx);
+        let target_origin = js_value_string(a.get(2).unwrap_or(&JsValue::undefined()), cx);
+        let dom = d.borrow();
+        let origin = dom.doc.url.origin().ascii_serialization();
+        dom.tab.send_blocking(crate::FromJs::PostMessage { to_frame, data, origin, target_origin }).ok();
+        Ok(JsValue::undefined())
+    }));
+    add("isFrame", 0, Box::new(|d, _, _| Ok(JsValue::from(d.borrow().frame))));
     // In the document (through shadow hosts)?
     add("connected", 1, Box::new(|d, a, _| {
         let dom = d.borrow();
@@ -2473,6 +2492,7 @@ fn queue_stats(msg: &ToJs) {
         ToJs::Click { .. } => "click",
         ToJs::Input { .. } | ToJs::Checked { .. } | ToJs::Submit { .. } | ToJs::Key { .. } | ToJs::Focus { .. } => "input",
         ToJs::Socket { .. } => "socket",
+        ToJs::Message { .. } => "message",
         ToJs::FetchHead { .. } => "fetch-head",
         ToJs::FetchChunk { .. } => "fetch-chunk",
         ToJs::FetchDone { .. } => "fetch-done",

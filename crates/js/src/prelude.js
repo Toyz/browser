@@ -1264,10 +1264,25 @@
   }
   reflect(HTMLVideoElement, [["poster", "poster", "url"], ["playsInline", "playsinline", "bool"], ["width", "width", "num"], ["height", "height", "num"]]);
   class HTMLAudioElement extends HTMLMediaElement {}
+  // A frame's window as other frames see it: something to post to.
+  const frameWindow = (frameId) => ({
+    postMessage(data, targetOrigin = "*") {
+      const to = typeof targetOrigin === "object" && targetOrigin ? targetOrigin.targetOrigin || "*" : targetOrigin;
+      N.framePost(frameId, JSON.stringify(data === undefined ? null : data), String(to));
+    },
+    closed: false,
+  });
+  const frameWindows = new Map();
   class HTMLIFrameElement extends HTMLElement {
-    get contentWindow() { return null; }
+    get contentWindow() {
+      const id = this.__featherNode;
+      if (!frameWindows.has(id)) frameWindows.set(id, frameWindow(id));
+      return frameWindows.get(id);
+    }
     get contentDocument() { return null; }
   }
+  reflect(HTMLIFrameElement, [["src", "src", "url"], ["name", "name"], ["width", "width"], ["height", "height"], ["allow", "allow"]]);
+  const parentWindow = N.isFrame() ? frameWindow(null) : null;
   // Element interfaces with nothing of their own here, for `instanceof`.
   const plain = (name, base = HTMLElement) => ({ [name]: class extends base {} })[name];
   const HTMLDivElement = plain("HTMLDivElement"), HTMLSpanElement = plain("HTMLSpanElement");
@@ -1798,7 +1813,7 @@
     Object.defineProperty(window, name, { get, configurable: true });
   }
   Object.assign(window, {
-    window, self: window, globalThis: window, top: window, parent: window, frames: window,
+    window, self: window, globalThis: window, top: parentWindow || window, parent: parentWindow || window, frames: window,
     document, location, history, navigator: navigatorImpl, console: consoleImpl, getSelection,
     Window, HTMLDocument: Document,
     Node, Element, HTMLElement, Text, Comment, Document, DocumentFragment, CharacterData, EventTarget,
@@ -2106,7 +2121,7 @@
   const sockets = new Map();
   let nextSocket = 1;
   class MessageEvent extends Event {
-    constructor(type, init) { super(type, init); init = init || {}; this.data = init.data; this.origin = init.origin || ""; this.lastEventId = ""; this.source = null; this.ports = []; }
+    constructor(type, init) { super(type, init); init = init || {}; this.data = init.data; this.origin = init.origin || ""; this.lastEventId = init.lastEventId || ""; this.source = init.source || null; this.ports = init.ports || []; }
   }
   // MessageChannel: two entangled ports; messages arrive as tasks (React's
   // scheduler and YouTube use them to yield).
@@ -2425,6 +2440,13 @@
       return out;
     },
     __setFocus(id) { moveFocus(id === null ? null : wrap(id)); },
+    // A `postMessage` from another frame (see `ToJs::Message`).
+    __frameMessage(json, origin, frameId) {
+      let data = null;
+      try { data = JSON.parse(json); } catch (e) {}
+      const source = frameId === null ? parentWindow : (wrap(frameId) && wrap(frameId).contentWindow) || null;
+      window.dispatchEvent(new MessageEvent("message", { data, origin, source }));
+    },
     __dispatchKey(kind, key, code, id, ctrl, shift, alt, meta) {
       if (id !== null && focusedElement !== wrap(id)) moveFocus(wrap(id));
       const target = (id !== null && wrap(id)) || focusedElement || document.body || document.documentElement;
