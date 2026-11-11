@@ -5507,6 +5507,20 @@ impl Window {
         });
     }
 
+    /// Replace the pixels of an image frame already drawn, with ones of the
+    /// same size (a video's next frame): shown at the next present, without
+    /// rendering or laying anything out again. `Ok(false)` when it isn't in
+    /// the sprite atlas (draw it as usual).
+    pub fn update_image(&mut self, data: &RenderImage, frame_index: usize, bytes: &[u8]) -> Result<bool> {
+        let params = RenderImageParams { image_id: data.id, frame_index };
+        let updated = self.sprite_atlas.update(&params.into(), data.size(frame_index), bytes)?;
+        if updated {
+            self.needs_present.set(true);
+            self.platform_window.schedule_frame();
+        }
+        Ok(updated)
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

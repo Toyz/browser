@@ -223,6 +223,7 @@ pub fn picture_fitted(
     if fit == style::ObjectFit::Cover
         && corners.iter().any(|c| *c > px(0.))
         && let (ImageSource::Render(frames), Some(ratio)) = (&image, box_ratio)
+        && !is_live(frames)
         && let Some(cropped) = cover_crop_frames(frames, ratio)
     {
         let source: ImageSource = cropped.into();
@@ -292,7 +293,7 @@ pub fn filtered(
     }
     // An animation: every frame, filtered.
     if let Some(frames) = frames {
-        if colors.is_empty() {
+        if colors.is_empty() || is_live(frames) {
             return (frames.clone().into(), None);
         }
         let key = (Arc::as_ptr(frames) as usize, format!("{colors:?}"));
@@ -345,9 +346,10 @@ pub fn filtered(
 
 /// A ready picture from premultiplied RGBA pixels (a canvas's), and its
 /// one frame (to drop from the GPU atlas when it's replaced).
-pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>, bgra: bool) -> Option<(ImageState, Arc<RenderImage>)> {
-    // BGRA with straight alpha, as GPUI draws pictures (converted in place).
-    for px in pixels.chunks_exact_mut(4).filter(|_| !bgra) {
+/// Premultiplied RGBA to BGRA with straight alpha, as GPUI draws pictures
+/// (in place).
+pub fn to_bgra(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
         let a = px[3] as u32;
         if a == 255 {
             px.swap(0, 2);
@@ -358,6 +360,31 @@ pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>, bgra: bool) -> 
         px[0] = b;
         px[1] = g;
         px[2] = r;
+    }
+}
+
+/// Pictures whose pixels change in place (videos' and canvases' frames, see
+/// `Window::update_image`): drawn as they are, never through a cropped or
+/// filtered copy, which wouldn't change with them.
+static LIVE: std::sync::Mutex<Option<std::collections::HashSet<gpui_kit::ImageId>>> = std::sync::Mutex::new(None);
+
+pub fn set_live(image: &RenderImage, live: bool) {
+    let mut set = LIVE.lock().unwrap_or_else(|e| e.into_inner());
+    let set = set.get_or_insert_with(Default::default);
+    if live {
+        set.insert(image.id);
+    } else {
+        set.remove(&image.id);
+    }
+}
+
+fn is_live(image: &RenderImage) -> bool {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&image.id))
+}
+
+pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>, bgra: bool) -> Option<(ImageState, Arc<RenderImage>)> {
+    if !bgra {
+        to_bgra(&mut pixels);
     }
     let buffer = image::RgbaImage::from_raw(width, height, pixels)?;
     let frame = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));

@@ -140,6 +140,11 @@ Drop these when Boa releases include equivalent fixes.
   elements are and `window.scrollTo` can scroll past rows not yet measured.
 - `src/elements/img.rs`: animated images keep playing while the window
   isn't the focused one (GPUI paused them, which browsers don't).
+- `src/platform.rs` (`PlatformAtlas::update`, `AtlasState::tile`),
+  `src/window.rs` (`Window::update_image`): an image's next frame of the same
+  size overwrites its atlas tile and the window is only presented again, not
+  rendered: a playing video re-rendered and laid out the whole page for
+  every frame (YouTube drew at 17 fps).
 
 ## gpui-pre-apple 0.3.11
 
@@ -150,6 +155,8 @@ Drop these when Boa releases include equivalent fixes.
   `id_for_native_font` tells instances apart by their `wght`. Without it,
   every weight of a variable web font (Inter, Roboto Flex...) drew as its
   default one: NASA's 700-weight headline was regular.
+- `src/metal_atlas.rs`: `PlatformAtlas::update`, uploading into the
+  existing tile.
 - `src/text_system.rs` (`add_fonts`): fonts CoreText can't open or name are
   skipped. font-kit's `family_name` aborts the app on a web font without a
   family name.

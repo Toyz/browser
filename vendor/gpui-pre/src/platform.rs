@@ -1803,6 +1803,13 @@ pub trait PlatformAtlas {
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
 
+    /// Overwrite the pixels of an existing tile of the same size (a video's
+    /// next frame), leaving scenes that draw it valid. `Ok(false)` when there
+    /// is no such tile.
+    fn update(&self, _key: &AtlasKey, _size: Size<DevicePixels>, _bytes: &[u8]) -> Result<bool> {
+        Ok(false)
+    }
+
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
         false
@@ -1837,6 +1844,11 @@ impl<Backend> AtlasState<Backend> {
 
     pub fn contains(&self, key: &AtlasKey) -> bool {
         self.tiles_by_key.contains_key(key)
+    }
+
+    /// The tile cached for `key`, if any.
+    pub fn tile(&self, key: &AtlasKey) -> Option<&AtlasTile> {
+        self.tiles_by_key.get(key)
     }
 
     pub fn clear(&mut self, reset_backend: impl FnOnce(&mut Backend)) {

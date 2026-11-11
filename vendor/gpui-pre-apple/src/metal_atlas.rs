@@ -58,6 +58,18 @@ impl PlatformAtlas for MetalAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
+
+    fn update(&self, key: &AtlasKey, size: Size<DevicePixels>, bytes: &[u8]) -> Result<bool> {
+        let state = self.0.lock();
+        let Some(tile) = state.tile(key).cloned() else { return Ok(false) };
+        if tile.bounds.size != size {
+            return Ok(false);
+        }
+        let Some(texture) = state.backend.texture(tile.texture_id) else { return Ok(false) };
+        let upload = AtlasUpload::new(tile.texture_id.kind, size, bytes)?;
+        texture.upload(tile.bounds.origin, &upload)?;
+        Ok(true)
+    }
 }
 
 impl AtlasBackend for MetalAtlasTextures {

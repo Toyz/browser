@@ -906,22 +906,44 @@ impl Tab {
     /// frame, the last one dropped from the GPU atlas.
     pub(super) fn canvas_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let started = std::time::Instant::now();
-        self.canvas_frames_now(window);
+        let redraw = self.canvas_frames_now(window);
         if let Some(p) = &mut self.perf {
             p.canvas += 1;
             p.canvas_time += started.elapsed();
         }
-        cx.notify();
+        if redraw {
+            cx.notify();
+        }
     }
 
-    fn canvas_frames_now(&mut self, window: &mut Window) {
-        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
+    /// Whether the page needs rendering again (a frame of a new size, or a
+    /// canvas new to the page); frames like the last are swapped into the
+    /// GPU in place, and only presented.
+    fn canvas_frames_now(&mut self, window: &mut Window) -> bool {
+        let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return false };
         let frames = std::mem::take(&mut *host.canvas_frames.lock().unwrap_or_else(|e| e.into_inner()));
-        for (node, c) in frames {
+        let mut redraw = false;
+        for (node, mut c) in frames {
+            if !c.bgra {
+                render::images::to_bgra(&mut c.pixels);
+                c.bgra = true;
+            }
+            let same_size = |old: &Arc<gpui::RenderImage>| {
+                old.size(0) == gpui::size(gpui::DevicePixels(c.width as i32), gpui::DevicePixels(c.height as i32))
+            };
+            if let Some(old) = self.canvas_frames.get(&node)
+                && same_size(old)
+                && window.update_image(old, 0, &c.pixels).unwrap_or(false)
+            {
+                continue;
+            }
+            redraw = true;
             let Ok(url) = Url::parse(&js::canvas_url(node)) else { continue };
-            let Some((state, frame)) = render::images::from_pixels(c.width, c.height, c.pixels, c.bgra) else { continue };
+            let Some((state, frame)) = render::images::from_pixels(c.width, c.height, c.pixels, true) else { continue };
+            render::images::set_live(&frame, true);
             self.images.borrow_mut().insert(url, state);
             if let Some(old) = self.canvas_frames.insert(node, frame) {
+                render::images::set_live(&old, false);
                 window.drop_image(old).ok();
             }
         }
@@ -930,6 +952,7 @@ impl Tab {
             let gone: Vec<NodeId> = self.canvas_frames.keys().filter(|n| doc.get(**n).is_none()).copied().collect();
             for n in gone {
                 if let Some(old) = self.canvas_frames.remove(&n) {
+                    render::images::set_live(&old, false);
                     window.drop_image(old).ok();
                 }
                 if let Ok(url) = Url::parse(&js::canvas_url(n)) {
@@ -937,6 +960,7 @@ impl Tab {
                 }
             }
         }
+        redraw
     }
 
     /// Lay out a few more rows the list hasn't measured yet, between
