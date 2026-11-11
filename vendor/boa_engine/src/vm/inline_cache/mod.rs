@@ -37,6 +37,16 @@ fn prototype_shape(shape: &Shape) -> Option<Shape> {
     shape.prototype().map(|p| p.borrow().shape().clone())
 }
 
+/// Feather: whether an object still has the shape it had before a property
+/// access ran. A getter (or setter) can redefine the very property it
+/// belongs to (a lazy getter replacing itself with its value), reshaping the
+/// object; the slot the access found is then the old shape's, and caching it
+/// under the new one had later reads call the value as the getter: "not a
+/// callable function" (Google Translate never showed a translation).
+pub(crate) fn same_shape(before: &Shape, now: &Shape) -> bool {
+    before.to_addr_usize() == now.to_addr_usize()
+}
+
 /// An inline cache entry for a property access.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub(crate) struct InlineCache {

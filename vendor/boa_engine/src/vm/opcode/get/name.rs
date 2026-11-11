@@ -81,6 +81,7 @@ impl GetNameGlobal {
                 return Ok(());
             }
 
+            let before = object_borrowed.shape().clone();
             drop(object_borrowed);
 
             let key: PropertyKey = ic.name.clone().into();
@@ -99,7 +100,9 @@ impl GetNameGlobal {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
                 let object_borrowed = object.borrow();
                 let shape = object_borrowed.shape();
-                ic.set(shape, slot);
+                if crate::vm::inline_cache::same_shape(&before, shape) {
+                    ic.set(shape, slot);
+                }
             }
 
             context.vm.set_register(dst.into(), result);

@@ -1975,3 +1975,28 @@ fn platform_functions_and_objects_read_as_built_ins() {
          [object HTMLDocument]|[object Navigator]|[object Location]|[object Storage]|[object Window]|true|0"
     );
 }
+
+/// A getter that replaces itself with its value (a lazy getter) reshapes
+/// its object while it runs: the access site mustn't cache the old shape's
+/// getter slot under the new shape, or the next read calls the value as
+/// the getter ("not a callable function": Google Translate never showed a
+/// translation).
+#[test]
+fn lazy_getters_replacing_themselves_read_their_values() {
+    let doc = run(r##"<body><p id="out"></p>
+        <script>
+          function make() {
+            const o = { a: 1, b: 2 };
+            Object.defineProperty(o, "lazy", {
+              configurable: true, enumerable: true,
+              get() { Object.defineProperty(this, "lazy", { value: () => 42, enumerable: true, configurable: true }); return this.lazy; },
+            });
+            return o;
+          }
+          function read(o) { return o.lazy; }
+          let total = 0, error = "";
+          try { for (let i = 0; i < 4; i++) { const o = make(); total += read(o)() + read(o)(); } } catch (e) { error = String(e); }
+          document.getElementById("out").textContent = total + error;
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "out"), "336");
+}

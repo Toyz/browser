@@ -111,7 +111,7 @@ impl Eval {
             let text = x.to_std_string_escaped();
             let mut h = std::collections::hash_map::DefaultHasher::new();
             text.hash(&mut h);
-            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("eval-{:016x}.js", h.finish())), text);
+            std::fs::write(std::path::Path::new(&dir).join(format!("eval-{:016x}.js", h.finish())), text).ok();
         }
 
         // Because of implementation details the following code differs from the spec.

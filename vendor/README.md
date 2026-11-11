@@ -92,6 +92,12 @@ declaration and expression parsers to record their source span.
   when the first one is cached (`Option<Box<ArrayVec<..>>>`), not inline.
   Every property access in every compiled function has a cache, and most of
   a large bundle never runs: inline, they were 84 MB of YouTube's heap.
+- `src/vm/opcode/get/{property,name}.rs`, `src/vm/opcode/set/property.rs`
+  (`inline_cache::same_shape`): a slot found by a slow-path access is cached
+  only under the shape it was found in. A getter that replaces itself with
+  its value (a lazy getter) reshapes the object while it runs; its accessor
+  slot cached under the new shape had the next read call the value as the
+  getter, "not a callable function" (Google Translate showed no result).
 - `src/builtins/intl/locale/utils.rs` (`default_locale`): the system locale
   is asked for once per thread. Each `Number.prototype.toLocaleString`
   makes a NumberFormat that asked the OS (`CFLocaleCopyPreferredLanguages`)

@@ -58,6 +58,7 @@ fn set_by_name(
         }
         return Ok(());
     }
+    let before = object_borrowed.shape().clone();
     drop(object_borrowed);
 
     let name: PropertyKey = ic.name.clone().into();
@@ -83,7 +84,10 @@ fn set_by_name(
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
-        ic.set(shape, slot);
+        // (A setter that reshaped the object: the slot is the old shape's.)
+        if !slot.attributes.is_accessor_descriptor() || crate::vm::inline_cache::same_shape(&before, shape) {
+            ic.set(shape, slot);
+        }
     }
 
     Ok(())

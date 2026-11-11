@@ -871,7 +871,8 @@ impl Context {
                 let frame = self.vm.frame();
                 let code = frame.code_block();
                 let at = code.source_info().map().find(frame.pc.saturating_sub(1)).map(|p| format!(":{}:{}", p.line_number(), p.column_number())).unwrap_or_default();
-                let line = format!("{} [in {} {}{at}]", native, code.name().to_std_string_escaped(), code.path());
+                let key = LAST_KEY.with(|k| k.borrow().clone());
+                let line = format!("{} [in {} {}{at}, last key read {key:?}]", native, code.name().to_std_string_escaped(), code.path());
                 if SEEN.with(|s| s.borrow_mut().insert(line.clone())) {
                     eprintln!("js error: {line}");
                 }

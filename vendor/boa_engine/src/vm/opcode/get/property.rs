@@ -64,6 +64,8 @@ fn get_by_name<const LENGTH: bool>(
         return Ok(());
     }
 
+    // (The shape the slot will describe: see `same_shape`.)
+    let before = object_borrowed.shape().clone();
     drop(object_borrowed);
 
     let key: PropertyKey = ic.name.clone().into();
@@ -77,7 +79,9 @@ fn get_by_name<const LENGTH: bool>(
         let ic = &context.vm.frame().code_block.ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape();
-        ic.set(shape, slot);
+        if crate::vm::inline_cache::same_shape(&before, shape) {
+            ic.set(shape, slot);
+        }
     }
 
     context.vm.set_register(dst.into(), result);
