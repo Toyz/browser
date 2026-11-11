@@ -122,6 +122,8 @@ pub enum ToJs {
     /// News from a `<video>` / `<audio>`'s player (of its `generation`th
     /// load).
     Media { node: NodeId, generation: u32, event: media::Event },
+    /// The user muted (or unmuted) the tab: every media element is silent.
+    MuteTab(bool),
     Shutdown,
 }
 
@@ -159,6 +161,9 @@ pub enum FromJs {
     /// Answer once the document sent before this is laid out and painted
     /// (a script reading layout waits for it: a forced layout).
     AfterLayout(std::sync::mpsc::Sender<()>),
+    /// Whether something on the page is playing sound now (the tab shows
+    /// a speaker).
+    Audible(bool),
 }
 
 /// A `<canvas>`'s pixels: premultiplied RGBA, `width` x `height` (handed
@@ -232,9 +237,17 @@ impl Drop for ScriptHost {
 }
 
 /// Does the document have scripts we'd run?
+/// (Media elements and inline event handlers need the script thread too:
+/// it plays the one and runs the other.)
 pub fn has_scripts(doc: &Document) -> bool {
-    doc.descendants(doc.root()).any(|n| doc.element(n).is_some_and(|e| &**e.local_name() == "script" && dom::runnable(e)))
-        || dom::has_declarative_shadow(doc)
+    doc.descendants(doc.root()).any(|n| {
+        doc.element(n).is_some_and(|e| {
+            let name = &**e.local_name();
+            (name == "script" && dom::runnable(e))
+                || (e.is_html() && matches!(name, "video" | "audio"))
+                || e.attrs.iter().any(|a| a.name.local.starts_with("on"))
+        })
+    }) || dom::has_declarative_shadow(doc)
 }
 
 /// Run `doc`'s scripts. Returns the DOM to paint first (the scripts' work,

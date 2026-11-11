@@ -73,6 +73,7 @@ struct El {
     /// Pictures shown.
     shown: Arc<AtomicU32>,
     loaded_data: bool,
+    has_audio: bool,
     /// The `MediaSource` it plays, if it does.
     source: Option<JsObject>,
     mse: Option<media::mse::Mse>,
@@ -101,6 +102,7 @@ impl Default for El {
             plays: Vec::new(),
             shown: Arc::default(),
             loaded_data: false,
+            has_audio: false,
             source: None,
             mse: None,
         }
@@ -123,6 +125,10 @@ pub(crate) struct Media {
     /// Events to fire after the current task (`play`, `pause`...).
     queued: RefCell<Vec<(NodeId, &'static str)>>,
     scanned: std::cell::Cell<bool>,
+    /// The user muted the tab.
+    tab_muted: std::cell::Cell<bool>,
+    /// What the tab was last told about sound playing.
+    audible: std::cell::Cell<bool>,
 }
 
 fn state(cx: &Context) -> Rc<Media> {
@@ -274,7 +280,7 @@ fn load(node: NodeId, cx: &mut Context) {
         el.mse = Some(mse);
     }
     let muted = el.muted.unwrap_or(muted_attr);
-    player.send(media::Command::Volume(if muted { 0.0 } else { el.volume as f32 }));
+    player.send(media::Command::Volume(if muted || m.tab_muted.get() { 0.0 } else { el.volume as f32 }));
     player.send(media::Command::Loop(looping));
     if el.rate != 1.0 {
         player.send(media::Command::Rate(el.rate));
@@ -394,6 +400,7 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
                     el.duration = info.duration.unwrap_or(f64::INFINITY);
                 }
                 el.size = (info.width, info.height);
+                el.has_audio = info.has_audio;
                 el.ready = el.ready.max(HAVE_METADATA);
                 fire_now.extend(["durationchange"]);
                 if info.has_video {
@@ -462,6 +469,36 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
         settle(plays, if failed { Err(("NotSupportedError", "The element has no supported sources.")) } else { Ok(()) }, cx);
     }
     fire(node, &fire_now, cx);
+    update_audible(cx);
+}
+
+/// The user muted or unmuted the tab.
+pub(crate) fn mute_tab(muted: bool, cx: &mut Context) {
+    let m = state(cx);
+    m.tab_muted.set(muted);
+    let d = crate::dom::page(cx);
+    let dom = d.borrow();
+    for (&node, e) in m.els.borrow().iter() {
+        let own = e.muted.unwrap_or_else(|| dom.doc.element(node).is_some_and(|el| el.attr("muted").is_some()));
+        e.send(media::Command::Volume(if muted || own { 0.0 } else { e.volume as f32 }));
+    }
+}
+
+/// Tell the tab whether sound is playing (when that changes): an element
+/// playing, with sound, not muted by the page.
+fn update_audible(cx: &mut Context) {
+    let m = state(cx);
+    let d = crate::dom::page(cx);
+    let audible = {
+        let dom = d.borrow();
+        m.els.borrow().iter().any(|(&node, e)| {
+            let muted = e.muted.unwrap_or_else(|| dom.doc.element(node).is_some_and(|el| el.attr("muted").is_some()));
+            e.player.is_some() && !e.paused && !e.ended && e.has_audio && !muted && e.volume > 0.0 && dom.doc.get(node).is_some()
+        })
+    };
+    if m.audible.replace(audible) != audible {
+        m.updates.send_blocking(FromJs::Audible(audible)).ok();
+    }
 }
 
 /// A `MediaSource`'s duration changed.
@@ -538,7 +575,9 @@ pub(crate) fn tick(cx: &mut Context) -> bool {
         fire(node, &[kind], cx);
     }
     // (A load just opened a MediaSource: `sourceopen` now.)
-    did | crate::media_source::tick(cx)
+    let did = did | crate::media_source::tick(cx);
+    update_audible(cx);
+    did
 }
 
 fn is_media(dom: &crate::dom::Dom, n: NodeId) -> bool {
@@ -784,7 +823,7 @@ fn volume_changed(t: &JsValue, cx: &mut Context, f: impl FnOnce(&mut El)) -> JsR
         let mut els = m.els.borrow_mut();
         let e = els.entry(node).or_default();
         f(e);
-        let muted = e.muted.unwrap_or(muted_attr);
+        let muted = e.muted.unwrap_or(muted_attr) || m.tab_muted.get();
         e.send(media::Command::Volume(if muted { 0.0 } else { e.volume as f32 }));
     }
     queue(node, &["volumechange"], cx);
@@ -880,7 +919,15 @@ fn prototype_of(class: &str, cx: &mut Context) -> Option<JsObject> {
 
 /// After the prelude: the media element API on its classes.
 pub(crate) fn link(frames: crate::CanvasFrames, updates: async_channel::Sender<FromJs>, cx: &mut Context) {
-    cx.insert_data(Rc::new(Media { els: RefCell::default(), frames, updates, queued: RefCell::default(), scanned: Default::default() }));
+    cx.insert_data(Rc::new(Media {
+        els: RefCell::default(),
+        frames,
+        updates,
+        queued: RefCell::default(),
+        scanned: Default::default(),
+        tab_muted: Default::default(),
+        audible: Default::default(),
+    }));
     cx.register_global_class::<TimeRanges>().ok();
     cx.register_global_class::<MediaError>().ok();
     let Some(proto) = prototype_of("HTMLMediaElement", cx) else { return };

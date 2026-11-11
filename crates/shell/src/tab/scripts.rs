@@ -22,6 +22,13 @@ impl Tab {
         self._scripts_task = None;
         let Some(updates) = self.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.updates.clone()) else { return };
         let page_gen = self.page_gen;
+        // A new page: nothing playing yet; a muted tab stays muted.
+        self.audible = false;
+        if self.muted
+            && let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref())
+        {
+            host.send(js::ToJs::MuteTab(true));
+        }
         self._scripts_task = Some(cx.spawn_in(window, async move |this, cx| {
             while let Ok(msg) = updates.recv().await {
                 let alive = this.update_in(cx, |this, window, cx| {
@@ -48,6 +55,10 @@ impl Tab {
                         }
                         js::FromJs::CanvasFrames => this.canvas_frames(window, cx),
                         js::FromJs::AfterLayout(reply) => this.wait_for_layout(reply, cx),
+                        js::FromJs::Audible(audible) => {
+                            this.audible = audible;
+                            cx.notify();
+                        }
                         js::FromJs::Traverse(delta) => {
                             if delta < 0 {
                                 this.go_back(window, cx)

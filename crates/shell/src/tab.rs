@@ -145,6 +145,10 @@ pub struct Tab {
     debug_scroll_top: std::cell::Cell<Option<(usize, f32, usize)>>,
     /// (FEATHER_PERF) frame statistics, printed each second.
     perf: Option<Perf>,
+    /// Sound is playing in the page (the tab strip shows a speaker).
+    pub(super) audible: bool,
+    /// The user muted the tab (kept across its pages).
+    pub(super) muted: bool,
     /// Measured elements painted in the last frame scripts were told about.
     layout_painted: HashSet<NodeId>,
     /// The elements scripts measure that the current layout was built with
@@ -288,6 +292,8 @@ impl Tab {
             layout_gone: Vec::new(),
             debug_scroll_top: Default::default(),
             perf: std::env::var_os("FEATHER_PERF").map(|_| Perf::default()),
+            audible: false,
+            muted: false,
             layout_painted: HashSet::new(),
             layout_keep: HashSet::new(),
             unpainted_sent: HashSet::new(),
@@ -347,6 +353,24 @@ impl Tab {
 
     pub fn url(&self) -> Option<Url> {
         self.history.get(self.history_ix).cloned()
+    }
+
+    /// Whether the page plays sound now.
+    pub fn is_audible(&self) -> bool {
+        self.audible
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Mute or unmute everything the tab plays.
+    pub fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        self.muted = !self.muted;
+        if let Some(host) = self.page.as_ref().and_then(|p| p.scripts.as_ref()) {
+            host.send(js::ToJs::MuteTab(self.muted));
+        }
+        cx.notify();
     }
 
     pub fn is_loading(&self) -> bool {

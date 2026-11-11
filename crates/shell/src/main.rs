@@ -310,6 +310,24 @@ impl Feather {
             })
             .child(icon)
             .child(div().flex_1().min_w_0().truncate().child(tab.title()))
+            // Playing sound (or muted): a speaker, which mutes the tab.
+            .when(tab.is_audible() || tab.is_muted(), |d| {
+                let muted = tab.is_muted();
+                d.child(
+                    div()
+                        .id(("mute-tab", ix))
+                        .flex_none()
+                        .rounded_full()
+                        .p(px(2.))
+                        .hover(|d| d.bg(theme.secondary))
+                        .child(Icon::new(if muted { Lucide::VolumeX } else { Lucide::Volume2 }).xsmall())
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.tabs[ix].tab.update(cx, |t, cx| t.toggle_mute(cx));
+                        })),
+                )
+            })
             .child(
                 div()
                     .id(("close-tab", ix))
@@ -524,7 +542,7 @@ fn resize_edge(position: Point<Pixels>, window: &Window) -> Option<ResizeEdge> {
 }
 
 // gpui-kit embeds only the components' own icons; these are ours.
-gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen, Check, ChevronDown, Braces]);
+gpui_kit::assets::icon_assets!(ChromeIcons, [Feather, LockKeyhole, TriangleAlert, Search, Globe, Clock, X, Plus, RotateCw, File, FolderOpen, Check, ChevronDown, Braces, Volume2, VolumeX]);
 
 /// The components' icons, then ours.
 struct AppAssets;

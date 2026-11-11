@@ -844,6 +844,7 @@ impl Runtime {
             }
             ToJs::Socket { id, event } => self.socket_event(id, event),
             ToJs::Media { node, generation, event } => crate::media_element::deliver(node, generation, event, &mut self.cx),
+            ToJs::MuteTab(muted) => crate::media_element::mute_tab(muted, &mut self.cx),
             ToJs::Worker { id, event } => {
                 if let Err(e) = crate::worker::deliver(id, event, &mut self.cx) {
                     self.log_error("worker message", e);
