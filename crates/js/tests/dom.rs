@@ -2067,3 +2067,33 @@ fn min_width_of_percentage_and_length_caps() {
     assert_eq!((b.width, b.max_width), (style::Length::Px(300.0), style::Length::Auto));
     assert_eq!((c.width, c.max_width), (style::Length::Percent(100.0), style::Length::Px(900.0)));
 }
+
+/// Trusted Types: a policy's rules make trusted values that read as their
+/// text in string sinks, `eval` runs a `TrustedScript`, and only one
+/// `default` policy may be made.
+#[test]
+fn trusted_types_policies_make_values_sinks_accept() {
+    let doc = run(r##"<body><p id="out"></p><div id="box"></div>
+        <script>
+          const p = trustedTypes.createPolicy("app", { createHTML: (s) => s.toUpperCase(), createScript: (s) => s, createScriptURL: (s) => s + "?v=1" });
+          const html = p.createHTML("<b>hi</b>");
+          document.getElementById("box").innerHTML = html;
+          const script = p.createScript("1 + 2");
+          const url = p.createScriptURL("/a.js");
+          let missing = "";
+          try { trustedTypes.createPolicy("bare", {}).createHTML("x"); } catch (e) { missing = e.name; }
+          trustedTypes.createPolicy("default", {});
+          let twice = "";
+          try { trustedTypes.createPolicy("default", {}); } catch (e) { twice = e.name; }
+          document.getElementById("out").textContent = [
+            String(html), trustedTypes.isHTML(html), trustedTypes.isScript(html), eval(script), String(url),
+            JSON.stringify({ u: url }), Object.prototype.toString.call(html), p.name, String(trustedTypes.emptyHTML) === "",
+            trustedTypes.getPropertyType("div", "innerHTML"), trustedTypes.getAttributeType("script", "src"),
+            document.getElementById("box").firstChild.tagName, missing, twice, trustedTypes.defaultPolicy.name,
+          ].join("|");
+        </script></body>"##);
+    assert_eq!(
+        text_of(&doc, "out"),
+        "<B>HI</B>|true|false|3|/a.js?v=1|{\"u\":\"/a.js?v=1\"}|[object TrustedHTML]|app|true|TrustedHTML|TrustedScriptURL|B|TypeError|TypeError|default"
+    );
+}

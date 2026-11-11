@@ -32,6 +32,29 @@ use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
+/// (Feather) A host's "code-like" value (Trusted Types: `TrustedHTML`,
+/// `TrustedScript`, `TrustedScriptURL`, made by the embedder): `eval` of a
+/// `TrustedScript` runs its text, as browsers do, instead of returning the
+/// object unevaluated.
+#[derive(Debug, boa_gc::Trace, boa_gc::Finalize, crate::JsData)]
+pub struct HostCodeLike {
+    /// Which kind of trusted value (`HostCodeLike::SCRIPT` runs in `eval`).
+    #[unsafe_ignore_trace]
+    pub kind: u8,
+    /// Its text.
+    #[unsafe_ignore_trace]
+    pub text: JsString,
+}
+
+impl HostCodeLike {
+    /// `TrustedHTML`.
+    pub const HTML: u8 = 0;
+    /// `TrustedScript`.
+    pub const SCRIPT: u8 = 1;
+    /// `TrustedScriptURL`.
+    pub const SCRIPT_URL: u8 = 2;
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Eval;
 
@@ -100,6 +123,15 @@ impl Eval {
 
         // 2. If Type(x) is not String, return x.
         // TODO: rework parser to take an iterator of `u32` unicode codepoints
+        // (Feather) A TrustedScript is its text.
+        let code_like: JsValue;
+        let x = match x.as_object().and_then(|o| o.downcast_ref::<HostCodeLike>().filter(|c| c.kind == HostCodeLike::SCRIPT).map(|c| c.text.clone())) {
+            Some(text) => {
+                code_like = text.into();
+                &code_like
+            }
+            None => x,
+        };
         let Some(x) = x.as_string() else {
             return Ok(x.clone());
         };

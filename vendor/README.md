@@ -102,6 +102,9 @@ declaration and expression parsers to record their source span.
   getter, "not a callable function" (Google Translate showed no result).
 - `src/builtins/mod.rs`: `%TypedArray%` isn't bound as a global
   `TypedArray` (an intrinsic only, as in browsers).
+- `src/builtins/eval/mod.rs` (`HostCodeLike`): the embedder's Trusted Types
+  values; `eval` of a `TrustedScript` runs its text, as browsers do, rather
+  than returning the object.
 - `src/builtins/intl/locale/utils.rs` (`default_locale`): the system locale
   is asked for once per thread. Each `Number.prototype.toLocaleString`
   makes a NumberFormat that asked the OS (`CFLocaleCopyPreferredLanguages`)
