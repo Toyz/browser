@@ -70,6 +70,8 @@ impl boa_engine::context::HostHooks for Hooks {
 
 /// How often (at most) a busy page sends the tab a new DOM.
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(80);
+/// How long a due snapshot waits for work queued to run right away.
+const SNAPSHOT_HOLD: Duration = Duration::from_millis(60);
 
 pub fn node_to_number(id: NodeId) -> f64 {
     id.data().as_ffi() as f64
@@ -393,6 +395,9 @@ impl Runtime {
         crate::media_element::link(canvas_out.clone(), updates.clone(), &mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
+        if let Some(v) = rt.opts.viewport {
+            rt.dom.borrow_mut().geometry.viewport = v;
+        }
         rt.refresh_listening();
         rt
     }
@@ -752,8 +757,21 @@ impl Runtime {
             return;
         }
         let ready = self.dom.borrow().last_sent + SNAPSHOT_EVERY;
-        if Instant::now() < ready {
+        let now = Instant::now();
+        if now < ready {
             self.flush_at = Some(ready);
+            return;
+        }
+        // Work the page queued to run right away (a framework rendering in
+        // slices, yielding between them) finishes first, for a while: a
+        // browser paints between frames, and its slices of one render
+        // mostly land in one; the DOM half-rendered (GitHub's sidebar
+        // without its icons for a frame) isn't shown.
+        let soon = self.dom.borrow().timers.iter().map(|(t, _)| *t).min().filter(|t| *t <= now + Duration::from_millis(2));
+        if let Some(t) = soon
+            && now < ready + SNAPSHOT_HOLD
+        {
+            self.flush_at = Some(t.max(now));
             return;
         }
         self.flush_at = None;

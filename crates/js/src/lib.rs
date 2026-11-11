@@ -73,6 +73,11 @@ pub struct Options {
     pub debug: bool,
     /// The tab (for `sessionStorage`).
     pub session: u64,
+    /// The page area's size, px, until the tab first reports a layout:
+    /// scripts reading `innerWidth` before then get the real width
+    /// (Wikipedia pinned its side panels for a wider default, squeezing the
+    /// article, then unpinned them over several frames).
+    pub viewport: Option<(f32, f32)>,
 }
 
 /// To the script thread.

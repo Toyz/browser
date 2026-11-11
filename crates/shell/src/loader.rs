@@ -144,6 +144,7 @@ pub fn load(url: &Url, env: style::MediaEnv, post: Option<&str>, referer: Option
                 budget: std::time::Duration::from_millis(1500),
                 debug: std::env::var_os("BROWSER_DEBUG").is_some(),
                 session,
+                viewport: Some((env.width, env.height)),
             },
         )
     } else {

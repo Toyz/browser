@@ -1352,6 +1352,16 @@ impl Tab {
                 .filter(|(url, _)| loader::may_load(&page.url, url));
             for (url, visible) in wanted {
                 match store.get(&**url) {
+                    // A small `data:` image (an inline SVG icon, drawn from
+                    // its markup): decoded now, so the layout that has it
+                    // shows it from its first frame (a framework re-rendering
+                    // its icons made them blink out for a frame).
+                    None if url.scheme() == "data" && url.as_str().len() <= 16 * 1024 => {
+                        let state = net::fetch_bytes(url)
+                            .and_then(render::images::prepare)
+                            .map_or(ImageState::Failed, |p| p.into_state());
+                        store.insert((**url).clone(), state);
+                    }
                     None => {
                         store.insert((**url).clone(), ImageState::Loading);
                         if visible { soon.push((**url).clone()) } else { later.push((**url).clone()) }
