@@ -1933,7 +1933,7 @@ fn media_source_plays_appended_segments() {
           }}
         }});
         v.src = URL.createObjectURL(ms);
-        setTimeout(() => {{ if (!out.done) document.getElementById("o").textContent = "partial " + out.join(" ") + " t=" + v.currentTime + " rs=" + v.readyState + " err=" + (v.error && v.error.code); }}, 4000);
+        setTimeout(() => {{ if (!out.done) document.getElementById("o").textContent = "partial " + out.join(" ") + " t=" + v.currentTime + " rs=" + v.readyState + " err=" + (v.error && v.error.code); }}, 1500);
     </script></body>"##
     );
     let doc = run(&html);
