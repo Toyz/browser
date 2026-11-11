@@ -29,15 +29,19 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase};
 
+#[cfg(target_os = "macos")]
+mod vt;
 use crate::h264::H264;
 
 /// A decoded picture.
 pub struct VideoFrame {
     pub width: u32,
     pub height: u32,
-    /// `width * height * 4` bytes.
+    /// `width * height * 4` bytes: RGBA, or BGRA if `bgra`.
     pub rgba: Vec<u8>,
     pub time: f64,
+    /// Already BGRA (the hardware decoder's), as GPUI draws.
+    pub bgra: bool,
 }
 
 /// Decoded sound.
@@ -167,6 +171,9 @@ impl Demuxer {
 
     /// The next decoded output, in decode order (`None` at the end).
     pub fn decode_next(&mut self) -> Result<Option<Output>> {
+        if let Some(f) = self.video.as_mut().and_then(|v| v.h264.ready()) {
+            return Ok(Some(Output::Video(f)));
+        }
         loop {
             let Some(packet) = self.reader.next_packet()? else {
                 return Ok(self.video.as_mut().and_then(|v| v.h264.drain()).map(Output::Video));

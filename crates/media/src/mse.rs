@@ -396,6 +396,11 @@ impl Source for MseSource {
     }
 
     fn decode_next(&mut self) -> Result<Option<Output>> {
+        if !self.draining
+            && let Some(f) = self.video.as_mut().and_then(|v| v.1.ready())
+        {
+            return Ok(Some(Output::Video(f)));
+        }
         loop {
             if self.draining {
                 return Ok(self.video.as_mut().and_then(|v| v.1.drain()).map(Output::Video));

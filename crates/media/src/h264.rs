@@ -31,7 +31,19 @@ pub(crate) struct H264 {
     /// Pictures still held when the samples ran out.
     flushed: Vec<VideoFrame>,
     drained: bool,
+    /// The hardware decoder, when it takes the stream (macOS).
+    #[cfg(target_os = "macos")]
+    hard: Option<crate::vt::Session>,
+    /// The stream's `avcC` (to start the hardware decoder again).
+    avcc: Vec<u8>,
+    /// The hardware decoder's pictures, in decode order: shown by time once
+    /// enough are in that none decoded later can come before them.
+    held: Vec<VideoFrame>,
 }
+
+/// Pictures held to put the hardware decoder's in presentation order
+/// (B-frames come out after the frames they reference).
+const REORDER: usize = 3;
 
 /// `avcC`'s parameter sets (as Annex B) and its length prefix size.
 pub(crate) fn avc_config(avcc: &[u8]) -> Option<(Vec<u8>, usize)> {
@@ -103,12 +115,65 @@ impl H264 {
     /// A decoder for the stream `avcc` (its `avcC` box) describes.
     pub fn new(avcc: Option<&[u8]>) -> Result<H264> {
         let (sets, length_size) = avcc.and_then(avc_config).unwrap_or((Vec::new(), 4));
-        Ok(H264 { decoder: decoder(&sets)?, sets, length_size, pending: BinaryHeap::new(), flushed: Vec::new(), drained: false })
+        let avcc = avcc.map(<[u8]>::to_vec).unwrap_or_default();
+        Ok(H264 {
+            decoder: decoder(&sets)?,
+            sets,
+            length_size,
+            pending: BinaryHeap::new(),
+            flushed: Vec::new(),
+            drained: false,
+            #[cfg(target_os = "macos")]
+            hard: hardware(&avcc),
+            avcc,
+            held: Vec::new(),
+        })
+    }
+
+    /// A picture already decoded and due out before the next sample's (the
+    /// hardware decoder can give several for one sample).
+    pub fn ready(&mut self) -> Option<VideoFrame> {
+        self.next_held(REORDER)
+    }
+
+    /// The earliest held picture, if `enough` are held (or any, draining).
+    fn next_held(&mut self, enough: usize) -> Option<VideoFrame> {
+        if self.held.len() <= enough {
+            return None;
+        }
+        let i = (0..self.held.len()).min_by(|&a, &b| self.held[a].time.total_cmp(&self.held[b].time))?;
+        Some(self.held.swap_remove(i))
     }
 
     /// Decode one sample shown at `time`; a picture, when one is ready
     /// (with the earliest time still owed).
     pub fn decode(&mut self, data: &[u8], time: f64) -> Option<VideoFrame> {
+        #[cfg(target_os = "macos")]
+        if let Some(hard) = &mut self.hard {
+            let started = std::time::Instant::now();
+            let out = hard.decode(data, time);
+            if std::env::var_os("MEDIA_DEBUG").is_some() {
+                thread_local!(static SPENT: std::cell::Cell<(u32, f64)> = const { std::cell::Cell::new((0, 0.0)) });
+                let (n, total) = SPENT.with(|s| s.get());
+                let (n, total) = (n + 1, total + started.elapsed().as_secs_f64());
+                if n == 120 {
+                    eprintln!("media: videotoolbox {:.2}ms a sample", total / 120.0 * 1000.0);
+                    SPENT.with(|s| s.set((0, 0.0)));
+                } else {
+                    SPENT.with(|s| s.set((n, total)));
+                }
+            }
+            for (time, width, height, bgra) in out {
+                if std::env::var_os("MEDIA_DEBUG").is_some() {
+                    thread_local!(static SIZE: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) });
+                    if SIZE.with(|s| s.replace((width, height))) != (width, height) {
+                        eprintln!("media: videotoolbox now {width}x{height} at {time:.3}s");
+                    }
+                }
+                self.held.push(VideoFrame { width, height, rgba: bgra, time, bgra: true });
+            }
+            return self.next_held(REORDER);
+        }
         self.pending.push(Reverse(OrdF64(time)));
         let mut annex_b = Vec::with_capacity(data.len() + 16);
         to_annex_b(data, self.length_size, &mut annex_b);
@@ -134,18 +199,28 @@ impl H264 {
             }
         }
         let time = self.pending.pop().map_or(time, |Reverse(t)| t.0);
-        Some(VideoFrame { width, height, rgba, time })
+        Some(VideoFrame { width, height, rgba, time, bgra: false })
     }
 
     /// The pictures still held, one by one, once the samples run out.
     pub fn drain(&mut self) -> Option<VideoFrame> {
+        #[cfg(target_os = "macos")]
+        if let Some(hard) = &mut self.hard {
+            if !self.drained {
+                self.drained = true;
+                for (time, width, height, bgra) in hard.flush() {
+                    self.held.push(VideoFrame { width, height, rgba: bgra, time, bgra: true });
+                }
+            }
+            return self.next_held(0);
+        }
         if !self.drained {
             self.drained = true;
             if let Ok(rest) = self.decoder.flush_remaining() {
                 for yuv in rest {
                     let (width, height, rgba) = rgba_of(&yuv);
                     let time = self.pending.pop().map_or(0.0, |Reverse(t)| t.0);
-                    self.flushed.push(VideoFrame { width, height, rgba, time });
+                    self.flushed.push(VideoFrame { width, height, rgba, time, bgra: false });
                 }
                 self.flushed.reverse();
             }
@@ -158,7 +233,12 @@ impl H264 {
         self.decoder = decoder(&self.sets)?;
         self.pending.clear();
         self.flushed.clear();
+        self.held.clear();
         self.drained = false;
+        #[cfg(target_os = "macos")]
+        if self.hard.is_some() {
+            self.hard = hardware(&self.avcc);
+        }
         Ok(())
     }
 
@@ -169,6 +249,20 @@ impl H264 {
             self.sets = sets;
             self.length_size = length_size;
         }
+        self.avcc = avcc.to_vec();
+        #[cfg(target_os = "macos")]
+        {
+            self.hard = hardware(&self.avcc);
+        }
         self.reset()
     }
+}
+
+/// The hardware decoder for `avcc`, if it'll take it.
+#[cfg(target_os = "macos")]
+fn hardware(avcc: &[u8]) -> Option<crate::vt::Session> {
+    if avcc.is_empty() {
+        return None;
+    }
+    crate::vt::Session::new(avcc).map_err(|e| if std::env::var_os("MEDIA_DEBUG").is_some() { eprintln!("media: no hardware decoding: {e}") }).ok()
 }

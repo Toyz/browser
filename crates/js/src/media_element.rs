@@ -351,9 +351,12 @@ fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx:
     let updates = m.updates.clone();
     let shown = m.els.borrow_mut().entry(node).or_default().shown.clone();
     let show = move |mut f: media::VideoFrame| {
-        // Opaque RGBA to BGRA here, off the tab's thread.
-        for px in f.rgba.chunks_exact_mut(4) {
-            px.swap(0, 2);
+        // Opaque RGBA to BGRA here, off the tab's thread (the hardware
+        // decoder's come as BGRA).
+        if !f.bgra {
+            for px in f.rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
         }
         let mut out = frames.lock().unwrap_or_else(|e| e.into_inner());
         // The tab is told once until it takes them.

@@ -412,7 +412,11 @@ fn present(
                     dropped.fetch_add(missed.min(600.0) as u32, Ordering::Relaxed);
                 }
                 last_shown = f.time;
+                let t0 = Instant::now();
                 show(f);
+                if std::env::var_os("MEDIA_DEBUG").is_some() && t0.elapsed() > Duration::from_millis(8) {
+                    eprintln!("media: showing a picture took {:?}", t0.elapsed());
+                }
             }
             // Decoding behind the clock (not the download): the clock goes
             // on, late pictures are dropped, and well behind, decoding skips
