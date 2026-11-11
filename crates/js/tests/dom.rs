@@ -1808,7 +1808,7 @@ fn web_storage_is_native_with_named_properties() {
         Url::parse("https://storage.example/").unwrap(),
         true,
     );
-    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 77 };
+    let opts = js::Options { fetch_text: Arc::new(|_| None), dark: false, budget: Duration::from_secs(5), debug: false, session: 77, viewport: None };
     let (doc, _host) = js::start(doc, opts);
     assert_eq!(text_of(&doc, "o"), r#"2 1 two a true false a+b  0 three function [["c","three"]]"#);
 }
