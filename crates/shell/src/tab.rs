@@ -126,6 +126,9 @@ pub struct Tab {
     /// page's viewport) and the viewport's size, gathered while painting,
     /// and what the script thread was last told.
     measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
+    /// Where each sticky box was last drawn in its place (x, y in the
+    /// page, width, height): its pinned copy goes over it.
+    sticky_bounds: Rc<std::cell::RefCell<HashMap<NodeId, [f32; 4]>>>,
     /// The last restyle's element styles, for the next to reuse.
     style_cache: Arc<std::sync::Mutex<style::StyleCache>>,
     /// This tab shows an `<iframe>`'s document: the page's tab and the
@@ -318,6 +321,7 @@ impl Tab {
             restyle_queued: false,
             stale_skips: 0,
             measured_bounds: Rc::default(),
+            sticky_bounds: Rc::default(),
             style_cache: Arc::default(),
             frame: None,
             frames: HashMap::new(),
@@ -666,6 +670,7 @@ impl Tab {
         self.restyle_busy = false;
         self.restyle_queued = false;
         self.measured_bounds.borrow_mut().0.clear();
+        self.sticky_bounds.borrow_mut().clear();
         self.layout_sent.clear();
         self.layout_gone.clear();
         self.layout_painted.clear();
@@ -900,6 +905,21 @@ impl Tab {
         Some([x, f32::from(top), (f32::from(view.size.width) - left - right).max(0.0), f32::from(last_top + last_h - top)])
     }
 
+    /// The page's sticky boxes.
+    fn sticky_nodes(&self) -> Rc<HashSet<NodeId>> {
+        let set = self.page.as_ref().map(|p| {
+            p.layout
+                .pinned
+                .iter()
+                .filter_map(|p| match p.pin {
+                    render::boxes::Pin::Sticky { node, .. } => Some(node),
+                    _ => None,
+                })
+                .collect()
+        });
+        Rc::new(set.unwrap_or_default())
+    }
+
     /// The sticky boxes scrolled past their place, pinned: `top` px from
     /// the top of the view, pushed up by the end of their container.
     fn pinned_sticky(&self, rcx: &RenderCx) -> Vec<AnyElement> {
@@ -914,7 +934,12 @@ impl Tab {
                 let render::boxes::Pin::Sticky { node, container, top } = p.pin else { return None };
                 // Where its rows are (a sticky box isn't split, so it's
                 // a row, or in one), and its container's.
-                let [x, y, w, h] = self.row_place(node)?;
+                let [mut x, mut y, mut w, h] = self.row_place(node)?;
+                // Where it was drawn in its place, if it has been: its own
+                // column (a sticky sidebar in a grid isn't the row's width).
+                if let Some(&[dx, page_y, dw, _]) = self.sticky_bounds.borrow().get(&node) {
+                    (x, w, y) = (dx, dw, page_y);
+                }
                 let bottom = self.row_place(container).map_or(f32::INFINITY, |c| c[1] + c[3]);
                 if debug {
                     eprintln!("sticky {node:?} in {container:?} top {top} at {y} to {bottom}, scroll {scroll}");
@@ -2268,11 +2293,14 @@ impl Tab {
             track_hover,
             wants_bounds: {
                 let measured = self.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.clone());
-                Rc::new(move |node| measured.as_ref().is_some_and(|m| m.read().is_ok_and(|m| m.contains(&node))))
+                let sticky = self.sticky_nodes();
+                Rc::new(move |node| sticky.contains(&node) || measured.as_ref().is_some_and(|m| m.read().is_ok_and(|m| m.contains(&node))))
             },
             on_bounds: {
                 let (store, scheduled, tab) = (self.measured_bounds.clone(), self.layout_scheduled.clone(), cx.entity().downgrade());
                 let (frame, seen) = (self.bounds_frame.clone(), self.bounds_seen.clone());
+                let measured = self.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.clone());
+                let (sticky, sticky_store, list) = (self.sticky_nodes(), self.sticky_bounds.clone(), self.list_state.clone());
                 Rc::new(move |node, bounds, window, cx| {
                     let mut rect = [
                         f32::from(bounds.origin.x),
@@ -2280,6 +2308,16 @@ impl Tab {
                         f32::from(bounds.size.width),
                         f32::from(bounds.size.height),
                     ];
+                    // A sticky box in its place: where its pinned copy goes.
+                    if sticky.contains(&node) {
+                        // (In the page: its row may not be drawn later.)
+                        let scroll = f32::from(-list.scroll_px_offset_for_scrollbar().y).max(0.0);
+                        let list_top = f32::from(list.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
+                        sticky_store.borrow_mut().insert(node, [rect[0], rect[1] - list_top + scroll, rect[2], rect[3]]);
+                        if !measured.as_ref().is_some_and(|m| m.read().is_ok_and(|m| m.contains(&node))) {
+                            return;
+                        }
+                    }
                     // Another slice of the same box this frame: the union.
                     let now = frame.get();
                     if seen.borrow_mut().insert(node, now) == Some(now)
@@ -2436,7 +2474,11 @@ impl Tab {
         }
         let rcx = self.render_cx(cx);
         let rcx_fixed = rcx.clone();
-        let rcx_sticky = rcx.clone();
+        // (The pinned copies don't tell where the sticky boxes are: their
+        // places in the page do.)
+        let mut rcx_sticky = rcx.clone();
+        let (sticky, wants) = (self.sticky_nodes(), rcx.wants_bounds.clone());
+        rcx_sticky.wants_bounds = Rc::new(move |node| !sticky.contains(&node) && wants(node));
         let last = layout.rows.len().saturating_sub(1);
         let _ = palette;
         div()
