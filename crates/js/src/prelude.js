@@ -406,26 +406,68 @@
     initEvent(type, bubbles, cancelable) { this.type = String(type); this.bubbles = !!bubbles; this.cancelable = !!cancelable; }
     get returnValue() { return !this.defaultPrevented; }
     set returnValue(v) { if (!v) this.preventDefault(); }
+    get cancelBubble() { return this._stop; }
+    set cancelBubble(v) { if (v) this._stop = true; }
+    get srcElement() { return this.target; }
+  }
+  for (const [k, v] of [["NONE", 0], ["CAPTURING_PHASE", 1], ["AT_TARGET", 2], ["BUBBLING_PHASE", 3]]) {
+    Object.defineProperty(Event, k, { value: v, enumerable: true });
+    Object.defineProperty(Event.prototype, k, { value: v, enumerable: true });
+  }
+  // A modifier key's state (from the event's flags).
+  function modifierState(key) {
+    return ({ Control: this.ctrlKey, Shift: this.shiftKey, Alt: this.altKey, Meta: this.metaKey })[key] || false;
   }
   class CustomEvent extends Event {
     constructor(type, init) { super(type, init); this.detail = init && init.detail !== undefined ? init.detail : null; }
     initCustomEvent(type, bubbles, cancelable, detail) { this.initEvent(type, bubbles, cancelable); this.detail = detail === undefined ? null : detail; }
   }
-  class UIEvent extends Event {}
+  class UIEvent extends Event {
+    constructor(type, init) { super(type, init); init = init || {}; this.view = init.view || null; this.detail = init.detail || 0; }
+    initUIEvent(type, bubbles, cancelable, view, detail) { this.initEvent(type, bubbles, cancelable); this.view = view || null; this.detail = detail || 0; }
+    get which() { return this.keyCode || (this.button !== undefined ? this.button + 1 : 0); }
+    set which(v) { Object.defineProperty(this, "which", { value: v, writable: true, configurable: true, enumerable: true }); }
+  }
   class MouseEvent extends UIEvent {
     constructor(type, init) {
       super(type, init); init = init || {};
       this.button = init.button || 0; this.buttons = init.buttons || 0;
       this.clientX = init.clientX || 0; this.clientY = init.clientY || 0;
+      this.screenX = init.screenX || 0; this.screenY = init.screenY || 0;
+      this.pageX = init.pageX ?? this.clientX; this.pageY = init.pageY ?? this.clientY;
+      this.offsetX = init.offsetX ?? this.clientX; this.offsetY = init.offsetY ?? this.clientY;
+      this.layerX = this.offsetX; this.layerY = this.offsetY;
+      this.movementX = init.movementX || 0; this.movementY = init.movementY || 0;
+      this.relatedTarget = init.relatedTarget || null;
       this.ctrlKey = !!init.ctrlKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; this.metaKey = !!init.metaKey;
     }
+    get x() { return this.clientX; }
+    get y() { return this.clientY; }
+    get fromElement() { return this.type === "mouseout" || this.type === "mouseleave" ? this.target : this.relatedTarget; }
+    get toElement() { return this.type === "mouseout" || this.type === "mouseleave" ? this.relatedTarget : this.target; }
+    getModifierState(key) { return modifierState.call(this, key); }
     initMouseEvent(type, bubbles, cancelable, view, detail, sx, sy, cx, cy, ctrl, alt, shift, meta, button, related) {
       this.initEvent(type, bubbles, cancelable);
       Object.assign(this, { view, detail, screenX: sx, screenY: sy, clientX: cx, clientY: cy, ctrlKey: !!ctrl, altKey: !!alt, shiftKey: !!shift, metaKey: !!meta, button: button || 0, relatedTarget: related || null });
     }
   }
   class KeyboardEvent extends UIEvent {
-    constructor(type, init) { super(type, init); init = init || {}; this.key = init.key || ""; this.code = init.code || ""; }
+    constructor(type, init) {
+      super(type, init); init = init || {};
+      this.key = init.key || ""; this.code = init.code || ""; this.location = init.location || 0;
+      this.ctrlKey = !!init.ctrlKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; this.metaKey = !!init.metaKey;
+      this.repeat = !!init.repeat; this.isComposing = !!init.isComposing;
+      this.keyCode = init.keyCode || 0; this.charCode = init.charCode || 0;
+    }
+    getModifierState(key) { return modifierState.call(this, key); }
+    initKeyboardEvent(type, bubbles, cancelable, view, key, location, ctrl, alt, shift, meta) {
+      this.initUIEvent(type, bubbles, cancelable, view, 0);
+      Object.assign(this, { key: key || "", location: location || 0, ctrlKey: !!ctrl, altKey: !!alt, shiftKey: !!shift, metaKey: !!meta });
+    }
+  }
+  for (const [k, v] of [["DOM_KEY_LOCATION_STANDARD", 0], ["DOM_KEY_LOCATION_LEFT", 1], ["DOM_KEY_LOCATION_RIGHT", 2], ["DOM_KEY_LOCATION_NUMPAD", 3]]) {
+    Object.defineProperty(KeyboardEvent, k, { value: v, enumerable: true });
+    Object.defineProperty(KeyboardEvent.prototype, k, { value: v, enumerable: true });
   }
   class InputEvent extends UIEvent {}
   class FocusEvent extends UIEvent {}
@@ -690,7 +732,16 @@
     getRootNode() { let n = this; while (n.parentNode) n = n.parentNode; return n; }
     compareDocumentPosition(o) { return this.contains(o) ? 20 : o.contains(this) ? 10 : 4; }
   }
-  Object.assign(Node, { ELEMENT_NODE: 1, TEXT_NODE: 3, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_FRAGMENT_NODE: 11 });
+  // Node types and document positions: on Node and on every node.
+  for (const [k, v] of Object.entries({
+    ELEMENT_NODE: 1, ATTRIBUTE_NODE: 2, TEXT_NODE: 3, CDATA_SECTION_NODE: 4, ENTITY_REFERENCE_NODE: 5, ENTITY_NODE: 6,
+    PROCESSING_INSTRUCTION_NODE: 7, COMMENT_NODE: 8, DOCUMENT_NODE: 9, DOCUMENT_TYPE_NODE: 10, DOCUMENT_FRAGMENT_NODE: 11, NOTATION_NODE: 12,
+    DOCUMENT_POSITION_DISCONNECTED: 1, DOCUMENT_POSITION_PRECEDING: 2, DOCUMENT_POSITION_FOLLOWING: 4, DOCUMENT_POSITION_CONTAINS: 8,
+    DOCUMENT_POSITION_CONTAINED_BY: 16, DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC: 32,
+  })) {
+    Object.defineProperty(Node, k, { value: v, enumerable: true });
+    Object.defineProperty(Node.prototype, k, { value: v, enumerable: true });
+  }
 
   function sibling(node, dir, elementsOnly) {
     const p = N.parent(node.__featherNode);
@@ -776,6 +827,10 @@
     }
     replace(a, b) { const l = this._get(); const i = l.indexOf(a); if (i < 0) return false; l[i] = b; this._set(l); return true; }
     forEach(fn, self) { this._get().forEach(fn, self); }
+    entries() { return this._get().entries(); }
+    keys() { return this._get().keys(); }
+    values() { return this._get().values(); }
+    supports() { return true; }
     [Symbol.iterator]() { return this._get()[Symbol.iterator](); }
     toString() { return this.value; }
   }
@@ -2529,6 +2584,52 @@
       return out;
     },
   });
+  // Smaller standard members pages read (what a browser here would say:
+  // no permissions granted, no devices, a top-level window).
+  {
+    const def = (o, k, v) => { if (o && !(k in o)) Object.defineProperty(o, k, { value: v, writable: true, configurable: true, enumerable: true }); };
+    const bar = () => ({ visible: true });
+    for (const [k, v] of Object.entries({
+      origin: location.origin, name: "", closed: false, opener: null, status: "",
+      screenX: 0, screenY: 0, screenLeft: 0, screenTop: 0, crossOriginIsolated: false,
+      locationbar: bar(), menubar: bar(), personalbar: bar(), scrollbars: bar(), statusbar: bar(), toolbar: bar(),
+      clientInformation: navigator,
+    })) def(global, k, v);
+    if (!("frameElement" in global)) def(global, "frameElement", null);
+    for (const k of ["moveBy", "moveTo", "resizeBy", "resizeTo", "stop", "captureEvents", "releaseEvents"]) def(global, k, function () {});
+    def(global, "find", function () { return false; });
+    def(global, "createImageBitmap", function (source) {
+      const w = (source && (source.naturalWidth || source.videoWidth || source.width)) || 0;
+      const h = (source && (source.naturalHeight || source.videoHeight || source.height)) || 0;
+      return Promise.resolve({ width: w, height: h, close() {} });
+    });
+    def(navigator, "appCodeName", "Mozilla");
+    def(navigator, "appName", "Netscape");
+    def(navigator, "product", "Gecko");
+    def(navigator, "productSub", "20030107");
+    def(navigator, "vendorSub", "");
+    def(navigator, "doNotTrack", null);
+    def(navigator, "javaEnabled", function () { return false; });
+    def(navigator, "getGamepads", function () { return []; });
+    def(navigator, "vibrate", function () { return false; });
+    def(navigator, "canShare", function () { return false; });
+    def(navigator, "share", function () { return Promise.reject(new DOMException("Sharing isn't available", "NotAllowedError")); });
+    def(navigator, "permissions", { query: (d) => Promise.resolve({ name: d && d.name, state: "prompt", onchange: null, addEventListener() {}, removeEventListener() {} }) });
+    def(navigator, "mediaDevices", {
+      enumerateDevices: () => Promise.resolve([]),
+      getUserMedia: () => Promise.reject(new DOMException("No camera or microphone", "NotFoundError")),
+      getDisplayMedia: () => Promise.reject(new DOMException("Screen capture isn't available", "NotAllowedError")),
+      getSupportedConstraints: () => ({}),
+      addEventListener() {}, removeEventListener() {}, ondevicechange: null,
+    });
+    def(navigator, "connection", { effectiveType: "4g", downlink: 10, rtt: 50, saveData: false, type: "wifi", onchange: null, addEventListener() {}, removeEventListener() {} });
+    def(navigator, "storage", { estimate: () => Promise.resolve({ quota: 1 << 30, usage: 0 }), persist: () => Promise.resolve(false), persisted: () => Promise.resolve(false) });
+    def(document, "characterSet", "UTF-8");
+    def(document, "charset", "UTF-8");
+    def(document, "inputEncoding", "UTF-8");
+    def(document, "designMode", "off");
+    def(document, "dir", "");
+  }
   // Debugging: FEATHER_EVAL=probe.js runs in the page FEATHER_EVAL_DELAY ms in.
   const probe = N.debugScript();
   if (probe) {
