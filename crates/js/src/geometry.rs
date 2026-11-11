@@ -81,7 +81,7 @@ const NEAR_ANCESTORS: usize = 4;
 
 /// Where the tab has `node`, asked and waited for (briefly: the tab answers
 /// between frames). `None` before it has shown the page.
-fn locate(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
+fn locate(d: &Shared, node: NodeId, wait: Duration) -> Option<[f32; 4]> {
     let tab = {
         let dom = d.borrow();
         if !dom.laid_out {
@@ -92,7 +92,7 @@ fn locate(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
     let (tx, rx) = std::sync::mpsc::channel();
     let t = Instant::now();
     tab.send_blocking(FromJs::Locate(node, tx)).ok()?;
-    let answer = rx.recv_timeout(Duration::from_millis(30));
+    let answer = rx.recv_timeout(wait);
     if d.borrow().debug {
         eprintln!("js: locate {node:?} -> {answer:?} in {:?}", t.elapsed());
     }
@@ -110,9 +110,14 @@ pub(crate) fn measure(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
             dom.mark_dirty();
         }
         let g = &mut dom.geometry;
-        (new && !g.rects.contains_key(&node)) || (g.stale && g.fresh.insert(node))
+        let after_forced = g.stale && g.fresh.insert(node);
+        ((new && !g.rects.contains_key(&node)) || after_forced).then_some(after_forced)
     };
-    if ask && let Some(r) = locate(d, node) {
+    // Right after a forced layout the answer is what the layout was for:
+    // worth waiting for while the tab finishes its frame (YouTube's
+    // settings menu, given up on after 30ms, sized itself from a guess).
+    let wait = Duration::from_millis(if ask == Some(true) { 200 } else { 30 });
+    if ask.is_some() && let Some(r) = locate(d, node, wait) {
         d.borrow_mut().geometry.rects.insert(node, r);
     }
     d.borrow().geometry.rects.get(&node).copied()
@@ -122,6 +127,11 @@ pub(crate) fn measure(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
 /// reading layout after every change in a loop waits for the tab only so
 /// much (past that, answers are from the last layout, as before).
 const FORCE_BUDGET: Duration = Duration::from_millis(100);
+/// The same for elements just shown (see `reflow`): what scripts read of
+/// them is wrong without one.
+const SHOWN_BUDGET: Duration = Duration::from_millis(600);
+/// How long after the user's input layout reads may force a layout.
+const INPUT_WINDOW: Duration = Duration::from_millis(700);
 /// How long a forced layout may hold up the script.
 const FORCE_WAIT: Duration = Duration::from_millis(400);
 
@@ -147,8 +157,27 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         while forced.front().is_some_and(|(t, _)| t.elapsed() > Duration::from_secs(1)) {
             forced.pop_front();
         }
-        let due = forced.iter().map(|(_, d)| *d).sum::<Duration>() < FORCE_BUDGET;
-        if !dom.laid_out || dom.geometry.force_paused || !((dom.dirty && dom.changed_near(node)) || new) || !due || !reflow_enabled() {
+        let spent = forced.iter().map(|(_, d)| *d).sum::<Duration>();
+        if !dom.laid_out || dom.geometry.force_paused {
+            return;
+        }
+        let changed = dom.dirty && dom.changed_near(node);
+        // Always: an element the tab has no box for, or had hidden or
+        // empty, read after the DOM around it changed (a menu a script just
+        // opened, sizing itself by its contents: YouTube's settings menu
+        // came out as wide as the player and 1px tall; its seek preview
+        // read 0x0 and sat on the bar).
+        let g = &dom.geometry;
+        let unknown = !g.rects.contains_key(&node) || g.unpainted.contains(&node) || g.rects.get(&node).is_some_and(|r| r[2] == 0.0 || r[3] == 0.0);
+        // Only for what the user just did: pages read the layout of
+        // everything they render, and a forced layout costs a frame or more
+        // here (YouTube's comments, each measured as it came in, stalled
+        // loading for seconds).
+        let prompted = dom.input_at.is_some_and(|t| t.elapsed() < INPUT_WINDOW);
+        // (Unknown boxes first: what was just shown is what's read wrong.)
+        let narrow = prompted && changed && (unknown || spent < SHOWN_BUDGET / 2) && spent < SHOWN_BUDGET;
+        let any = reflow_enabled() && (changed || new) && spent < FORCE_BUDGET;
+        if !(narrow || any) {
             return;
         }
         dom.geometry.measured.insert(node);
@@ -171,7 +200,8 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
     }
     if dom.debug {
         let tag = dom.doc.element(node).map(|e| e.name.local.to_string()).unwrap_or_default();
-        eprintln!("js: forced layout for {node:?} <{tag}>: {} in {:?}", if laid_out { "laid out" } else { "timed out" }, t.elapsed());
+        let class = dom.doc.element(node).and_then(|e| e.attr("class")).unwrap_or("").chars().take(60).collect::<String>();
+        eprintln!("js: forced layout for {node:?} <{tag} class={class:?}>: {} in {:?}", if laid_out { "laid out" } else { "timed out" }, t.elapsed());
     }
 }
 

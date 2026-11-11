@@ -681,3 +681,9 @@ mod tests {
         }
     }
 }
+
+/// When the browser started (debug timelines).
+pub(crate) fn started() -> &'static std::time::Instant {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now)
+}

@@ -231,6 +231,9 @@ pub(crate) struct Dom {
     /// The user has interacted with the page (clicked, typed): sound may
     /// play.
     pub(crate) activated: bool,
+    /// When the user last clicked or typed: layout read soon after is worth
+    /// a forced layout (see `geometry::reflow`).
+    pub(crate) input_at: Option<Instant>,
     /// `pushState` / `replaceState` since the last flush: (url, replace).
     url_changes: Vec<(Url, bool)>,
     /// `history.go(n)` asked of the tab.
@@ -352,6 +355,7 @@ impl Runtime {
             media_dirty: Vec::new(),
             media_frames: HashSet::new(),
             activated: opts.activated,
+            input_at: None,
             submit: None,
             values: HashMap::new(),
             debug: opts.debug,
@@ -885,6 +889,7 @@ impl Runtime {
             ToJs::Shutdown => {}
             ToJs::Click { node, reply } => {
                 self.dom.borrow_mut().activated = true;
+                self.dom.borrow_mut().input_at = Some(Instant::now());
                 let t = Instant::now();
                 let prevented = self.call_global("__dispatchClick", &[JsValue::from(node_to_number(node))]);
                 if self.opts.debug {
@@ -918,6 +923,7 @@ impl Runtime {
                 if kind == "keydown" {
                     self.dom.borrow_mut().activated = true;
                 }
+                self.dom.borrow_mut().input_at = Some(Instant::now());
                 let target = target.map_or(JsValue::null(), |n| JsValue::from(node_to_number(n)));
                 let args = [
                     js_str(kind),
@@ -932,6 +938,10 @@ impl Runtime {
                 self.call_global("__dispatchKey", &args);
             }
             ToJs::Mouse { kind, node, x, y, button, buttons, delta } => {
+                // (Not pointer moves: a forced layout per move would stall them.)
+                if matches!(kind, "mousedown" | "mouseup") {
+                    self.dom.borrow_mut().input_at = Some(Instant::now());
+                }
                 if kind == "mousemove" {
                     self.move_hover(node, x, y, buttons);
                 }

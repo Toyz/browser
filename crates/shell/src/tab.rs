@@ -694,6 +694,9 @@ impl Tab {
             reply.send(()).ok();
             return;
         }
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            eprintln!("forced: wait for doc {} (installed {}, busy {}) at {:?}", self.doc_gen, self.installed_gen, self.restyle_busy, crate::started().elapsed());
+        }
         self.after_layout.push((reply, self.doc_gen));
         cx.notify();
     }
@@ -708,6 +711,9 @@ impl Tab {
         let installed = self.installed_gen;
         self.after_layout.retain(|(reply, wanted)| {
             if painted && installed >= *wanted {
+                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                    eprintln!("forced: answered doc {wanted} at {:?}", crate::started().elapsed());
+                }
                 reply.send(()).ok();
                 return false;
             }
@@ -961,6 +967,15 @@ impl Tab {
     /// Where `node` is for a script asking (viewport rect): where it was
     /// painted, else where its row is.
     pub(super) fn locate(&mut self, node: NodeId) -> Option<[f32; 4]> {
+        if std::env::var_os("FEATHER_DEBUG_LOCATE").is_some() {
+            eprintln!(
+                "locate {node:?}: rect {:?} painted {} kept {} installed doc {}",
+                self.measured_bounds.borrow().0.get(&node),
+                self.layout_painted.contains(&node),
+                self.layout_keep.contains(&node),
+                self.installed_gen
+            );
+        }
         if self.layout_painted.contains(&node)
             && let Some(r) = self.measured_bounds.borrow().0.get(&node)
         {
@@ -1650,6 +1665,7 @@ impl Tab {
                         None => (Vec::new(), None),
                     };
                     if std::env::var_os("BROWSER_DEBUG").is_some() {
+                        eprintln!("forced: built doc {doc_gen} at {:?}", crate::started().elapsed());
                         eprintln!("perf: restyle+build {} rows in {:?} (style {:?}, {reused} reused, {computed} computed {why}; +{:?} diffing, ends {ends:?})", layout.rows.len(), built, Duration::from_nanos(render::boxes::STYLE_NS.with(|c| c.get())), t.elapsed() - built);
                     }
                     (layout, changed, ends)

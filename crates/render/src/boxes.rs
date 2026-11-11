@@ -777,6 +777,7 @@ pub fn build_cached(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>, cac
         viewport_sized: false,
         keep_inline: false,
         cache: cache.map(std::cell::RefCell::new),
+        keep,
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
@@ -833,6 +834,9 @@ struct Builder<'a> {
     styler: &'a Styler,
     /// Styles from the last build to reuse.
     cache: Option<std::cell::RefCell<style::StyleSession>>,
+    /// Elements scripts measure: built even when invisible (a tooltip
+    /// faded out still has a size).
+    keep: &'a HashSet<NodeId>,
     /// Resolved once: looking up `<base>` per link is quadratic on big pages.
     base_url: Url,
     next_id: usize,
@@ -2576,7 +2580,11 @@ impl Builder<'_> {
             if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && self.opacity < 1.0 {
                 Arc::make_mut(&mut style).opacity *= self.opacity;
             }
-            if matches!(style.position, style::Position::Fixed | style::Position::Absolute) && style.opacity <= 0.0 && style.transitions.is_none() {
+            if matches!(style.position, style::Position::Fixed | style::Position::Absolute)
+                && style.opacity <= 0.0
+                && style.transitions.is_none()
+                && !self.keep.contains(&child)
+            {
                 // Invisible and out of the way: nothing to build.
                 continue;
             }
