@@ -123,6 +123,11 @@ fn grid_placements() {
     let d = parse("grid-row", "span 2 / -1");
     assert!(d.contains(&Decl::GridPlace { row: true, end: true, line: GridLine::Line(-1) }), "{d:?}");
     assert!(d.contains(&Decl::GridPlace { row: true, end: false, line: GridLine::Span(2) }), "{d:?}");
+    // Integers by calc() (Google Workspace's columns, from custom properties).
+    let d = parse("grid-column-end", "span calc(11 - 2 + 1)");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: true, line: GridLine::Span(10) }), "{d:?}");
+    let d = parse("grid-column-start", "calc((3 * 2) / 2)");
+    assert!(d.contains(&Decl::GridPlace { row: false, end: false, line: GridLine::Line(3) }), "{d:?}");
 }
 
 #[test]

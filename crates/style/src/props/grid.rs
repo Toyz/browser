@@ -185,6 +185,49 @@ fn implied_end(start: &GridLine) -> GridLine {
     }
 }
 
+/// A numeric `calc()` body: `+ - * /` over numbers and parentheses.
+fn calc_number<'i>(p: &mut Parser<'i>) -> PResult<'i, f64> {
+    let mut total = calc_product(p)?;
+    while !p.is_exhausted() {
+        let state = p.state();
+        match p.next()?.clone() {
+            Token::Delim('+') => total += calc_product(p)?,
+            Token::Delim('-') => total -= calc_product(p)?,
+            // (`11 -2`: a signed number right after.)
+            Token::Number { value, has_sign: true, .. } => total += value as f64,
+            _ => {
+                p.reset(&state);
+                return err(p);
+            }
+        }
+    }
+    Ok(total)
+}
+
+fn calc_product<'i>(p: &mut Parser<'i>) -> PResult<'i, f64> {
+    let mut v = calc_unit(p)?;
+    loop {
+        let state = p.state();
+        match p.next() {
+            Ok(Token::Delim('*')) => v *= calc_unit(p)?,
+            Ok(Token::Delim('/')) => v /= calc_unit(p)?,
+            _ => {
+                p.reset(&state);
+                return Ok(v);
+            }
+        }
+    }
+}
+
+fn calc_unit<'i>(p: &mut Parser<'i>) -> PResult<'i, f64> {
+    match p.next()?.clone() {
+        Token::Number { value, .. } => Ok(value as f64),
+        Token::ParenthesisBlock => p.parse_nested_block(|p| calc_number(p)),
+        Token::Function(f) if f.eq_ignore_ascii_case("calc") => p.parse_nested_block(|p| calc_number(p)),
+        _ => err(p),
+    }
+}
+
 /// One grid line: `auto`, `3`, `-1`, `span 2`, `name`, `name 2`, `span name`.
 fn parse_line<'i>(p: &mut Parser<'i>) -> PResult<'i, GridLine> {
     let (mut span, mut number, mut name) = (false, None, None);
@@ -199,6 +242,15 @@ fn parse_line<'i>(p: &mut Parser<'i>) -> PResult<'i, GridLine> {
             Token::Ident(id) if id.eq_ignore_ascii_case("span") => span = true,
             Token::Ident(id) => name = Some(Arc::<str>::from(&*id)),
             Token::Number { int_value: Some(n), .. } => number = Some(n),
+            // `span calc(11 - 2 + 1)` (custom properties substituted):
+            // an integer, rounded.
+            Token::Function(f) if f.eq_ignore_ascii_case("calc") => {
+                let v = p.parse_nested_block(|p| calc_number(p))?;
+                if !v.is_finite() {
+                    return err(p);
+                }
+                number = Some(v.round() as i32);
+            }
             _ => return err(p),
         }
     }
