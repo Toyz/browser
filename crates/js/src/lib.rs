@@ -27,6 +27,7 @@ mod aria;
 mod headers;
 mod dom_exception;
 mod dom_geometry;
+mod canvas_text;
 mod trusted_types;
 mod xpath;
 mod structured_clone;

@@ -2097,3 +2097,24 @@ fn trusted_types_policies_make_values_sinks_accept() {
         "<B>HI</B>|true|false|3|/a.js?v=1|{\"u\":\"/a.js?v=1\"}|[object TrustedHTML]|app|true|TrustedHTML|TrustedScriptURL|B|TypeError|TypeError|default"
     );
 }
+
+/// Canvas text is drawn (pixels where the glyphs are) and measured from the
+/// face: wider text measures wider, `maxWidth` squeezes it.
+#[test]
+fn canvas_text_draws_and_measures() {
+    let doc = run(r##"<body><p id="out"></p>
+        <script>
+          const c = document.createElement("canvas"); c.width = 200; c.height = 40;
+          const x = c.getContext("2d");
+          x.font = "bold 30px sans-serif"; x.fillStyle = "rgb(0,0,255)";
+          x.fillText("WWW", 0, 30);
+          const inked = (x0, x1) => { let n = 0; const d = x.getImageData(x0, 0, x1 - x0, 40).data; for (let i = 2; i < d.length; i += 4) if (d[i] > 128) n++; return n; };
+          const narrow = x.measureText("iii").width, wide = x.measureText("WWW").width;
+          x.clearRect(0, 0, 200, 40);
+          x.fillText("WWW", 0, 30, 20);
+          document.getElementById("out").textContent = [
+            inked(0, 60) > 50, wide > narrow * 2, inked(25, 200) === 0,
+          ].join("|");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "out"), "true|true|true");
+}

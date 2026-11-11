@@ -5,6 +5,9 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Canvas text: system faces and their glyph outlines.
+fontdb = "0.23"
+ttf-parser = "0.25"
 # intl_bundled: real Intl (ICU data compiled in); annex-b: the web-legacy
 # parts pages still use (substr, escape, HTML comments in scripts).
 # Native classes (Trace/Finalize derives), the vendored copy.

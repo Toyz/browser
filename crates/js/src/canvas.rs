@@ -66,6 +66,9 @@ pub enum Op {
     DrawImage(Source, Vec<f32>),
     /// `putImageData`: unpremultiplied RGBA, `w` x `h`, at (x, y).
     PutPixels { x: i32, y: i32, w: u32, h: u32, rgba: Vec<u8> },
+    /// `fillText`/`strokeText`: the text at (x, y) in the context's font,
+    /// alignment and baseline when called, squeezed into `max_width`.
+    Text { text: String, x: f32, y: f32, max_width: Option<f32>, font: String, align: String, baseline: String, rtl: bool, stroke: bool },
 }
 
 impl Op {
@@ -321,6 +324,9 @@ impl Canvas {
                     }
                     self.draw_image(&src, (sx, sy, sw, sh), (dx, dy, dw, dh));
                 }
+                Op::Text { text, x, y, max_width, font, align, baseline, rtl, stroke } => {
+                    self.text(text, *x, *y, *max_width, font, align, baseline, *rtl, *stroke);
+                }
                 Op::PutPixels { x, y, w, h, rgba } => {
                     let Some(size) = tiny_skia::IntSize::from_wh(*w, *h) else { continue };
                     let Some(mut src) = Pixmap::from_vec(rgba.clone(), size) else { continue };
@@ -483,6 +489,59 @@ impl Canvas {
                 .unwrap_or(Shader::SolidColor(Color::TRANSPARENT)),
         };
         Paint { shader, anti_alias: true, blend_mode: self.state.blend, ..Paint::default() }
+    }
+
+    /// Text's outlines, filled or stroked as a path is (the current path
+    /// left alone).
+    #[allow(clippy::too_many_arguments)]
+    fn text(&mut self, text: &str, x: f32, y: f32, max_width: Option<f32>, font: &str, align: &str, baseline: &str, rtl: bool, stroke: bool) {
+        let Some(spec) = crate::canvas_text::FontSpec::parse(font).or_else(|| crate::canvas_text::FontSpec::parse("10px sans-serif")) else { return };
+        let Some(run) = crate::canvas_text::layout(&spec, text) else { return };
+        // Squeezed (not cut) to a maximum width.
+        let h_scale = match max_width {
+            Some(m) if m <= 0.0 || !m.is_finite() => return,
+            Some(m) if run.width > m => m / run.width,
+            _ => 1.0,
+        };
+        let (dx, dy) = crate::canvas_text::anchor(&run, run.width * h_scale, align, baseline, rtl);
+        struct Sink<'a> {
+            pb: &'a mut PathBuilder,
+            t: Transform,
+            ox: f32,
+            oy: f32,
+        }
+        impl Sink<'_> {
+            fn p(&self, x: f32, y: f32) -> Point {
+                let mut p = [Point::from_xy(self.ox + x, self.oy + y)];
+                self.t.map_points(&mut p);
+                p[0]
+            }
+        }
+        impl crate::canvas_text::OutlineSink for Sink<'_> {
+            fn move_to(&mut self, x: f32, y: f32) {
+                let p = self.p(x, y);
+                self.pb.move_to(p.x, p.y);
+            }
+            fn line_to(&mut self, x: f32, y: f32) {
+                let p = self.p(x, y);
+                self.pb.line_to(p.x, p.y);
+            }
+            fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+                let (a, b) = (self.p(x1, y1), self.p(x, y));
+                self.pb.quad_to(a.x, a.y, b.x, b.y);
+            }
+            fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+                let (a, b, c) = (self.p(x1, y1), self.p(x2, y2), self.p(x, y));
+                self.pb.cubic_to(a.x, a.y, b.x, b.y, c.x, c.y);
+            }
+            fn close(&mut self) {
+                self.pb.close();
+            }
+        }
+        let mut pb = PathBuilder::new();
+        crate::canvas_text::outline(&run, h_scale, Sink { pb: &mut pb, t: self.state.transform, ox: x + dx, oy: y + dy });
+        let Some(path) = pb.finish() else { return };
+        if stroke { self.stroke_path(&path) } else { self.fill_path(&path, FillRule::Winding) }
     }
 
     fn fill_path(&mut self, path: &Path, rule: FillRule) {

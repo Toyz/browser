@@ -306,6 +306,34 @@ fn image_source(v: &JsValue, cx: &mut Context) -> JsResult<Option<Source>> {
     Ok(src.as_string().map(|s| s.to_std_string_escaped()).filter(|s| !s.is_empty()).map(Source::Url))
 }
 
+/// `fillText(text, x, y, maxWidth?)` / `strokeText`: recorded with the
+/// context's font, alignment and baseline as they are now.
+fn text_op(this: &JsValue, a: &[JsValue], stroke: bool, cx: &mut Context) -> JsResult<JsValue> {
+    let text = a.first().cloned().unwrap_or_default().to_string(cx)?.to_std_string_escaped();
+    let Some(xy) = numbers(&a[1.min(a.len())..a.len().min(3)], 2, cx)? else { return Ok(JsValue::undefined()) };
+    let max_width = match a.get(3) {
+        Some(v) if !v.is_undefined() => Some(v.to_number(cx)? as f32),
+        _ => None,
+    };
+    let props: Vec<JsValue> = with_ctx(this, |c| c.props.borrow()[9..=12].to_vec())?;
+    let mut strings = Vec::with_capacity(4);
+    for p in props {
+        strings.push(p.to_string(cx)?.to_std_string_escaped());
+    }
+    let op = Op::Text {
+        text,
+        x: xy[0],
+        y: xy[1],
+        max_width,
+        font: strings[0].clone(),
+        align: strings[1].clone(),
+        baseline: strings[2].clone(),
+        rtl: strings[3] == "rtl",
+        stroke,
+    };
+    record(this, [op], cx).map(undefined)
+}
+
 /// A new `ImageData` (the page's class) over `rgba`.
 fn image_data(w: u32, h: u32, rgba: Vec<u8>, cx: &mut Context) -> JsResult<JsValue> {
     let data = JsUint8ClampedArray::from_iter(rgba, cx)?;
@@ -446,26 +474,41 @@ const METHODS: &[(&str, usize, Method)] = &[
         let dash = with_ctx(this, |c| c.dash.borrow().clone())?;
         Ok(JsArray::from_iter(dash.into_iter().map(JsValue::from), cx).into())
     }),
-    // Text isn't drawn yet.
-    ("fillText", 3, |_, _, _| Ok(JsValue::undefined())),
-    ("strokeText", 3, |_, _, _| Ok(JsValue::undefined())),
+    ("fillText", 3, |this, a, cx| text_op(this, a, false, cx)),
+    ("strokeText", 3, |this, a, cx| text_op(this, a, true, cx)),
     ("measureText", 1, |this, a, cx| {
         let text = a.first().cloned().unwrap_or_default().to_string(cx)?.to_std_string_escaped();
-        let font = with_ctx(this, |c| c.props.borrow()[9].clone())?.to_string(cx)?.to_std_string_escaped();
-        let size = font
-            .split_whitespace()
-            .find_map(|w| w.strip_suffix("px").and_then(|n| n.split('/').next()).and_then(|n| n.parse::<f64>().ok()))
-            .unwrap_or(10.0);
-        let width = text.chars().count() as f64 * size * 0.55;
+        let (font, align, baseline) = with_ctx(this, |c| {
+            let p = c.props.borrow();
+            (p[9].clone(), p[10].clone(), p[11].clone())
+        })?;
+        let font = font.to_string(cx)?.to_std_string_escaped();
+        let spec = crate::canvas_text::FontSpec::parse(&font).or_else(|| crate::canvas_text::FontSpec::parse("10px sans-serif"));
+        let run = spec.as_ref().and_then(|s| crate::canvas_text::layout(s, &text));
+        // Without a face: the old estimate.
+        let size = spec.as_ref().map_or(10.0, |s| s.size) as f64;
+        let (width, ascent, descent) = match &run {
+            Some(r) => (r.width as f64, r.ascent as f64, -r.descent as f64),
+            None => (text.chars().count() as f64 * size * 0.55, size * 0.8, size * 0.2),
+        };
+        // Relative to the baseline the context is set to, as browsers report.
+        let (align, baseline) = (align.to_string(cx)?.to_std_string_escaped(), baseline.to_string(cx)?.to_std_string_escaped());
+        let (dx, dy) = run.as_ref().map_or((0.0, 0.0), |r| crate::canvas_text::anchor(r, r.width, &align, &baseline, false));
+        let (dx, dy) = (dx as f64, dy as f64);
         let o = JsObject::with_object_proto(cx.intrinsics());
         for (k, v) in [
             ("width", width),
-            ("actualBoundingBoxAscent", size * 0.8),
-            ("actualBoundingBoxDescent", size * 0.2),
-            ("actualBoundingBoxLeft", 0.0),
-            ("actualBoundingBoxRight", width),
-            ("fontBoundingBoxAscent", size * 0.8),
-            ("fontBoundingBoxDescent", size * 0.2),
+            ("actualBoundingBoxAscent", ascent + dy),
+            ("actualBoundingBoxDescent", descent - dy),
+            ("actualBoundingBoxLeft", -dx),
+            ("actualBoundingBoxRight", width + dx),
+            ("fontBoundingBoxAscent", ascent + dy),
+            ("fontBoundingBoxDescent", descent - dy),
+            ("emHeightAscent", ascent + dy),
+            ("emHeightDescent", descent - dy),
+            ("alphabeticBaseline", dy),
+            ("hangingBaseline", dy - ascent * 0.8),
+            ("ideographicBaseline", dy + descent),
         ] {
             o.set(JsString::from(k), v, false, cx)?;
         }
