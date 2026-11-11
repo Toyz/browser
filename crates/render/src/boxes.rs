@@ -2750,7 +2750,7 @@ impl Builder<'_> {
                     let mut block = self.build_block(child, style.clone(), kind, link, generated);
                     // An absolute `<img>` (a card's background photo): the
                     // positioned box, with the picture filling it.
-                    if tag == "img" || tag == "video" {
+                    if tag == "img" || tag == "video" || tag == "canvas" {
                         let mut st = (*style).clone();
                         st.position = style::Position::Static;
                         st.inset = style::Edges::all(Length::Auto);
