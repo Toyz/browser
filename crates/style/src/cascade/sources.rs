@@ -208,8 +208,12 @@ pub(super) fn presentational_hints(e: &page::ElementData) -> String {
             "table" | "img" if align == "left" || align == "right" => css.push_str(&format!("float:{align};")),
             "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "td" | "th" | "tr" | "caption"
             | "thead" | "tbody" | "tfoot" | "center" => {
-                if matches!(align.as_str(), "left" | "right" | "center" | "justify") {
-                    css.push_str(&format!("text-align:{};", if align == "justify" { "left" } else { &align }));
+                // (`center` is Chrome's `-webkit-center`: blocks inside too.)
+                match align.as_str() {
+                    "center" => css.push_str("text-align:-webkit-center;"),
+                    "left" | "right" => css.push_str(&format!("text-align:{align};")),
+                    "justify" => css.push_str("text-align:left;"),
+                    _ => {}
                 }
             }
             _ => {}

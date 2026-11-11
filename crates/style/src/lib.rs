@@ -106,6 +106,9 @@ pub struct ComputedStyle {
     /// The `max-width` a `width: min(<percentage>, <length>)` capped (what
     /// it was before), so a later `width` or `max-width` undoes the cap.
     pub width_capped: Option<Length>,
+    /// `text-align: -webkit-center` (or `align=center`): blocks inside are
+    /// centered too, as their text is. Inherited with `text-align`.
+    pub center_blocks: bool,
     /// Explicit grid lines (`grid-row-start: 1`): items can share a cell.
     pub grid_row_start: Option<i16>,
     pub grid_column_start: Option<i16>,
@@ -283,6 +286,7 @@ impl ComputedStyle {
             grid_area: None,
             fit_width: false,
             width_capped: None,
+            center_blocks: false,
             grid_row_start: None,
             grid_column_start: None,
             overflow: Overflow::Visible,
@@ -357,6 +361,7 @@ impl ComputedStyle {
             color: parent.color,
             white_space: parent.white_space,
             text_align: parent.text_align,
+            center_blocks: parent.center_blocks,
             text_transform: parent.text_transform,
             small_caps: parent.small_caps,
             list_style: parent.list_style,

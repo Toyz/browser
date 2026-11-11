@@ -498,6 +498,7 @@ impl Styler {
             Decl::Color(c) => s.color = *c,
             Decl::WhiteSpace(v) => s.white_space = *v,
             Decl::TextAlign(v) => s.text_align = *v,
+            Decl::CenterBlocks(v) => s.center_blocks = *v,
             Decl::ListStyle(v) => s.list_style = *v,
             Decl::TextTransform(v) => s.text_transform = *v,
             Decl::SmallCaps(v) => s.small_caps = *v,

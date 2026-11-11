@@ -59,6 +59,10 @@ out.push(D::LineHeight(parse_line_height(p)?));
 
 pub(super) fn p_text_align<'i>(_name: &str, p: &mut Parser<'i>, out: &mut Vec<Decl>) -> PResult<'i, ()> {
     use Decl as D;
+    let state = p.state();
+    let center_blocks = p.expect_ident().is_ok_and(|i| i.eq_ignore_ascii_case("-webkit-center"));
+    p.reset(&state);
+    out.push(D::CenterBlocks(center_blocks));
 out.push(D::TextAlign(keyword(p, &[
     ("left", TextAlign::Left),
     ("start", TextAlign::Left),

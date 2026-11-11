@@ -1791,6 +1791,14 @@ impl Builder<'_> {
             disabled: element.attr("disabled").is_some(),
         };
         let width = st.outer_width(st.width).px_or_zero();
+        // A percentage-wide field is as wide as its own size would make it
+        // when what holds it sizes to content (a table column), and can
+        // shrink to nothing (Google Books' `width: 100%` search box made its
+        // column 0 wide, and got none of the table's room).
+        let (min_content, max_content) = match st.width {
+            Length::Percent(_) => (0.0, w + if st.border_box { 0.0 } else { st.horizontal_edges() }),
+            _ => (width, width),
+        };
         let block = Block {
             id: self.next_id(),
             node: Some(id),
@@ -1798,8 +1806,8 @@ impl Builder<'_> {
             kind: BlockKind::Control(Arc::new(control)),
             children: Vec::new(),
             anchors: Vec::new(),
-            min_content: width,
-            max_content: width,
+            min_content,
+            max_content,
             colspan: 1,
             cell: None,
             heading: false,

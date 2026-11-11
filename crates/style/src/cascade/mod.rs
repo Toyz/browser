@@ -488,6 +488,18 @@ impl Styler {
                 style.display = Display::Block;
             }
         }
+        // Inside `-webkit-center` (`<div align=center>`), a block with no
+        // side margins of its own is centered (Google Books' search box).
+        if parent.center_blocks
+            && style.display.is_block_level()
+            && style.float == crate::Float::None
+            && !matches!(style.position, crate::Position::Absolute | crate::Position::Fixed)
+            && style.margin.left == Length::Px(0.0)
+            && style.margin.right == Length::Px(0.0)
+        {
+            style.margin.left = Length::Auto;
+            style.margin.right = Length::Auto;
+        }
         self.estimate_size(&mut style, parent, root);
         style
     }

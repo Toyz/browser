@@ -182,6 +182,8 @@ pub enum Decl {
     Color(Color),
     WhiteSpace(WhiteSpace),
     TextAlign(TextAlign),
+    /// Set with every `text-align`: whether it was `-webkit-center`.
+    CenterBlocks(bool),
     ListStyle(ListStyle),
     TextTransform(TextTransform),
     SmallCaps(Option<bool>),
