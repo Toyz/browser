@@ -350,11 +350,15 @@ fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx:
     let frames = m.frames.clone();
     let updates = m.updates.clone();
     let shown = m.els.borrow_mut().entry(node).or_default().shown.clone();
-    let show = move |f: media::VideoFrame| {
+    let show = move |mut f: media::VideoFrame| {
+        // Opaque RGBA to BGRA here, off the tab's thread.
+        for px in f.rgba.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
         let mut out = frames.lock().unwrap_or_else(|e| e.into_inner());
         // The tab is told once until it takes them.
         let tell = out.is_empty();
-        out.insert(node, crate::CanvasPixels { width: f.width, height: f.height, pixels: f.rgba });
+        out.insert(node, crate::CanvasPixels { width: f.width, height: f.height, pixels: f.rgba, bgra: true });
         drop(out);
         shown.fetch_add(1, Ordering::Relaxed);
         if tell {

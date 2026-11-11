@@ -756,7 +756,7 @@ impl Runtime {
                 let mut pixels = out.remove(&node).map(|old| old.pixels).unwrap_or_default();
                 pixels.clear();
                 pixels.extend_from_slice(c.pixels());
-                out.insert(node, crate::CanvasPixels { width, height, pixels });
+                out.insert(node, crate::CanvasPixels { width, height, pixels, bgra: false });
             }
         }
         drop(out);

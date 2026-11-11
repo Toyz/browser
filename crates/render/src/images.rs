@@ -345,10 +345,14 @@ pub fn filtered(
 
 /// A ready picture from premultiplied RGBA pixels (a canvas's), and its
 /// one frame (to drop from the GPU atlas when it's replaced).
-pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>) -> Option<(ImageState, Arc<RenderImage>)> {
+pub fn from_pixels(width: u32, height: u32, mut pixels: Vec<u8>, bgra: bool) -> Option<(ImageState, Arc<RenderImage>)> {
     // BGRA with straight alpha, as GPUI draws pictures (converted in place).
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.chunks_exact_mut(4).filter(|_| !bgra) {
         let a = px[3] as u32;
+        if a == 255 {
+            px.swap(0, 2);
+            continue;
+        }
         let un = |c: u8| if a == 0 { 0 } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
         let (r, g, b) = (un(px[0]), un(px[1]), un(px[2]));
         px[0] = b;

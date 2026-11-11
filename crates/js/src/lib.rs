@@ -180,6 +180,9 @@ pub struct CanvasPixels {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// Already straight-alpha BGRA, as GPUI draws (a video's frames,
+    /// converted on their own thread): nothing left to do on the tab's.
+    pub bgra: bool,
 }
 
 /// Each canvas's newest pixels the tab hasn't taken yet: a newer frame
