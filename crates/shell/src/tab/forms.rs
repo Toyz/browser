@@ -166,10 +166,23 @@ impl Tab {
                         .into_any_element(),
                     }
                     .into_any_element(),
+                    // The page's font, as the single-line field (the
+                    // kit's own is its small UI size: Google Translate's
+                    // 24px text box showed 14px text).
                     Field::Area(state) => Textarea::new(state)
                         .appearance(false)
                         .caret_color(fg)
                         .disabled(control.disabled)
+                        .px_0()
+                        .py_0()
+                        .text_color(fg)
+                        .text_size(font)
+                        .font_family(self.palette.font(&style.font_names, style.font_family))
+                        .line_height(px(match style.line_height {
+                            style::LineHeight::Px(v) => v,
+                            style::LineHeight::Number(n) => n * style.font_size,
+                            style::LineHeight::Normal => style.font_size * 1.25,
+                        }))
                         .h_full()
                         .into_any_element(),
                 };

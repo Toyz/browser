@@ -1753,7 +1753,8 @@ impl Builder<'_> {
                 let longest = options.iter().map(|(_, l)| l.chars().count()).max().unwrap_or(4) as f32;
                 (longest * fs * 0.6 + 30.0, line)
             }
-            ControlKind::Text { multiline: true, .. } => (attr_num("cols", 20.0) * char_w, attr_num("rows", 2.0) * line),
+            // (Monospace characters, and room for a scrollbar, as Chrome.)
+            ControlKind::Text { multiline: true, .. } => (attr_num("cols", 20.0) * fs * 0.6 + 15.0, attr_num("rows", 2.0) * line),
             ControlKind::Text { .. } => (attr_num("size", 20.0) * char_w, line),
         };
         let mut st = (*style).clone();
@@ -1762,7 +1763,11 @@ impl Builder<'_> {
         if st.width.is_auto() {
             st.width = Length::Px(w + edges_w);
         }
-        if st.height.is_auto() {
+        if st.height.is_auto() && matches!(kind, ControlKind::Text { multiline: true, .. }) {
+            // A text box's height is its rows' (the field inside fills it:
+            // as a minimum only, it was one line tall).
+            st.height = Length::Px(h + edges_h);
+        } else if st.height.is_auto() {
             // The content's height, as a minimum: a flex container can
             // still stretch the field (GitHub's search boxes, whose text
             // then sits in the middle).

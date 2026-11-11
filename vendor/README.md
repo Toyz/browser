@@ -207,6 +207,10 @@ Drop these when Boa releases include equivalent fixes.
   and `Textarea`, used instead of the theme's caret when projecting the
   editor style. Fields in web pages are drawn in the page's colors; with the
   app in dark mode the theme's caret was white, invisible in a white field.
+- `src/input/input.rs`: a multi-line input drawn without the kit's look
+  (`appearance(false)`) has no editor padding of its own. A web page's
+  `<textarea>` is padded by the page's CSS; the kit's padding moved its text
+  in and down, and cut off the last line of a short box.
 
 ## taffy 0.15.0
 

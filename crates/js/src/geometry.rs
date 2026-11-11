@@ -439,6 +439,40 @@ fn element_scroll(d: &Shared, node: NodeId) -> Option<[f32; 4]> {
     rx.recv_timeout(Duration::from_millis(30)).ok().flatten()
 }
 
+/// How tall a `<textarea>`'s text is, padding included: its lines (as the
+/// box's width wraps them) at its line height. Pages fitting a text box to
+/// its text set its height to 0 and read `scrollHeight` back at once, before
+/// any layout: answered from the last layout, that's the 0 they just set,
+/// and Google Translate's text box stayed 0 tall, its text unseen.
+fn text_field_height(d: &Shared, node: NodeId) -> Option<f32> {
+    let width = {
+        let dom = d.borrow();
+        let e = dom.doc.element(node)?;
+        if &**e.local_name() != "textarea" || !e.is_html() {
+            return None;
+        }
+        drop(dom);
+        measure(d, node).map(|r| r[2])
+    };
+    let mut dom = d.borrow_mut();
+    let px = |v: String| v.trim().strip_suffix("px").and_then(|v| v.trim().parse::<f32>().ok());
+    let font = px(super::computed_value(&mut dom, node, "font-size", None)).unwrap_or(13.0);
+    let line = px(super::computed_value(&mut dom, node, "line-height", None)).unwrap_or(font * 1.2);
+    let edge = |dom: &mut Dom, side: &str| px(super::computed_value(dom, node, &format!("padding-{side}"), None)).unwrap_or(0.0);
+    let (top, bottom, left, right) = (edge(&mut dom, "top"), edge(&mut dom, "bottom"), edge(&mut dom, "left"), edge(&mut dom, "right"));
+    let text = dom.values.get(&node).cloned().unwrap_or_else(|| dom.doc.text_content(node));
+    // (Characters average about half the font size wide.)
+    let room = width.map(|w| w - left - right).filter(|w| *w > font);
+    let lines: f32 = text
+        .split('\n')
+        .map(|l| match room {
+            Some(room) => (l.chars().count() as f32 * font * 0.5 / room).ceil().max(1.0),
+            None => 1.0,
+        })
+        .sum();
+    Some(lines * line + top + bottom)
+}
+
 /// `<html>` or `<body>`: their scrolling is the page's.
 fn is_root(d: &Shared, node: NodeId) -> bool {
     let dom = d.borrow();
@@ -577,7 +611,7 @@ fn install_on(d: &Shared, proto: &JsObject, cx: &mut Context) -> JsResult<()> {
         }, |_, _, _, _| Ok(JsValue::undefined())),
         ("scrollHeight", |d, n, _| {
             let h = element_scroll(d, n).map(|i| i[3]).unwrap_or_else(|| client_size(d, n, 1));
-            rounded(h)
+            rounded(h.max(text_field_height(d, n).unwrap_or(0.0)))
         }, |_, _, _, _| Ok(JsValue::undefined())),
     ];
     for (name, get, set) in scroll_getters {

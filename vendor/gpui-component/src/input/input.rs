@@ -605,7 +605,9 @@ impl RenderOnce for Input {
             cx,
         );
         state.set_editor_paddings(
-            if state.presentation(cx).is_multi_line() {
+            // (Feather) Without the kit's look (a web page's field), no
+            // padding of its own: the page's CSS pads the box.
+            if state.presentation(cx).is_multi_line() && self.appearance {
                 Edges {
                     top: self.size.input_py(),
                     right: self.size.input_px(),
