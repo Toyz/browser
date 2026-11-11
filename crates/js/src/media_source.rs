@@ -452,6 +452,10 @@ pub(crate) fn tick(cx: &mut Context) -> bool {
             }
         };
         sb(&o).updating.set(false);
+        if crate::dom::page(cx).borrow().debug() {
+            let b = sb(&o);
+            eprintln!("js: SourceBuffer {} → {:?}, buffered {:?}", b.index, result.as_ref().map(|_| ()), b.mse.buffered(b.index));
+        }
         match result {
             Ok(()) => {
                 dispatch(&o, "update", cx);
@@ -501,6 +505,7 @@ pub(crate) fn attach(url: &str, node: NodeId, cx: &mut Context) -> Option<(JsObj
     }
     m.state.set("open");
     m.element.set(Some(node));
+    m.mse.reopen();
     let mse = m.mse.clone();
     drop(m);
     queue(&o, "sourceopen", cx);
@@ -516,7 +521,12 @@ pub(crate) fn detach(o: &JsObject, cx: &mut Context) {
     m.state.set("closed");
     m.element.set(None);
     m.mse.close();
+    // Its SourceBuffers go with it.
+    let buffers = std::mem::take(&mut *m.buffers.borrow_mut());
     drop(m);
+    for b in buffers {
+        sb(&b).removed.set(true);
+    }
     queue(o, "sourceclose", cx);
 }
 

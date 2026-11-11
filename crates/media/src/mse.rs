@@ -273,6 +273,12 @@ impl Mse {
         self.changed();
     }
 
+    /// Attached (again) to a media element: open, with nothing in it.
+    pub fn reopen(&self) {
+        *self.lock() = State::default();
+        self.changed();
+    }
+
     /// The media element let go of it.
     pub fn close(&self) {
         self.lock().closed = true;

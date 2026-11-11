@@ -204,6 +204,15 @@ fn pick_source(node: NodeId, cx: &Context) -> (Option<url::Url>, Option<String>,
 fn load(node: NodeId, cx: &mut Context) {
     let m = state(cx);
     let (url, hint, any) = pick_source(node, cx);
+    {
+        let d = crate::dom::page(cx);
+        let mut dom = d.borrow_mut();
+        // What this load takes in: no need to load again for it.
+        dom.media_dirty.retain(|(n, c)| *n != node || *c == Change::Loop);
+        if dom.debug() {
+            eprintln!("js: media load {node:?}: {:?}", url.as_ref().map(|u| u.as_str()));
+        }
+    }
     let (aborted, emptied, generation, old_source) = {
         let mut els = m.els.borrow_mut();
         let el = els.entry(node).or_default();
@@ -375,6 +384,9 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
     {
         let mut els = m.els.borrow_mut();
         let Some(el) = els.get_mut(&node).filter(|e| e.generation == generation) else { return };
+        if crate::dom::page(cx).borrow().debug() && !matches!(event, media::Event::Time(_)) {
+            eprintln!("js: media {node:?}: {event:?}");
+        }
         match event {
             media::Event::Metadata(info) => {
                 // (A MediaSource's says itself.)
