@@ -389,6 +389,7 @@ impl Runtime {
         }
         crate::abort::link(&mut cx);
         crate::worker::link(&mut cx);
+        crate::media_source::link(&mut cx);
         crate::media_element::link(canvas_out.clone(), updates.clone(), &mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
@@ -700,7 +701,6 @@ impl Runtime {
         if let Some(url) = navigate {
             self.updates.send_blocking(FromJs::Navigate(url)).ok();
         }
-        crate::media_element::tick(&mut self.cx);
         self.flush_canvases();
         let submit = self.dom.borrow_mut().submit.take();
         if let Some(form) = submit {
@@ -1007,7 +1007,10 @@ impl Runtime {
             let scripts = !self.dom.borrow().pending_scripts.is_empty();
             self.run_pending_scripts();
             self.cx.run_jobs().ok();
-            if !timers && !scripts && self.dom.borrow().pending_scripts.is_empty() {
+            // Media elements to load, MSE appends to finish, their events.
+            let media = crate::media_element::tick(&mut self.cx);
+            self.cx.run_jobs().ok();
+            if !timers && !scripts && !media && self.dom.borrow().pending_scripts.is_empty() {
                 break;
             }
         }
@@ -1022,7 +1025,10 @@ impl Runtime {
             let scripts = !self.dom.borrow().pending_scripts.is_empty();
             self.run_pending_scripts();
             self.cx.run_jobs().ok();
-            if !timers && !scripts && self.dom.borrow().pending_scripts.is_empty() {
+            // Media elements to load, MSE appends to finish, their events.
+            let media = crate::media_element::tick(&mut self.cx);
+            self.cx.run_jobs().ok();
+            if !timers && !scripts && !media && self.dom.borrow().pending_scripts.is_empty() {
                 break;
             }
         }
@@ -1891,6 +1897,7 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
     crate::worker::install(cx);
     crate::streams::install(cx);
     crate::wasm::install(cx);
+    crate::media_source::install(cx);
     crate::window_api::install(&obj, dom, cx);
     crate::timers::install(&obj, dom.clone(), cx);
     crate::web_storage::install(&obj, dom, cx);

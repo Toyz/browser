@@ -73,6 +73,9 @@ struct El {
     /// Pictures shown.
     shown: Arc<AtomicU32>,
     loaded_data: bool,
+    /// The `MediaSource` it plays, if it does.
+    source: Option<JsObject>,
+    mse: Option<media::mse::Mse>,
 }
 
 impl Default for El {
@@ -98,6 +101,8 @@ impl Default for El {
             plays: Vec::new(),
             shown: Arc::default(),
             loaded_data: false,
+            source: None,
+            mse: None,
         }
     }
 }
@@ -199,7 +204,7 @@ fn pick_source(node: NodeId, cx: &Context) -> (Option<url::Url>, Option<String>,
 fn load(node: NodeId, cx: &mut Context) {
     let m = state(cx);
     let (url, hint, any) = pick_source(node, cx);
-    let (aborted, emptied, generation) = {
+    let (aborted, emptied, generation, old_source) = {
         let mut els = m.els.borrow_mut();
         let el = els.entry(node).or_default();
         let emptied = el.network != NETWORK_EMPTY;
@@ -208,11 +213,16 @@ fn load(node: NodeId, cx: &mut Context) {
         if let Some(d) = el.download.take() {
             d.close();
         }
+        let old_source = el.source.take();
         el.generation += 1;
         let keep = (el.volume, el.muted, el.default_rate, el.generation, std::mem::take(&mut el.plays));
         *el = El { volume: keep.0, muted: keep.1, default_rate: keep.2, rate: keep.2, generation: keep.3, plays: keep.4, ..El::default() };
-        (aborted, emptied, el.generation)
+        (aborted, emptied, el.generation, old_source)
     };
+    let (aborted, emptied, generation, old_source) = (aborted, emptied, generation, old_source);
+    if let Some(o) = old_source {
+        crate::media_source::detach(&o, cx);
+    }
     {
         let d = crate::dom::page(cx);
         let mut dom = d.borrow_mut();
@@ -241,7 +251,7 @@ fn load(node: NodeId, cx: &mut Context) {
         return;
     };
     queue(node, &["loadstart"], cx);
-    let (player, feeder) = start(node, generation, url.clone(), hint, cx);
+    let (player, feeder, source) = start(node, generation, url.clone(), hint, cx);
     let looping = has_attr(node, "loop", cx);
     let autoplay = has_attr(node, "autoplay", cx);
     let muted_attr = has_attr(node, "muted", cx);
@@ -249,7 +259,11 @@ fn load(node: NodeId, cx: &mut Context) {
     let el = els.entry(node).or_default();
     el.src = url.to_string();
     el.network = NETWORK_LOADING;
-    el.download = Some(feeder);
+    el.download = feeder;
+    if let Some((o, mse)) = source {
+        el.source = Some(o);
+        el.mse = Some(mse);
+    }
     let muted = el.muted.unwrap_or(muted_attr);
     player.send(media::Command::Volume(if muted { 0.0 } else { el.volume as f32 }));
     player.send(media::Command::Loop(looping));
@@ -270,16 +284,19 @@ fn load(node: NodeId, cx: &mut Context) {
 }
 
 /// Start downloading and playing `url` for `node`.
-fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx: &Context) -> (media::Player, media::Feeder) {
+fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx: &mut Context) -> (media::Player, Option<media::Feeder>, Option<(JsObject, media::mse::Mse)>) {
     let m = state(cx);
     let d = crate::dom::page(cx);
     let (page, news, debug) = {
         let dom = d.borrow();
         (dom.doc.url.clone(), dom.fetch_tx.clone(), dom.debug())
     };
+    // A MediaSource's address: play what the page appends to it.
+    let attached = if url.scheme() == "blob" { crate::media_source::attach(url.as_str(), node, cx) } else { None };
     let (feeder, source) = media::growing(None);
-    // An object URL's bytes are here already.
-    if url.scheme() == "blob"
+    if attached.is_some() {
+        feeder.close();
+    } else if url.scheme() == "blob"
         && let Some((bytes, _)) = crate::blob::object_url_data(url.as_str())
     {
         feeder.push(&bytes);
@@ -332,7 +349,12 @@ fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx:
     let events = move |event| {
         news.send(ToJs::Media { node, generation, event }).ok();
     };
-    (media::Player::start(source, hint, show, events), feeder)
+    let input = match &attached {
+        Some((_, mse)) => media::Input::Mse(mse.clone()),
+        None => media::Input::File(source, hint),
+    };
+    let feeder = attached.is_none().then_some(feeder);
+    (media::Player::start(input, show, events), feeder, attached)
 }
 
 /// Whether `node` may start playing now: muted, or after the user
@@ -355,7 +377,10 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
         let Some(el) = els.get_mut(&node).filter(|e| e.generation == generation) else { return };
         match event {
             media::Event::Metadata(info) => {
-                el.duration = info.duration.unwrap_or(f64::INFINITY);
+                // (A MediaSource's says itself.)
+                if el.source.is_none() {
+                    el.duration = info.duration.unwrap_or(f64::INFINITY);
+                }
                 el.size = (info.width, info.height);
                 el.ready = el.ready.max(HAVE_METADATA);
                 fire_now.extend(["durationchange"]);
@@ -427,11 +452,36 @@ pub(crate) fn deliver(node: NodeId, generation: u32, event: media::Event, cx: &m
     fire(node, &fire_now, cx);
 }
 
+/// A `MediaSource`'s duration changed.
+pub(crate) fn duration_changed(node: NodeId, d: f64, cx: &mut Context) {
+    let m = state(cx);
+    if let Some(e) = m.els.borrow_mut().get_mut(&node) {
+        e.duration = d;
+    }
+    queue(node, &["durationchange"], cx);
+}
+
+/// What was appended to its `MediaSource` couldn't be decoded.
+pub(crate) fn decode_error(node: NodeId, cx: &mut Context) {
+    let m = state(cx);
+    let plays = {
+        let mut els = m.els.borrow_mut();
+        let Some(e) = els.get_mut(&node) else { return };
+        e.error = Some(if e.loaded_data { 3 } else { 4 });
+        e.paused = true;
+        std::mem::take(&mut e.plays)
+    };
+    settle(plays, Err(("NotSupportedError", "The element has no supported sources.")), cx);
+    queue(node, &["error"], cx);
+}
+
 /// After each task: start loading what changed, fire queued events.
-pub(crate) fn tick(cx: &mut Context) {
+pub(crate) fn tick(cx: &mut Context) -> bool {
+    let mut did = crate::media_source::tick(cx);
     let m = state(cx);
     let d = crate::dom::page(cx);
     let mut changes = std::mem::take(&mut d.borrow_mut().media_dirty);
+    did |= !changes.is_empty();
     if !m.scanned.replace(true) {
         let dom = d.borrow();
         changes.extend(dom.doc.descendants(dom.doc.root()).filter(|&n| is_media(&dom, n)).map(|n| (n, Change::Inserted)));
@@ -471,9 +521,12 @@ pub(crate) fn tick(cx: &mut Context) {
         }
     }
     let queued = std::mem::take(&mut *m.queued.borrow_mut());
+    did |= !queued.is_empty();
     for (node, kind) in queued {
         fire(node, &[kind], cx);
     }
+    // (A load just opened a MediaSource: `sourceopen` now.)
+    did | crate::media_source::tick(cx)
 }
 
 fn is_media(dom: &crate::dom::Dom, n: NodeId) -> bool {
@@ -548,7 +601,7 @@ fn ranges_of(this: &JsValue) -> JsResult<Vec<(f64, f64)>> {
         .ok_or_else(|| JsNativeError::typ().with_message("not a TimeRanges").into())
 }
 
-fn time_ranges(ranges: Vec<(f64, f64)>, cx: &mut Context) -> JsResult<JsValue> {
+pub(crate) fn time_ranges(ranges: Vec<(f64, f64)>, cx: &mut Context) -> JsResult<JsValue> {
     Ok(TimeRanges::from_data(TimeRanges { ranges }, cx)?.into())
 }
 
@@ -660,6 +713,9 @@ const GETTERS: &[(&str, Native, Option<Native>)] = &[
         Ok(JsValue::undefined())
     })),
     ("buffered", |t, _, cx| {
+        if let Some(mse) = with(t, cx, |e, _| e.mse.clone())? {
+            return time_ranges(mse.buffered_all(), cx);
+        }
         let ranges = with(t, cx, |e, _| match &e.download {
             Some(d) if e.duration.is_finite() => {
                 let (got, total) = d.progress();
@@ -671,6 +727,9 @@ const GETTERS: &[(&str, Native, Option<Native>)] = &[
         time_ranges(ranges, cx)
     }, None),
     ("seekable", |t, _, cx| {
+        if let Some(o) = with(t, cx, |e, _| e.source.clone())? {
+            return time_ranges(crate::media_source::seekable(&o), cx);
+        }
         let ranges = with(t, cx, |e, _| if e.ready >= HAVE_METADATA && e.duration.is_finite() { vec![(0.0, e.duration)] } else { Vec::new() })?;
         time_ranges(ranges, cx)
     }, None),

@@ -1875,3 +1875,58 @@ fn native_timers_call_back_in_order() {
     }
     assert_eq!(text, "i1,i2,raf,t12,str");
 }
+
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in bytes.chunks(3) {
+        let n = (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+#[test]
+fn media_source_plays_appended_segments() {
+    let video = base64(include_bytes!("../../media/tests/data/frag-video.mp4"));
+    let audio = base64(include_bytes!("../../media/tests/data/frag-audio.mp4"));
+    let html = format!(
+        r##"<body><video id="v" muted></video><p id="o"></p><script>
+        const bytes = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        const out = [MediaSource.isTypeSupported('video/mp4; codecs="avc1.4d401e"'), MediaSource.isTypeSupported('video/webm; codecs="vp9"')];
+        const v = document.getElementById("v");
+        const ms = new MediaSource();
+        out.push(ms.readyState);
+        ms.addEventListener("sourceopen", () => {{
+          out.push(ms.readyState);
+          const parts = [["video/mp4; codecs=\"avc1.4d401e\"", "{video}"], ["audio/mp4; codecs=\"mp4a.40.2\"", "{audio}"]];
+          let left = parts.length;
+          for (const [type, data] of parts) {{
+            const sb = ms.addSourceBuffer(type);
+            sb.addEventListener("updateend", () => {{
+              out.push(sb.buffered.length + ":" + sb.buffered.end(0).toFixed(1));
+              if (--left === 0) {{
+                ms.duration = 2;
+                ms.endOfStream();
+                v.addEventListener("timeupdate", () => {{
+                  if (v.currentTime > 0.3 && !out.done) {{
+                    out.done = true;
+                    out.push(v.readyState, v.videoWidth, v.duration.toFixed(2), v.buffered.length);
+                    document.getElementById("o").textContent = out.join(" ");
+                  }}
+                }});
+                v.play().then(() => out.push("playing"));
+              }}
+            }});
+            sb.appendBuffer(bytes(data));
+          }}
+        }});
+        v.src = URL.createObjectURL(ms);
+        setTimeout(() => {{ if (!out.done) document.getElementById("o").textContent = "partial " + out.join(" ") + " t=" + v.currentTime + " rs=" + v.readyState + " err=" + (v.error && v.error.code); }}, 1500);
+    </script></body>"##
+    );
+    let doc = run(&html);
+    assert_eq!(text_of(&doc, "o"), "true false closed open 1:2.1 1:2.0 playing 4 320 2.02 1");
+}
