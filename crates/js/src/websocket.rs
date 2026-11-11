@@ -57,7 +57,11 @@ fn run(url: &str, protocols: &[String], origin: &str, rx: &mpsc::Receiver<Outgoi
     {
         headers.insert("sec-websocket-protocol", v);
     }
+    let t = std::time::Instant::now();
     let (mut socket, response) = tungstenite::connect(request).map_err(|e| format!("couldn't connect to {url}: {e}"))?;
+    if std::env::var_os("BROWSER_DEBUG").is_some() {
+        eprintln!("websocket {url}: connected in {:?}", t.elapsed());
+    }
     let protocol = response.headers().get("sec-websocket-protocol").and_then(|v| v.to_str().ok()).unwrap_or("").to_owned();
     // Short reads, so the page's frames go out promptly.
     let tcp: &TcpStream = match socket.get_ref() {

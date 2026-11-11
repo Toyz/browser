@@ -565,6 +565,8 @@ impl Runtime {
         for &(n, _, is_async) in &scripts {
             if is_async {
                 self.run_script(n);
+                self.cx.run_jobs().ok();
+                self.handle_arrived(4);
             }
         }
         self.run_pending_scripts();
@@ -592,6 +594,12 @@ impl Runtime {
                 self.run_script(n);
                 // `onload` for injected scripts (loaders chain on it).
                 self.call_global("__fireNode", &[JsValue::from(node_to_number(n)), JsValue::from(js_string!("load"))]);
+                // Each is a task of its own: what arrived meanwhile (a socket
+                // opening) is handled between them, not after them all
+                // (Twitch's hundred chunks took seconds, and its chat timed
+                // out waiting for an `open` that had come long before).
+                self.cx.run_jobs().ok();
+                self.handle_arrived(4);
             }
         }
     }
@@ -789,6 +797,13 @@ impl Runtime {
         self.dom.borrow_mut().last_sent = Instant::now() - SNAPSHOT_EVERY;
         self.flush();
         loop {
+            // What arrived while the last task ran (a socket opening, a
+            // response) goes before timers that fell due meanwhile, as in a
+            // browser's queue: run after them, Twitch's connect timeout
+            // closed its chat socket that had opened seconds before.
+            if !self.handle_arrived(32) {
+                return;
+            }
             self.settle();
             let next_timer = self.dom.borrow().timers.iter().map(|(t, _)| *t).min();
             let deadline = match (next_timer, self.flush_at) {
@@ -801,6 +816,28 @@ impl Runtime {
                 Err(RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    /// Handle up to `limit` messages that have arrived already (`false`:
+    /// shut down). They go before timers that fell due while a task ran,
+    /// as in a browser's queue.
+    fn handle_arrived(&mut self, limit: usize) -> bool {
+        for _ in 0..limit {
+            let msg = match self.backlog.pop_front() {
+                Some(m) => m,
+                None => match self.rx.try_recv() {
+                    Ok(m) => m,
+                    Err(_) => break,
+                },
+            };
+            if matches!(msg, ToJs::Shutdown) {
+                // (Seen again by the event loop, which stops.)
+                self.backlog.push_front(ToJs::Shutdown);
+                return false;
+            }
+            self.handle(msg);
+        }
+        true
     }
 
     /// The next message: what `take_input` set aside first, then the channel.
@@ -835,6 +872,9 @@ impl Runtime {
 
     /// One message from the tab, the network or a socket.
     fn handle(&mut self, msg: ToJs) {
+        if std::env::var_os("FEATHER_DEBUG_QUEUE").is_some() {
+            queue_stats(&msg);
+        }
         match msg {
             ToJs::Shutdown => {}
             ToJs::Click { node, reply } => {
@@ -1021,7 +1061,11 @@ impl Runtime {
 
     /// `settle` without sending anything.
     fn settle_quiet(&mut self) {
-        for _ in 0..32 {
+        for round in 0..32 {
+            // (Messages that came meanwhile first: see `handle_arrived`.)
+            if round > 0 && !self.handle_arrived(8) {
+                return;
+            }
             let timers = self.run_due_timers();
             let scripts = !self.dom.borrow().pending_scripts.is_empty();
             self.run_pending_scripts();
@@ -1039,7 +1083,11 @@ impl Runtime {
     /// Do everything that's ready (timers due, inserted scripts, promise
     /// jobs, until none of them makes more), then send the DOM.
     fn settle(&mut self) {
-        for _ in 0..32 {
+        for round in 0..32 {
+            // (Messages that came meanwhile first: see `handle_arrived`.)
+            if round > 0 && !self.handle_arrived(8) {
+                return;
+            }
             let timers = self.run_due_timers();
             let scripts = !self.dom.borrow().pending_scripts.is_empty();
             self.run_pending_scripts();
@@ -2397,4 +2445,38 @@ pub(crate) fn snapshot(d: &Shared, cx: &mut Context) -> Document {
         }
     }
     doc
+}
+
+/// (FEATHER_DEBUG_QUEUE) messages handled per kind, each second.
+fn queue_stats(msg: &ToJs) {
+    use std::cell::RefCell;
+    thread_local! {
+        static STATS: RefCell<(Option<Instant>, std::collections::BTreeMap<&'static str, u32>)> = RefCell::default();
+    }
+    let kind = match msg {
+        ToJs::Click { .. } => "click",
+        ToJs::Input { .. } | ToJs::Checked { .. } | ToJs::Submit { .. } | ToJs::Key { .. } | ToJs::Focus { .. } => "input",
+        ToJs::Socket { .. } => "socket",
+        ToJs::FetchHead { .. } => "fetch-head",
+        ToJs::FetchChunk { .. } => "fetch-chunk",
+        ToJs::FetchDone { .. } => "fetch-done",
+        ToJs::Sse { .. } => "sse",
+        ToJs::Mouse { .. } => "mouse",
+        ToJs::Layout { .. } => "layout",
+        ToJs::Traverse { .. } => "traverse",
+        ToJs::Image { .. } => "image",
+        ToJs::Worker { .. } => "worker",
+        ToJs::Media { .. } => "media",
+        ToJs::MuteTab(_) => "mute",
+        ToJs::Shutdown => "shutdown",
+    };
+    STATS.with_borrow_mut(|(since, counts)| {
+        *counts.entry(kind).or_default() += 1;
+        let start = *since.get_or_insert_with(Instant::now);
+        if start.elapsed() >= Duration::from_secs(1) {
+            eprintln!("queue/s: {counts:?}");
+            counts.clear();
+            *since = Some(Instant::now());
+        }
+    });
 }
