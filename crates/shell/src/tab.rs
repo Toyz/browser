@@ -143,6 +143,8 @@ pub struct Tab {
     layout_gone: Vec<NodeId>,
     /// (Debugging) the list's scroll position last frame.
     debug_scroll_top: std::cell::Cell<Option<(usize, f32, usize)>>,
+    /// (FEATHER_PERF) frame statistics, printed each second.
+    perf: Option<Perf>,
     /// Measured elements painted in the last frame scripts were told about.
     layout_painted: HashSet<NodeId>,
     /// The elements scripts measure that the current layout was built with
@@ -285,6 +287,7 @@ impl Tab {
             layout_sent: HashMap::new(),
             layout_gone: Vec::new(),
             debug_scroll_top: Default::default(),
+            perf: std::env::var_os("FEATHER_PERF").map(|_| Perf::default()),
             layout_painted: HashSet::new(),
             layout_keep: HashSet::new(),
             unpainted_sent: HashSet::new(),
@@ -853,6 +856,16 @@ impl Tab {
     /// Canvases' new pixels: each shown as its picture from the next
     /// frame, the last one dropped from the GPU atlas.
     pub(super) fn canvas_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let started = std::time::Instant::now();
+        self.canvas_frames_now(window);
+        if let Some(p) = &mut self.perf {
+            p.canvas += 1;
+            p.canvas_time += started.elapsed();
+        }
+        cx.notify();
+    }
+
+    fn canvas_frames_now(&mut self, window: &mut Window) {
         let Some(host) = self.page.as_ref().and_then(|p| p.scripts.clone()) else { return };
         let frames = std::mem::take(&mut *host.canvas_frames.lock().unwrap_or_else(|e| e.into_inner()));
         for (node, c) in frames {
@@ -875,7 +888,6 @@ impl Tab {
                 }
             }
         }
-        cx.notify();
     }
 
     /// Lay out a few more rows the list hasn't measured yet, between
@@ -1564,6 +1576,7 @@ impl Tab {
                 this.page.as_ref().and_then(|p| p.scripts.as_ref()).map(|h| h.measured.read().map(|m| m.clone()).unwrap_or_default()).unwrap_or_default()
             }) else { return };
             let kept = keep.clone();
+            if let Ok(Some(())) = this.update(cx, |this, _| this.perf.as_mut().map(|p| p.restyles += 1)) {}
             let (layout, changed, ends) = loader::deep({
                 let state = state.clone();
                 move || {
@@ -1798,8 +1811,15 @@ impl Tab {
                     record_frames(cx).await;
                     return;
                 }
-                // Whatever it did (restyle, navigation) gets time to finish.
-                cx.background_executor().timer(Duration::from_millis(2500)).await;
+                // Whatever it did (restyle, navigation) gets time to finish,
+                // drawing meanwhile as a window would (a video it started
+                // plays).
+                let every = std::env::var("FEATHER_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+                let until = std::time::Instant::now() + Duration::from_millis(2500);
+                while std::time::Instant::now() < until {
+                    cx.update(|window, cx| window.draw(cx).clear(cx)).ok();
+                    cx.background_executor().timer(Duration::from_millis(every)).await;
+                }
                 wait_for_images(cx).await;
             }
             if let Some((dx, end)) = job.swipe {
@@ -2516,8 +2536,53 @@ impl Tab {
     }
 }
 
+/// Frame statistics (FEATHER_PERF): how often the tab renders and what it
+/// spends, per second.
+#[derive(Default)]
+pub(super) struct Perf {
+    since: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+    renders: u32,
+    max_gap: Duration,
+    render_time: Duration,
+    canvas: u32,
+    canvas_time: Duration,
+    restyles: u32,
+}
+
+impl Perf {
+    fn frame(&mut self, render_time: Duration) {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last.replace(now) {
+            self.max_gap = self.max_gap.max(now - last);
+        }
+        self.renders += 1;
+        self.render_time += render_time;
+        let since = *self.since.get_or_insert(now);
+        if now - since >= Duration::from_secs(1) {
+            eprintln!(
+                "perf/s: {} renders (max gap {:?}, render {:?}), {} canvas uploads ({:?}), {} restyles",
+                self.renders, self.max_gap, self.render_time, self.canvas, self.canvas_time, self.restyles
+            );
+            *self = Perf { last: self.last, since: Some(now), ..Perf::default() };
+        }
+    }
+}
+
 impl Render for Tab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let started = std::time::Instant::now();
+        let out = self.render_tab(window, cx);
+        let spent = started.elapsed();
+        if let Some(p) = &mut self.perf {
+            p.frame(spent);
+        }
+        out
+    }
+}
+
+impl Tab {
+    fn render_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         if std::env::var_os("BROWSER_DEBUG").is_some() {
             let top = self.list_state.logical_scroll_top();
             let now = (top.item_ix, f32::from(top.offset_in_item), self.list_state.item_count());
