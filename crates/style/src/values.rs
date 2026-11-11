@@ -458,6 +458,8 @@ pub enum FlexDirection {
 pub enum Justify {
     Start,
     Center,
+    /// `safe center`: centered when it fits, else at the start.
+    SafeCenter,
     End,
     SpaceBetween,
     SpaceAround,

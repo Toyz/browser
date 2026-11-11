@@ -1118,6 +1118,9 @@ pub enum AlignContent {
     FlexEnd,
     /// Items are centered around the middle of the axis
     Center,
+    /// (Feather) centered when they fit, else packed toward the start
+    /// (CSS `safe center`)
+    SafeCenter,
     /// Items are stretched to fill the container
     Stretch,
     /// The first and last items are aligned flush with the edges of the container (no gap)
@@ -1283,6 +1286,7 @@ impl From<AlignContent> for taffy::style::AlignContent {
             AlignContent::FlexStart => Self::FLEX_START,
             AlignContent::FlexEnd => Self::FLEX_END,
             AlignContent::Center => Self::CENTER,
+            AlignContent::SafeCenter => Self::SAFE_CENTER,
             AlignContent::Stretch => Self::STRETCH,
             AlignContent::SpaceBetween => Self::SPACE_BETWEEN,
             AlignContent::SpaceEvenly => Self::SPACE_EVENLY,

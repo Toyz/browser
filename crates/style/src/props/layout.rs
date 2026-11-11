@@ -50,8 +50,16 @@ pub(crate) fn parse_flex_direction<'i>(p: &mut Parser<'i>) -> PResult<'i, FlexDi
 }
 
 pub(crate) fn parse_justify<'i>(p: &mut Parser<'i>) -> PResult<'i, Justify> {
-    // `safe`/`unsafe` prefixes
-    let _ = p.try_parse(|p| p.expect_ident_matching("safe").or_else(|_| p.expect_ident_matching("unsafe")));
+    // `safe`/`unsafe` prefixes (`safe center` is kept apart).
+    let safe = p.try_parse(|p| p.expect_ident_matching("safe")).is_ok();
+    if !safe {
+        let _ = p.try_parse(|p| p.expect_ident_matching("unsafe"));
+    }
+    let j = parse_justify_keyword(p)?;
+    Ok(if safe && j == Justify::Center { Justify::SafeCenter } else { j })
+}
+
+fn parse_justify_keyword<'i>(p: &mut Parser<'i>) -> PResult<'i, Justify> {
     keyword(p, &[
         ("normal", Justify::Start),
         ("flex-start", Justify::Start),

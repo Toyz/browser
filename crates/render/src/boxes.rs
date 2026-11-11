@@ -2677,7 +2677,10 @@ impl Builder<'_> {
                     let (kind, style) = if tag == "button" && kind == BlockKind::Normal {
                         let mut st = (*style).clone();
                         st.flex_direction = style::FlexDirection::Column;
-                        st.justify_content = Some(Justify::Center);
+                        // (Safely: content taller than the button, YouTube's
+                        // icons in a 56px line, starts at its top, as in
+                        // Chrome, not above it.)
+                        st.justify_content = Some(Justify::SafeCenter);
                         // And horizontally, as `text-align: center` (the UA
                         // default for buttons) centers its inline content:
                         // YouTube's search icon sat at the button's left edge.
@@ -2956,10 +2959,12 @@ fn paragraph_intrinsic(p: &Paragraph) -> (f32, f32) {
             // (min-content, max-content) of the object.
             let (min_w, max_w) = objects.next().map_or((0.0, 0.0), |o| match o {
                 InlineObject::Image(i) => {
+                    // Its padding, border and margins take room too (YouTube's
+                    // padded 24px player icons are 40px wide).
                     let w = match i.style.width {
                         Length::Px(w) => w,
                         _ => i.attr_width.unwrap_or(16.0),
-                    };
+                    } + image_edges(&i.style);
                     (w, w)
                 }
                 InlineObject::BlockBox(b) => {
@@ -3006,6 +3011,14 @@ fn paragraph_intrinsic(p: &Paragraph) -> (f32, f32) {
     (min, longest_line.max(min))
 }
 
+/// An image's horizontal padding, border and margins (with `box-sizing:
+/// border-box` and a set width, the width has the padding and border).
+fn image_edges(s: &ComputedStyle) -> f32 {
+    let margins = s.margin.left.px_or_zero() + s.margin.right.px_or_zero();
+    let inside = matches!(s.width, Length::Px(_)) && s.border_box;
+    margins + if inside { 0.0 } else { s.horizontal_edges() }
+}
+
 fn block_intrinsic(s: &ComputedStyle, kind: &BlockKind, children: &[LayoutBox]) -> (f32, f32) {
     let px = |l: Length| l.px_or_zero();
     let child = |c: &LayoutBox| -> (f32, f32) {
@@ -3017,7 +3030,7 @@ fn block_intrinsic(s: &ComputedStyle, kind: &BlockKind, children: &[LayoutBox]) 
                     Length::Px(w) => w,
                     _ => i.attr_width.unwrap_or(0.0),
                 };
-                (0.0, w)
+                (0.0, w + image_edges(&i.style))
             }
             LayoutBox::Block(b) => {
                 let m = px(b.style.margin.left) + px(b.style.margin.right);

@@ -1676,6 +1676,11 @@ fn apply_alignment(d: Div, s: &ComputedStyle) -> Div {
     let d = match s.justify_content {
         Some(Justify::Start) | None => d,
         Some(Justify::Center) => d.justify_center(),
+        Some(Justify::SafeCenter) => {
+            let mut d = d;
+            d.style().justify_content = Some(gpui_kit::AlignContent::SafeCenter);
+            d
+        }
         Some(Justify::End) => d.justify_end(),
         Some(Justify::SpaceBetween) => d.justify_between(),
         Some(Justify::SpaceAround) => d.justify_around(),
@@ -1685,6 +1690,11 @@ fn apply_alignment(d: Div, s: &ComputedStyle) -> Div {
         None => d,
         Some(Justify::Start) => d.content_start(),
         Some(Justify::Center) => d.content_center(),
+        Some(Justify::SafeCenter) => {
+            let mut d = d;
+            d.style().align_content = Some(gpui_kit::AlignContent::SafeCenter);
+            d
+        }
         Some(Justify::End) => d.content_end(),
         Some(Justify::SpaceBetween) => d.content_between(),
         Some(Justify::SpaceAround) => d.content_around(),
