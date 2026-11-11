@@ -216,6 +216,13 @@ pub struct MixedWidths {
     pub width: Option<(f32, f32)>,
     pub min_width: Option<(f32, f32)>,
     pub max_width: Option<(f32, f32)>,
+    /// Horizontal margins and paddings the same way (Reddit's full-bleed
+    /// `margin-inline: calc(0px - (50vw - 50%))`, which as 50% shrank its
+    /// header to nothing).
+    pub margin_left: Option<(f32, f32)>,
+    pub margin_right: Option<(f32, f32)>,
+    pub padding_left: Option<(f32, f32)>,
+    pub padding_right: Option<(f32, f32)>,
 }
 
 impl ComputedStyle {

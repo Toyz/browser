@@ -2111,6 +2111,21 @@ impl Builder<'_> {
                     st.max_width = at(m);
                 }
             }
+            // Margins and paddings are of the containing block's width too
+            // (margins may go negative).
+            let signed = |(px, pct): (f32, f32)| Length::Px(avail * pct / 100.0 + px);
+            if let Some(m) = mixed.margin_left {
+                st.margin.left = signed(m);
+            }
+            if let Some(m) = mixed.margin_right {
+                st.margin.right = signed(m);
+            }
+            if let Some(m) = mixed.padding_left {
+                st.padding.left = at(m);
+            }
+            if let Some(m) = mixed.padding_right {
+                st.padding.right = at(m);
+            }
         }
         let through = std::mem::take(&mut self.viewport_sized);
         let mut chain = if id == self.doc.root() || through { base } else { None };

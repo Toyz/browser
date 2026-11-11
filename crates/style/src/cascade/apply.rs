@@ -166,8 +166,22 @@ impl Styler {
             Decl::Display(v) => s.display = *v,
             Decl::Position(v) => s.position = *v,
             Decl::Inset(side, v) => s.inset.set(*side, len(v)),
-            Decl::Margin(side, v) => s.margin.set(*side, len(v)),
-            Decl::Padding(side, v) => s.padding.set(*side, non_auto(len(v))),
+            Decl::Margin(side, v) => {
+                s.margin.set(*side, len(v));
+                match side {
+                    crate::Side::Left => set_mixed(s, |m| &mut m.margin_left, v.mixed(&cx)),
+                    crate::Side::Right => set_mixed(s, |m| &mut m.margin_right, v.mixed(&cx)),
+                    _ => {}
+                }
+            }
+            Decl::Padding(side, v) => {
+                s.padding.set(*side, non_auto(len(v)));
+                match side {
+                    crate::Side::Left => set_mixed(s, |m| &mut m.padding_left, v.mixed(&cx)),
+                    crate::Side::Right => set_mixed(s, |m| &mut m.padding_right, v.mixed(&cx)),
+                    _ => {}
+                }
+            }
             Decl::BorderWidth(side, v) => s.border_width.set(*side, len(v).px_or_zero().max(0.0)),
             Decl::BorderStyle(side, v) => s.border_style.set(*side, *v),
             Decl::BorderColor(side, v) => s.border_color.set(*side, *v),
