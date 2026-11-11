@@ -1051,10 +1051,12 @@ impl Context {
             let mut c = c.borrow_mut();
             *c.1.entry(format!("{here}  <- {caller}")).or_default() += 1;
             c.0 += 1;
-            if c.0 >= 2000 {
+            static EVERY: std::sync::LazyLock<u32> =
+                std::sync::LazyLock::new(|| std::env::var("JS_PROFILE").ok().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or(2000));
+            if c.0 >= *EVERY {
                 let mut top: Vec<_> = c.1.iter().map(|(k, v)| (*v, k.clone())).collect();
                 top.sort_by(|a, b| b.0.cmp(&a.0));
-                eprintln!("js profile ({} samples):", c.0);
+                eprintln!("js profile ({} samples, thread {:?}):", c.0, std::thread::current().id());
                 for (n, k) in top.iter().take(25) {
                     eprintln!("  {n:5} {k}");
                 }
