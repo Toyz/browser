@@ -61,6 +61,8 @@ pub struct StyleData {
     has_state_rules: bool,
     /// ...and some puts it before a combinator or inside `:has()`.
     state_reaches_others: bool,
+    /// What `:has()` arguments match, if any rule has one (see `cache`).
+    has_keys: Option<Arc<crate::cache::HasKeys>>,
     keyframes: Arc<HashMap<Arc<str>, Arc<Keyframes>>>,
     font_faces: Arc<Vec<FontFace>>,
     registered: Arc<Registry>,
@@ -115,9 +117,13 @@ impl StyleData {
         }
         let mut has_state_rules = false;
         let mut state_reaches_others = false;
+        let mut has_keys: Option<crate::cache::HasKeys> = None;
         for r in &rules {
             for sel in r.selectors.slice() {
                 let css = cssparser::ToCss::to_css_string(sel);
+                if css.contains(":has(") {
+                    has_keys.get_or_insert_with(Default::default).add(&css);
+                }
                 if STATE_PSEUDOS.iter().any(|p| css.contains(p)) {
                     has_state_rules = true;
                     state_reaches_others |= state_reaches_others_in(&css);
@@ -130,6 +136,7 @@ impl StyleData {
             base,
             has_state_rules,
             state_reaches_others,
+            has_keys: has_keys.map(Arc::new),
             keyframes,
             font_faces: Arc::new(font_faces),
             registered: Arc::new(registry),
@@ -159,6 +166,15 @@ impl StyleData {
     /// The page's web fonts (`@font-face`).
     pub fn font_faces(&self) -> &[FontFace] {
         &self.font_faces
+    }
+
+    /// Which stylesheets these are (equal for clones of one `StyleData`).
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.rules) as *const () as usize
+    }
+
+    pub(crate) fn has_keys(&self) -> Option<Arc<crate::cache::HasKeys>> {
+        self.has_keys.clone()
     }
 
     /// Does any rule depend on hover/active/focus state?

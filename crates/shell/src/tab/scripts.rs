@@ -98,7 +98,11 @@ impl Tab {
         }
         let page_gen = self.page_gen;
         self._script_styles = Some(cx.spawn_in(window, async move |this, cx| {
+            let t = std::time::Instant::now();
             let styles = loader::deep(move || loader::styles_for(&doc)).await;
+            if std::env::var_os("BROWSER_DEBUG").is_some() {
+                eprintln!("perf: stylesheets re-read in {:?}", t.elapsed());
+            }
             this.update_in(cx, |this, window, cx| {
                 if this.page_gen != page_gen {
                     return;

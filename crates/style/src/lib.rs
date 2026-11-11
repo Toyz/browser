@@ -6,6 +6,7 @@
 //! - [`cascade`] picks the winning declarations per element and computes
 //!   [`ComputedStyle`], which is all the renderer depends on.
 
+pub mod cache;
 pub mod cascade;
 pub mod media;
 pub mod props;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 pub use sheet::FontFace;
 pub use cascade::{DARK_CANVAS, Pseudo, StyleData, StyleSource, Styler, collect_style_sources};
 pub use selector::ElementState;
+pub use cache::{StyleCache, StyleSession};
 pub use media::MediaEnv;
 pub use values::*;
 

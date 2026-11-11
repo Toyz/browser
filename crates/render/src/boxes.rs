@@ -744,6 +744,18 @@ pub fn build(doc: &Document, styler: &Styler) -> LayoutTree {
 /// The same, keeping a box for each element in `keep` (ones scripts
 /// measure) even where layout could do without one.
 pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) -> LayoutTree {
+    build_cached(doc, styler, keep, None).0
+}
+
+thread_local! {
+    /// Time spent computing styles in this thread's builds (BROWSER_DEBUG).
+    pub static STYLE_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// [`build_keeping`], reusing the styles of elements that didn't change since
+/// `cache`'s build (see `style::cache`), and handing it back for the next.
+pub fn build_cached(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>, cache: Option<style::StyleSession>) -> (LayoutTree, Option<style::StyleSession>) {
+    STYLE_NS.with(|c| c.set(0));
     let mut builder = Builder {
         doc,
         styler,
@@ -764,6 +776,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         definite: None,
         viewport_sized: false,
         keep_inline: false,
+        cache: cache.map(std::cell::RefCell::new),
     };
     let root_style = Arc::new(ComputedStyle::root_parent());
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
@@ -781,7 +794,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         .chain(page_absolutes.into_iter().map(|content| Pinned { pin: Pin::Page, content }))
         .chain(std::mem::take(&mut builder.sticky))
         .collect();
-    tree
+    (tree, builder.cache.map(std::cell::RefCell::into_inner))
 }
 
 /// Build the layout tree for plain text (non-HTML responses).
@@ -818,6 +831,8 @@ pub fn build_plain_text(text: &str) -> LayoutTree {
 struct Builder<'a> {
     doc: &'a Document,
     styler: &'a Styler,
+    /// Styles from the last build to reuse.
+    cache: Option<std::cell::RefCell<style::StyleSession>>,
     /// Resolved once: looking up `<base>` per link is quadratic on big pages.
     base_url: Url,
     next_id: usize,
@@ -2474,7 +2489,12 @@ impl Builder<'_> {
                 continue;
             }
 
-            let mut style = self.styler.compute(doc, child, parent_style);
+            let t_style = std::time::Instant::now();
+            let mut style = match &self.cache {
+                Some(cache) => cache.borrow_mut().style(doc, child, parent_style, || self.styler.compute(doc, child, parent_style)),
+                None => self.styler.compute(doc, child, parent_style),
+            };
+            STYLE_NS.with(|c| c.set(c.get() + t_style.elapsed().as_nanos() as u64));
             if style.display == Display::None {
                 continue;
             }

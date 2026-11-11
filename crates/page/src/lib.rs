@@ -15,7 +15,7 @@ new_key_type! {
     pub struct NodeId;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attribute {
     pub name: QualName,
     pub value: String,

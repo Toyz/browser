@@ -126,6 +126,8 @@ pub struct Tab {
     /// page's viewport) and the viewport's size, gathered while painting,
     /// and what the script thread was last told.
     measured_bounds: Rc<std::cell::RefCell<(HashMap<NodeId, [f32; 4]>, (f32, f32))>>,
+    /// The last restyle's element styles, for the next to reuse.
+    style_cache: Arc<std::sync::Mutex<style::StyleCache>>,
     /// Bumped each time the tab paints (by an element painted before the
     /// page): bounds reported twice in one frame (a container split across
     /// rows) are unioned, and what a frame didn't paint is off screen.
@@ -291,6 +293,7 @@ impl Tab {
             restyle_queued: false,
             stale_skips: 0,
             measured_bounds: Rc::default(),
+            style_cache: Arc::default(),
             bounds_frame: Rc::default(),
             bounds_checked: 0,
             doc_gen: 0,
@@ -1627,12 +1630,18 @@ impl Tab {
             }) else { return };
             let kept = keep.clone();
             if let Ok(Some(())) = this.update(cx, |this, _| this.perf.as_mut().map(|p| p.restyles += 1)) {}
+            let Ok(cache) = this.update(cx, |this, _| this.style_cache.clone()) else { return };
             let (layout, changed, ends) = loader::deep({
                 let state = state.clone();
                 move || {
                     let t = std::time::Instant::now();
-                    let mut layout = render::build_keeping(&doc, &styles.styler_with_state(env, state), &keep);
+                    let session = cache.lock().unwrap_or_else(|e| e.into_inner()).begin(&styles, &env, doc.clone(), state.clone());
+                    let (mut layout, session) = render::build_cached(&doc, &styles.styler_with_state(env, state), &keep, Some(session));
                     let built = t.elapsed();
+                    let (reused, computed, why) = session.as_ref().map_or((0, 0, ""), |s| (s.reused, s.computed, s.why));
+                    if let Some(session) = session {
+                        cache.lock().unwrap_or_else(|e| e.into_inner()).finish(session);
+                    }
                     // Same rows: which changed. Rows added or removed: how
                     // many at either end didn't.
                     let (changed, ends) = match old {
@@ -1641,7 +1650,7 @@ impl Tab {
                         None => (Vec::new(), None),
                     };
                     if std::env::var_os("BROWSER_DEBUG").is_some() {
-                        eprintln!("perf: restyle+build {} rows in {:?} (+{:?} diffing, ends {ends:?})", layout.rows.len(), built, t.elapsed() - built);
+                        eprintln!("perf: restyle+build {} rows in {:?} (style {:?}, {reused} reused, {computed} computed {why}; +{:?} diffing, ends {ends:?})", layout.rows.len(), built, Duration::from_nanos(render::boxes::STYLE_NS.with(|c| c.get())), t.elapsed() - built);
                     }
                     (layout, changed, ends)
                 }
