@@ -1834,6 +1834,44 @@
     if (resized) { recheckMedia(); window.dispatchEvent(new Event("resize")); }
   }
 
+  // XPath (document.evaluate): evaluated natively (N.xpath gives node ids,
+  // or a string, number or boolean); the result as the type asked for.
+  const XPATH_TYPES = ["ANY_TYPE", "NUMBER_TYPE", "STRING_TYPE", "BOOLEAN_TYPE", "UNORDERED_NODE_ITERATOR_TYPE", "ORDERED_NODE_ITERATOR_TYPE",
+    "UNORDERED_NODE_SNAPSHOT_TYPE", "ORDERED_NODE_SNAPSHOT_TYPE", "ANY_UNORDERED_NODE_TYPE", "FIRST_ORDERED_NODE_TYPE"];
+  class XPathResult {
+    constructor(value, type) {
+      const nodes = Array.isArray(value);
+      type = Number(type) || (nodes ? 4 : typeof value === "number" ? 1 : typeof value === "string" ? 2 : 3);
+      if (type > 3 && !nodes) throw new TypeError("The result is not a node set, and can't be converted to one.");
+      const text = () => (nodes ? (value.length ? N.text(value[0]) : "") : value);
+      this._v = type === 1 ? Number(text()) : type === 2 ? String(text()) : type === 3 ? (nodes ? value.length > 0 : Boolean(value)) : value;
+      this._type = type; this._i = 0;
+    }
+    get resultType() { return this._type; }
+    _want(types, what) { if (!types.includes(this._type)) throw new TypeError(`The result type is not ${what}.`); }
+    get numberValue() { this._want([1], "a number"); return this._v; }
+    get stringValue() { this._want([2], "a string"); return this._v; }
+    get booleanValue() { this._want([3], "a boolean"); return this._v; }
+    get singleNodeValue() { this._want([8, 9], "a single node"); return this._v.length ? wrap(this._v[0]) : null; }
+    get invalidIteratorState() { return false; }
+    get snapshotLength() { this._want([6, 7], "a snapshot"); return this._v.length; }
+    snapshotItem(i) { this._want([6, 7], "a snapshot"); return i >= 0 && i < this._v.length ? wrap(this._v[i]) : null; }
+    iterateNext() { this._want([4, 5], "an iterator"); return this._i < this._v.length ? wrap(this._v[this._i++]) : null; }
+  }
+  XPATH_TYPES.forEach((name, i) => { XPathResult[name] = i; XPathResult.prototype[name] = i; });
+  class XPathExpression {
+    constructor(text) { this._text = String(text); N.xpath(N.root(), this._text); }
+    evaluate(context, type) { return new XPathResult(N.xpath(context ? context.__featherNode : N.root(), this._text), type); }
+  }
+  class XPathEvaluator {
+    createExpression(text) { return new XPathExpression(text); }
+    createNSResolver(node) { return node; }
+    evaluate(text, context, resolver, type) { return new XPathExpression(text).evaluate(context, type); }
+  }
+  for (const name of ["createExpression", "createNSResolver", "evaluate"]) {
+    Object.defineProperty(Document.prototype, name, { value: XPathEvaluator.prototype[name], writable: true, configurable: true });
+  }
+
   // DOM traversal (document.createTreeWalker / createNodeIterator).
   const NodeFilter = {
     FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
@@ -1940,7 +1978,7 @@
     CustomElementRegistry: class CustomElementRegistry {},
     CompositionEvent: class CompositionEvent extends UIEvent { constructor(t, i = {}) { super(t, i); this.data = i.data || ""; } },
     SubmitEvent: class SubmitEvent extends Event { constructor(t, i = {}) { super(t, i); this.submitter = i.submitter || null; } },
-    XPathResult: Object.assign(class XPathResult {}, { ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4, ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7, ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9 }),
+    XPathResult, XPathExpression, XPathEvaluator,
     VisualViewport: class VisualViewport extends EventTarget {},
     ReportingObserver: class ReportingObserver { observe() {} disconnect() {} takeRecords() { return []; } },
     CSSRule, CSSStyleRule, CSSMediaRule, CSSSupportsRule, CSSImportRule, CSSFontFaceRule, CSSKeyframesRule, CSSGroupingRule, CSSConditionRule,
@@ -2153,18 +2191,37 @@
   class XMLHttpRequest extends EventTarget {
     constructor() {
       super();
-      this.readyState = 0; this.status = 0; this.statusText = ""; this.responseText = ""; this.responseURL = "";
+      this.readyState = 0; this.status = 0; this.statusText = ""; this.responseURL = "";
       this.responseType = ""; this.timeout = 0; this.withCredentials = false; this.upload = new EventTarget();
       this._headers = new Headers(); this._response = null; this._id = 0;
     }
+    // The text, decoded by the charset `overrideMimeType` or the response
+    // gives (binary as `x-user-defined`: a character a byte, which Google
+    // Maps reads its map tiles as), when first read.
+    get responseText() {
+      if (this.responseType !== "" && this.responseType !== "text") {
+        throw new DOMException("The value is only accessible if the object's 'responseType' is '' or 'text'.", "InvalidStateError");
+      }
+      return this._decoded();
+    }
+    _decoded(utf8) {
+      if (!this._response) return "";
+      if (this._text === undefined) {
+        const charset = !utf8 && /;\s*charset\s*=\s*"?([^";\s]+)/i.exec(this._override || this.getResponseHeader("content-type") || "");
+        let decoder = utf8Decoder;
+        if (charset) { try { decoder = new TextDecoder(charset[1]); } catch (_) {} }
+        this._text = decoder.decode(this._response._bytes);
+      }
+      return this._text;
+    }
     get response() {
       if (this.readyState !== 4) return this.responseType === "" || this.responseType === "text" ? "" : null;
-      if (this.responseType === "json") { try { return JSON.parse(this.responseText); } catch (_) { return null; } }
+      if (this.responseType === "json") { try { return JSON.parse(this._decoded(true)); } catch (_) { return null; } }
       const bytes = this._response ? this._response._bytes : new Uint8Array(0);
       if (this.responseType === "arraybuffer") return bytes.slice().buffer;
       if (this.responseType === "blob") return new Blob([bytes], { type: this.getResponseHeader("content-type") || "" });
-      if (this.responseType === "document") return new DOMParser().parseFromString(this.responseText, "text/html");
-      return this.responseText;
+      if (this.responseType === "document") return new DOMParser().parseFromString(this._decoded(), "text/html");
+      return this._decoded();
     }
     get responseXML() { return this.responseType === "document" ? this.response : null; }
     open(method, url, async) {
@@ -2175,7 +2232,7 @@
       this._set(1);
     }
     setRequestHeader(k, v) { this._headers.append(k, v); }
-    overrideMimeType() {}
+    overrideMimeType(mime) { this._override = String(mime); }
     getResponseHeader(k) { return this._response ? this._response.headers.get(k) : null; }
     getAllResponseHeaders() {
       if (!this._response) return "";
@@ -2198,7 +2255,7 @@
       }
       const r = toResponse(args);
       this._response = r;
-      this.status = r.status; this.statusText = r.statusText; this.responseURL = r.url; this.responseText = utf8Decoder.decode(r._bytes);
+      this.status = r.status; this.statusText = r.statusText; this.responseURL = r.url; this._text = undefined;
       this._set(2); this._set(3); this._set(4);
       this._fire("load");
       this._fire("loadend");

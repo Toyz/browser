@@ -27,6 +27,7 @@ mod aria;
 mod headers;
 mod dom_exception;
 mod dom_geometry;
+mod xpath;
 mod structured_clone;
 mod form_data;
 mod abort;

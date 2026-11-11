@@ -1489,6 +1489,30 @@ fn install_natives(cx: &mut Context, dom: &Shared) {
             Ok(id_value(found))
         }
     }));
+    // xpath(context, expression): an array of node ids, or a string,
+    // number or boolean (`document.evaluate`).
+    add("xpath", 2, Box::new(|d, a, cx| {
+        let expr = arg_string(a, 1, cx)?;
+        let dom = d.borrow();
+        let Some(context) = arg_node(&dom, a, 0) else { return Ok(JsValue::null()) };
+        match crate::xpath::evaluate(&dom.doc, context, &expr) {
+            Ok(crate::xpath::Value::Nodes(items)) => {
+                let ids: Vec<NodeId> = items
+                    .into_iter()
+                    .filter_map(|i| match i {
+                        crate::xpath::Item::Node(n) => Some(n),
+                        crate::xpath::Item::Attr(..) => None,
+                    })
+                    .collect();
+                drop(dom);
+                Ok(id_array(ids, cx))
+            }
+            Ok(crate::xpath::Value::Str(s)) => Ok(js_str(&s)),
+            Ok(crate::xpath::Value::Num(n)) => Ok(JsValue::from(n)),
+            Ok(crate::xpath::Value::Bool(b)) => Ok(JsValue::from(b)),
+            Err(e) => Err(boa_engine::JsNativeError::syntax().with_message(format!("The string '{expr}' is not a valid XPath expression: {e}")).into()),
+        }
+    }));
     add("matches", 2, Box::new(|d, a, cx| {
         let sel = arg_string(a, 1, cx)?;
         let dom = d.borrow();

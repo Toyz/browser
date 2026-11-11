@@ -2000,3 +2000,35 @@ fn lazy_getters_replacing_themselves_read_their_values() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "out"), "336");
 }
+
+/// `document.evaluate`: XPath location paths, predicates, functions and
+/// result types.
+#[test]
+fn xpath_evaluates_paths_predicates_and_functions() {
+    let doc = run(r##"<head><link rel="preload" as="fetch" href="/a"><link rel="stylesheet" href="/b"></head>
+        <body><p id="out"></p>
+        <ul id="list"><li class="x">one</li><li>two</li><li class="x y">three</li></ul>
+        <script>
+          const r = (e, t, c) => document.evaluate(e, c || document, null, t, null);
+          const link = r("//link[@as='fetch' and @rel='preload']", XPathResult.FIRST_ORDERED_NODE_TYPE).singleNodeValue;
+          const snap = r("//li[contains(@class,'x')]", XPathResult.ORDERED_NODE_SNAPSHOT_TYPE);
+          const it = r("id('list')/li[last()]/preceding-sibling::li", XPathResult.ORDERED_NODE_ITERATOR_TYPE);
+          const firstIt = it.iterateNext().textContent;
+          let bad = "";
+          try { document.evaluate("//li[", document, null, 0, null); } catch (e) { bad = e.name; }
+          document.getElementById("out").textContent = [
+            link.getAttribute("href"),
+            snap.snapshotLength, snap.snapshotItem(1).textContent,
+            firstIt,
+            r("count(//li)", 0).numberValue,
+            r("string(//li[2])", XPathResult.STRING_TYPE).stringValue,
+            r("normalize-space(' a  b ')", 0).stringValue,
+            r("boolean(//li[@class='y'])", XPathResult.BOOLEAN_TYPE).booleanValue,
+            r("li[position()=2]/text()", XPathResult.FIRST_ORDERED_NODE_TYPE, document.getElementById("list")).singleNodeValue.nodeValue,
+            r("//li[. = 'two'] | //li[1]", XPathResult.ORDERED_NODE_SNAPSHOT_TYPE).snapshotLength,
+            r("2 * 3 + 10 div 4 - 7 mod 3", 0).numberValue,
+            bad,
+          ].join("|");
+        </script></body>"##);
+    assert_eq!(text_of(&doc, "out"), "/a|2|three|one|3|two|a b|false|two|2|7.5|SyntaxError");
+}
