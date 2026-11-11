@@ -38,6 +38,8 @@ pub(crate) struct Geometry {
     /// A forced layout went unanswered (a tab in the background doesn't
     /// paint): no more until the tab sends a layout.
     force_paused: bool,
+    /// Elements forced layouts were for, lately.
+    forced_for: HashMap<NodeId, Instant>,
 }
 
 impl Default for Geometry {
@@ -52,6 +54,7 @@ impl Default for Geometry {
             fresh: HashSet::new(),
             forced: Default::default(),
             force_paused: false,
+            forced_for: HashMap::new(),
         }
     }
 }
@@ -154,7 +157,7 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         let mut dom = d.borrow_mut();
         let new = !dom.geometry.measured.contains(&node);
         let forced = &mut dom.geometry.forced;
-        while forced.front().is_some_and(|(t, _)| t.elapsed() > Duration::from_secs(1)) {
+        while forced.front().is_some_and(|(t, ..)| t.elapsed() > Duration::from_secs(1)) {
             forced.pop_front();
         }
         let spent = forced.iter().map(|(_, d)| *d).sum::<Duration>();
@@ -168,7 +171,9 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         // came out as wide as the player and 1px tall; its seek preview
         // read 0x0 and sat on the bar).
         let g = &dom.geometry;
-        let unknown = !g.rects.contains_key(&node) || g.unpainted.contains(&node) || g.rects.get(&node).is_some_and(|r| r[2] == 0.0 || r[3] == 0.0);
+        // (One forced already and still unknown: it's hidden, not new.)
+        let tried = g.forced_for.get(&node).is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+        let unknown = !tried && (!g.rects.contains_key(&node) || g.unpainted.contains(&node) || g.rects.get(&node).is_some_and(|r| r[2] == 0.0 || r[3] == 0.0));
         // Only for what the user just did: pages read the layout of
         // everything they render, and a forced layout costs a frame or more
         // here (YouTube's comments, each measured as it came in, stalled
@@ -176,11 +181,16 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         let prompted = dom.input_at.is_some_and(|t| t.elapsed() < INPUT_WINDOW);
         // (Unknown boxes first: what was just shown is what's read wrong.)
         let narrow = prompted && changed && (unknown || spent < SHOWN_BUDGET / 2) && spent < SHOWN_BUDGET;
+        // (Not after pointer moves: each forced layout stalls the pointer a
+        // frame or more, and YouTube's seek preview still came out wrong.)
         let any = reflow_enabled() && (changed || new) && spent < FORCE_BUDGET;
         if !(narrow || any) {
             return;
         }
         dom.geometry.measured.insert(node);
+        let g = &mut dom.geometry;
+        g.forced_for.retain(|_, t| t.elapsed() < Duration::from_secs(2));
+        g.forced_for.insert(node, Instant::now());
         dom.tab.clone()
     };
     let t = Instant::now();
