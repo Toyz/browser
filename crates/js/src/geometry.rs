@@ -185,7 +185,11 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         // (The root and body change with everything, and their size seldom.)
         let root = dom.doc.parent(node).is_some_and(|p| dom.doc.element(p).is_none())
             || dom.doc.element(node).is_some_and(|e| &*e.name.local == "body");
-        let narrow = prompted && changed && (unknown || !root) && spent < SHOWN_BUDGET;
+        // A known box once per click (YouTube reads its player's size again
+        // and again after a click; each took a forced layout and the
+        // settings menu, opened after, got none).
+        let again = g.forced_for.get(&node).is_some_and(|(t, _)| t.elapsed() < INPUT_WINDOW);
+        let narrow = prompted && changed && (unknown || (!root && !again)) && spent < SHOWN_BUDGET;
         // (Not after pointer moves: each forced layout stalls the pointer a
         // frame or more, and YouTube's seek preview still came out wrong.)
         let any = reflow_enabled() && (changed || new) && spent < FORCE_BUDGET;
