@@ -135,6 +135,8 @@ pub struct Tab {
     frames: HashMap<NodeId, (Url, Entity<Tab>)>,
     /// Their views, for the renderer.
     embeds: Rc<HashMap<NodeId, AnyView>>,
+    /// A frame's size when last styled (its media queries follow it).
+    frame_size: Size<Pixels>,
     /// Bumped each time the tab paints (by an element painted before the
     /// page): bounds reported twice in one frame (a container split across
     /// rows) are unioned, and what a frame didn't paint is off screen.
@@ -257,6 +259,20 @@ pub fn media_env(window: &Window) -> style::MediaEnv {
 }
 
 impl Tab {
+    /// What the page's media queries see: the window's page area, or for a
+    /// frame, its own box once it has been drawn (the `<iframe>`'s size).
+    fn env(&self, window: &Window) -> style::MediaEnv {
+        let mut env = media_env(window);
+        if self.frame.is_some() {
+            let size = self.list_state.viewport_bounds().size;
+            if size.width > px(0.) && size.height > px(0.) {
+                env.width = f32::from(size.width);
+                env.height = f32::from(size.height);
+            }
+        }
+        env
+    }
+
     pub fn new(palette: Palette, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
@@ -304,6 +320,7 @@ impl Tab {
             frame: None,
             frames: HashMap::new(),
             embeds: Rc::default(),
+            frame_size: Size::default(),
             bounds_frame: Rc::default(),
             bounds_checked: 0,
             doc_gen: 0,
@@ -580,7 +597,7 @@ impl Tab {
 
     fn spawn_load(&mut self, url: Url, window: &Window, cx: &mut Context<Self>) -> Shared<Task<PageResult>> {
         // Media queries see the page area's size.
-        let env = media_env(window);
+        let env = self.env(window);
         let post = match self.pending_post.take() {
             Some((target, body)) if target == url => Some(body),
             other => {
@@ -1516,7 +1533,7 @@ impl Tab {
     /// The window was resized: if a media query now evaluates differently,
     /// restyle and re-lay-out the page (debounced, in the background).
     pub fn viewport_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let env = media_env(window);
+        let env = self.env(window);
         let Some(page) = &self.page else { return };
         let Some(styles) = &page.styles else { return };
         if styles.signature(&env) != page.signature {
@@ -1613,7 +1630,7 @@ impl Tab {
     /// A styler for the page as it's styled now (kept between hovers).
     fn styler(&mut self, window: &Window) -> Option<&style::Styler> {
         let styles = self.page.as_ref()?.styles.as_ref()?;
-        let env = media_env(window);
+        let env = self.env(window);
         let signature = styles.signature(&env);
         if self.hover_styler.as_ref().is_none_or(|(sig, _)| *sig != signature) {
             self.hover_styler = Some((signature, styles.styler_with_state(env, self.element_state.clone())));
@@ -1625,7 +1642,7 @@ impl Tab {
     /// `Some(None)`: nothing visible changed; `None`: needs a full restyle.
     fn patch_paint(&mut self, state: &Arc<ElementState>, window: &Window) -> Option<Option<render::LayoutTree>> {
         let page = self.page.as_ref()?;
-        let signature = page.styles.as_ref()?.signature(&media_env(window));
+        let signature = page.styles.as_ref()?.signature(&self.env(window));
         if page.signature != signature {
             return None;
         }
@@ -1674,7 +1691,7 @@ impl Tab {
                 this.update(cx, |this, _| this.restyle_busy = false).ok();
                 return;
             };
-            let Ok(env) = cx.update(|window, _| media_env(window)) else { return };
+            let Ok(env) = this.update_in(cx, |this, window, _| this.env(window)) else { return };
             let Ok(state) = this.update(cx, |this, _| Arc::new(this.current_state())) else { return };
             let signature = styles.signature(&env);
             let Ok(old) = this.update(cx, |this, _| this.page.as_ref().map(|p| p.layout.clone())) else { return };
@@ -2840,6 +2857,14 @@ impl Tab {
         }
         self.note_unpainted(cx);
         self.answer_after_layout(window);
+        // A frame drawn at a new size: its media queries see it.
+        if self.frame.is_some() {
+            let size = self.list_state.viewport_bounds().size;
+            if size != self.frame_size && size.width > px(0.) {
+                self.frame_size = size;
+                cx.defer_in(window, |this, window, cx| this.viewport_changed(window, cx));
+            }
+        }
         self.atlas_drops.extend(render::images::take_evicted());
         for old in self.atlas_drops.drain(..) {
             window.drop_image(old).ok();
