@@ -231,6 +231,10 @@ impl Tab {
             !done
         });
         self.animations.display = render::hover::apply(&page.layout, &styles).map(Arc::new);
+        if std::env::var_os("FEATHER_DEBUG_ANIM").is_some() {
+            let nodes: Vec<String> = self.animations.keyframes.iter().map(|r| format!("{:?}:{}", r.node.0, r.spec.name)).collect();
+            eprintln!("anim: {} keyframes {nodes:?}, {} transitions, display {}", self.animations.keyframes.len(), self.animations.transitions.len(), self.animations.display.is_some());
+        }
         if self.animations.is_running() {
             window.request_animation_frame();
         }

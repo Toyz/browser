@@ -176,6 +176,9 @@ pub struct Tab {
     /// A restyle is building; another was asked for meanwhile.
     restyle_busy: bool,
     restyle_queued: bool,
+    /// Restyles in a row not shown because the pointer had moved on (see
+    /// the install in `restyle`).
+    stale_skips: u8,
     /// Elements whose blocks report the pointer inside them.
     hover_blocks: HashSet<NodeId>,
     /// The inline element under the pointer, per paragraph.
@@ -280,6 +283,7 @@ impl Tab {
             _restyle: None,
             restyle_busy: false,
             restyle_queued: false,
+            stale_skips: 0,
             measured_bounds: Rc::default(),
             bounds_frame: Rc::default(),
             bounds_checked: 0,
@@ -1636,6 +1640,19 @@ impl Tab {
                 if this.page_gen != page_gen {
                     return;
                 }
+                // Built for a hover state the pointer has left already, with
+                // no newer DOM in it: shown, the old hover would flash for a
+                // frame before the next restyle (YouTube's controls blinked
+                // as the pointer crossed them). Build again for now instead,
+                // a few times at most (the page still updates while the
+                // pointer keeps moving).
+                if this.installed_gen == doc_gen && this.current_state() != *state && this.stale_skips < 4 {
+                    this.stale_skips += 1;
+                    this.restyle_queued = false;
+                    this.restyle(Duration::ZERO, window, cx);
+                    return;
+                }
+                this.stale_skips = 0;
                 let again = std::mem::take(&mut this.restyle_queued);
                 let Some(page) = &mut this.page else { return };
                 let same_shape = page.layout.rows.len() == layout.rows.len();

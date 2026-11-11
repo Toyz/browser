@@ -80,7 +80,10 @@ impl Tab {
     /// re-read only if they changed).
     fn script_dom(&mut self, doc: Arc<page::Document>, window: &mut Window, cx: &mut Context<Self>) {
         // Debugging: FEATHER_DUMP_DOM=file.html keeps the latest snapshot.
+        // (A directory: every snapshot, numbered.)
         if let Some(path) = std::env::var_os("FEATHER_DUMP_DOM") {
+            let path = std::path::PathBuf::from(path);
+            let path = if path.is_dir() { path.join(format!("dom-{:04}.html", self.doc_gen + 1)) } else { path };
             std::fs::write(path, js::to_html(&doc)).ok();
         }
         self.doc_gen += 1;

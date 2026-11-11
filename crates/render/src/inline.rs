@@ -53,7 +53,7 @@ pub struct InlineFlow {
 impl InlineFlow {
     pub fn new(para: Arc<Paragraph>, cx: &RenderCx) -> Self {
         Self {
-            id: ElementId::NamedInteger("inline".into(), para.id as u64),
+            id: ElementId::NamedInteger("inline".into(), stable_key(&para)),
             para,
             cx: RenderCx { round_clip: crate::view::current_round_clip(), stacking: crate::view::current_stacking(), ..cx.clone() },
             state: Rc::default(),
@@ -62,6 +62,33 @@ impl InlineFlow {
             rotation: crate::view::transform::inherited(),
         }
     }
+}
+
+/// What identifies a paragraph from one layout to the next: its first DOM
+/// node (and how many inline objects it has), not its id in this build,
+/// which shifts whenever the DOM before it changes. What it learned about
+/// its inline-blocks (their sizes, kept in its element state) then carries
+/// over to the next layout: keyed by the build's id, every new layout lost
+/// it and its first frame was laid out with guesses, then corrected (pills
+/// and icons jumping on each DOM update, YouTube's controls blinking).
+fn stable_key(para: &Paragraph) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let object_node = |o: &InlineObject| match o {
+        InlineObject::Block(b) => b.node,
+        InlineObject::BlockBox(b) => b.node,
+        InlineObject::Image(i) => i.node,
+    };
+    // The inline-blocks' own elements (the sizes are theirs); else its
+    // first text's element.
+    let nodes: Vec<_> = para.objects.iter().filter_map(object_node).collect();
+    let node = para.spans.iter().find_map(|s| s.style.node);
+    if nodes.is_empty() && node.is_none() {
+        return para.id as u64;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if nodes.is_empty() { node.hash(&mut h) } else { nodes.hash(&mut h) }
+    para.objects.len().hash(&mut h);
+    h.finish() | 1 << 63
 }
 
 /// Sizes inline-block subtrees got last frame (they can't be laid out from
@@ -78,6 +105,10 @@ struct BlockSize {
 }
 
 thread_local! {
+    /// What each paragraph learned about its inline-blocks' sizes (see
+    /// `stable_key`): outside GPUI's element state, whose keys include the
+    /// ancestors' ids in this build.
+    static LEARNED: RefCell<HashMap<u64, BlockSizes>> = RefCell::default();
     /// Where each paragraph's first baseline was placed last (window y), so
     /// an inline-block can find its own baseline after its subtree is laid out.
     static FIRST_BASELINES: RefCell<HashMap<usize, Pixels>> = RefCell::default();
@@ -150,6 +181,8 @@ struct FlowState {
     /// Text shaping is the expensive part of a frame; lines don't change
     /// between frames unless the layout does.
     shaped: HashMap<(Option<Pixels>, usize), Rc<ShapedLine>>,
+    /// Frames in a row its inline-blocks' sizes changed (see `prepaint`).
+    relayouts: u8,
 }
 
 /// An inline layout kept across frames (in GPUI element state): valid while
@@ -1185,9 +1218,13 @@ impl Element for InlineFlow {
         if !self.blocks.is_empty()
             && let Some(id) = id
         {
-            let sizes = window.with_element_state(id, |sizes: Option<BlockSizes>, _| {
-                let sizes = sizes.unwrap_or_default();
-                (sizes.clone(), sizes)
+            let _ = id;
+            let key = stable_key(&self.para);
+            let sizes = LEARNED.with_borrow_mut(|m| {
+                if m.len() > 4096 {
+                    m.clear();
+                }
+                m.entry(key).or_default().clone()
             });
             self.state.borrow_mut().block_sizes = sizes;
         }
@@ -1271,16 +1308,38 @@ impl Element for InlineFlow {
                     .map(|y| y - target.y)
                     .filter(|&b| b >= px(0.) && b <= actual.size.height);
             }
-            let size = BlockSize { width: actual.size.width, height: actual.size.height, baseline };
+            // A box sized by its line (a percentage or `auto` width) can't
+            // be wider than the window: in a box that shrinks to fit, its
+            // width is of a line made from its own last width, and grew
+            // every frame (doubling, with two such boxes in a line).
+            let mut width = actual.size.width;
+            if let InlineObject::BlockBox(block) = &self.para.objects[*oi as usize]
+                && !matches!(block.style.width, style::Length::Px(_))
+            {
+                width = width.min(window.viewport_size().width);
+            }
+            let size = BlockSize { width, height: actual.size.height, baseline };
             let old = sizes.borrow().get(oi).copied();
             // Not placed this frame: keep what we knew of its baseline.
             let size = BlockSize { baseline: baseline.or(old.and_then(|o| o.baseline)), ..size };
             if old.is_none_or(|o| o.width != size.width || o.height != size.height || (o.baseline.unwrap_or_default() - size.baseline.unwrap_or_default()).abs() > px(0.5)) {
+                if std::env::var_os("FEATHER_DEBUG_INLINE").is_some() {
+                    let o = old.map(|o| (f32::from(o.width), f32::from(o.height), o.baseline.map(f32::from)));
+                    eprintln!("inline {} obj {oi}: {o:?} -> {:?}", self.para.id, (f32::from(size.width), f32::from(size.height), size.baseline.map(f32::from)));
+                }
                 sizes.borrow_mut().insert(*oi, size);
                 changed = true;
             }
         }
-        if changed {
+        // Sizes that keep changing frame after frame (layout feeding back on
+        // itself) are taken as they are after a few: a page that never
+        // settles is laid out again every frame, and its lines jump about.
+        let settled = {
+            let mut state = self.state.borrow_mut();
+            state.relayouts = if changed { state.relayouts.saturating_add(1) } else { 0 };
+            state.relayouts > 4
+        };
+        if changed && !settled {
             // Re-break lines with the real sizes next frame.
             let mut state = self.state.borrow_mut();
             state.measured = None;
