@@ -38,8 +38,8 @@ pub(crate) struct Geometry {
     /// A forced layout went unanswered (a tab in the background doesn't
     /// paint): no more until the tab sends a layout.
     force_paused: bool,
-    /// Elements forced layouts were for, lately.
-    forced_for: HashMap<NodeId, Instant>,
+    /// Elements forced layouts were for, lately, and their attributes then.
+    forced_for: HashMap<NodeId, (Instant, u64)>,
 }
 
 impl Default for Geometry {
@@ -134,7 +134,7 @@ const FORCE_BUDGET: Duration = Duration::from_millis(100);
 /// them is wrong without one.
 const SHOWN_BUDGET: Duration = Duration::from_millis(600);
 /// How long after the user's input layout reads may force a layout.
-const INPUT_WINDOW: Duration = Duration::from_millis(700);
+const INPUT_WINDOW: Duration = Duration::from_millis(1000);
 /// How long a forced layout may hold up the script.
 const FORCE_WAIT: Duration = Duration::from_millis(400);
 
@@ -171,8 +171,10 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         // came out as wide as the player and 1px tall; its seek preview
         // read 0x0 and sat on the bar).
         let g = &dom.geometry;
-        // (One forced already and still unknown: it's hidden, not new.)
-        let tried = g.forced_for.get(&node).is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+        // (One forced already and still unknown, unchanged itself since: it's
+        // hidden, not new. YouTube's player has a dozen always-hidden parts
+        // that took the budget at every click.)
+        let tried = g.forced_for.get(&node).is_some_and(|(t, sig)| t.elapsed() < Duration::from_secs(30) && *sig == own_signature(&dom.doc, node));
         let unknown = !tried && (!g.rects.contains_key(&node) || g.unpainted.contains(&node) || g.rects.get(&node).is_some_and(|r| r[2] == 0.0 || r[3] == 0.0));
         // Only for what the user just did: pages read the layout of
         // everything they render, and a forced layout costs a frame or more
@@ -180,7 +182,10 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         // loading for seconds).
         let prompted = dom.input_at.is_some_and(|t| t.elapsed() < INPUT_WINDOW);
         // (Unknown boxes first: what was just shown is what's read wrong.)
-        let narrow = prompted && changed && (unknown || spent < SHOWN_BUDGET / 2) && spent < SHOWN_BUDGET;
+        // (The root and body change with everything, and their size seldom.)
+        let root = dom.doc.parent(node).is_some_and(|p| dom.doc.element(p).is_none())
+            || dom.doc.element(node).is_some_and(|e| &*e.name.local == "body");
+        let narrow = prompted && changed && (unknown || !root) && spent < SHOWN_BUDGET;
         // (Not after pointer moves: each forced layout stalls the pointer a
         // frame or more, and YouTube's seek preview still came out wrong.)
         let any = reflow_enabled() && (changed || new) && spent < FORCE_BUDGET;
@@ -188,9 +193,10 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
             return;
         }
         dom.geometry.measured.insert(node);
+        let sig = own_signature(&dom.doc, node);
         let g = &mut dom.geometry;
-        g.forced_for.retain(|_, t| t.elapsed() < Duration::from_secs(2));
-        g.forced_for.insert(node, Instant::now());
+        g.forced_for.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(30));
+        g.forced_for.insert(node, (Instant::now(), sig));
         dom.tab.clone()
     };
     let t = Instant::now();
@@ -213,6 +219,19 @@ pub(crate) fn reflow(d: &Shared, node: NodeId, cx: &mut Context) {
         let class = dom.doc.element(node).and_then(|e| e.attr("class")).unwrap_or("").chars().take(60).collect::<String>();
         eprintln!("js: forced layout for {node:?} <{tag} class={class:?}>: {} in {:?}", if laid_out { "laid out" } else { "timed out" }, t.elapsed());
     }
+}
+
+/// What of an element shows or hides it, hashed: its attributes.
+fn own_signature(doc: &page::Document, node: NodeId) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Some(e) = doc.element(node) {
+        for a in &e.attrs {
+            a.name.local.hash(&mut h);
+            a.value.hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// Where `node` is painted now: its own box if it has ever had one (not

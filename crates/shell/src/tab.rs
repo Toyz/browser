@@ -2911,6 +2911,25 @@ impl Tab {
             })
             .children(status)
             .children(self.render_auth_prompt(cx))
+            // Painted last, when every element has said where it is: scripts
+            // waiting on a forced layout go on now, not a frame later.
+            .child({
+                let tab = cx.entity().downgrade();
+                gpui::canvas(
+                    |_, _, _| {},
+                    move |_, _, window, cx| {
+                        tab.update(cx, |this, cx| {
+                            if !this.after_layout.is_empty() {
+                                this.note_unpainted(cx);
+                                this.answer_after_layout(window);
+                            }
+                        })
+                        .ok();
+                    },
+                )
+                .absolute()
+                .size_0()
+            })
     }
 }
 
