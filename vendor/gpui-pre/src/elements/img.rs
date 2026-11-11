@@ -347,7 +347,15 @@ impl Element for Img {
 
                             let image_size = data.render_size(frame_index);
 
-                            if style.aspect_ratio.is_none() {
+                            // The picture's ratio only sizes a side left
+                            // `auto` (CSS): with both given (`size_full()`),
+                            // a percentage height the layout couldn't
+                            // resolve came from the width instead, and a
+                            // stretched canvas drew at its own shape.
+                            if style.aspect_ratio.is_none()
+                                && (matches!(style.size.width, Length::Auto)
+                                    || matches!(style.size.height, Length::Auto))
+                            {
                                 style.aspect_ratio = Some(image_size.width / image_size.height);
                             }
 
