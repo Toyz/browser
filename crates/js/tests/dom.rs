@@ -2052,3 +2052,18 @@ fn canvas_drawn_from_is_drawn_as_it_was() {
         </script></body>"##);
     assert_eq!(text_of(&doc, "out"), "255,0,0|0,0,255");
 }
+
+/// `width: min(100%, 1280px)` is the percentage, no wider than the length;
+/// a later `width` undoes the cap, a later `max-width` keeps the smaller.
+#[test]
+fn min_width_of_percentage_and_length_caps() {
+    let doc = run(r##"<head><style>
+        #a { width: min(100%, 1280px) }
+        #b { width: min(100%, 1280px); width: 300px }
+        #c { width: min(100%, 1280px); max-width: 900px }
+        </style></head><body><div id="a"></div><div id="b"></div><div id="c"></div></body>"##);
+    let (a, b, c) = (computed(&doc, "a"), computed(&doc, "b"), computed(&doc, "c"));
+    assert_eq!((a.width, a.max_width), (style::Length::Percent(100.0), style::Length::Px(1280.0)));
+    assert_eq!((b.width, b.max_width), (style::Length::Px(300.0), style::Length::Auto));
+    assert_eq!((c.width, c.max_width), (style::Length::Percent(100.0), style::Length::Px(900.0)));
+}

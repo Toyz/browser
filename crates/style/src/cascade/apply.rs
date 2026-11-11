@@ -197,8 +197,30 @@ impl Styler {
             Decl::MaskSize(v) => s.mask_size = resolve_bg_size(v, &cx),
             Decl::MaskPosition(v) => s.mask_position = *v,
             Decl::Width(v) => {
+                if let Some(before) = s.width_capped.take() {
+                    s.max_width = before;
+                }
                 s.width = len(v);
                 set_mixed(s, |m| &mut m.width, v.mixed(&cx));
+                // `min(100%, 1280px)`: the percentage, no wider than the
+                // length (taken as the length alone, GitHub's header was
+                // 1280px wide in an 1100px window, its buttons off the edge).
+                if let crate::values::LenSpec::Min(items) = v {
+                    let resolved: Vec<Length> = items.iter().map(|i| i.resolve(&cx)).collect();
+                    let percents: Vec<f32> = resolved.iter().filter_map(|l| if let Length::Percent(p) = l { Some(*p) } else { None }).collect();
+                    let cap = resolved.iter().filter_map(|l| if let Length::Px(v) = l { Some(*v) } else { None }).reduce(f32::min);
+                    if let ([p], Some(cap)) = (percents.as_slice(), cap)
+                        && percents.len() + 1 <= resolved.len()
+                        && resolved.iter().all(|l| !l.is_auto())
+                    {
+                        s.width = Length::Percent(*p);
+                        s.width_capped = Some(s.max_width);
+                        s.max_width = match s.max_width {
+                            Length::Px(m) => Length::Px(m.min(cap)),
+                            _ => Length::Px(cap),
+                        };
+                    }
+                }
                 // (`width: fit-content` follows this with `FitWidth(true)`.)
                 s.fit_width = false;
             }
@@ -209,7 +231,12 @@ impl Styler {
             }
             Decl::MinHeight(v) => s.min_height = len(v),
             Decl::MaxWidth(v) => {
-                s.max_width = len(v);
+                // (After a capping `width: min(…)`, the cap still holds.)
+                s.max_width = match (s.width_capped.is_some(), len(v), s.max_width) {
+                    (true, Length::Px(new), Length::Px(cap)) => Length::Px(new.min(cap)),
+                    (true, Length::Auto, cap) => cap,
+                    (_, new, _) => new,
+                };
                 set_mixed(s, |m| &mut m.max_width, v.mixed(&cx));
             }
             Decl::MaxHeight(v) => s.max_height = len(v),
