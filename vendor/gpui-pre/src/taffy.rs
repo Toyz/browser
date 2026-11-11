@@ -612,6 +612,9 @@ impl ToTaffy<taffy::style::LengthPercentage> for DefiniteLength {
             DefiniteLength::Fraction(fraction) => {
                 taffy::style::LengthPercentage::percent(*fraction)
             }
+            DefiniteLength::Calc { fraction, pixels } => taffy::style::LengthPercentage::calc(
+                taffy::style::percent_plus_length::handle(*fraction, round_to_device_pixel(pixels.0, scale_factor)),
+            ),
         }
     }
 }
@@ -623,6 +626,9 @@ impl ToTaffy<taffy::style::LengthPercentageAuto> for DefiniteLength {
             DefiniteLength::Fraction(fraction) => {
                 taffy::style::LengthPercentageAuto::percent(*fraction)
             }
+            DefiniteLength::Calc { fraction, pixels } => taffy::style::LengthPercentageAuto::calc(
+                taffy::style::percent_plus_length::handle(*fraction, round_to_device_pixel(pixels.0, scale_factor)),
+            ),
         }
     }
 }
@@ -632,6 +638,9 @@ impl ToTaffy<taffy::style::Dimension> for DefiniteLength {
         match self {
             DefiniteLength::Absolute(length) => length.to_taffy(rem_size, scale_factor),
             DefiniteLength::Fraction(fraction) => taffy::style::Dimension::percent(*fraction),
+            DefiniteLength::Calc { fraction, pixels } => taffy::style::Dimension::calc(
+                taffy::style::percent_plus_length::handle(*fraction, round_to_device_pixel(pixels.0, scale_factor)),
+            ),
         }
     }
 }

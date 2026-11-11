@@ -534,6 +534,7 @@ features = [
     "block_layout",
     "float_layout",
     "content_size",
+    "calc",
 ]
 default-features = false
 

@@ -124,6 +124,10 @@ Drop these when Boa releases include equivalent fixes.
   deferred with (paint already did): a positioned box inside a positioned
   box was deferred while its parent prepainted with no mask, escaping its
   ancestors' `overflow: hidden` (YouTube's volume slider over the time).
+- `src/geometry.rs`, `src/taffy.rs`, `Cargo.toml` (taffy's `calc` feature):
+  `DefiniteLength::Calc { fraction, pixels }`, a percentage plus pixels
+  (`calc(100% - 34rem)`), handed to taffy as a calc value and resolved
+  against the real containing block (Twitch's player beside its chat).
 - `src/style.rs`: `AlignContent::SafeCenter` (taffy's `SAFE_CENTER`): CSS
   `safe center`, centered unless it overflows, then at the start (how
   buttons center their content).
@@ -153,3 +157,9 @@ Drop these when Boa releases include equivalent fixes.
   and `Textarea`, used instead of the theme's caret when projecting the
   editor style. Fields in web pages are drawn in the page's colors; with the
   app in dark mode the theme's caret was white, invisible in a white field.
+
+## taffy 0.15.0
+
+- `src/style/mod.rs` (`percent_plus_length`), `src/tree/taffy_tree.rs`:
+  `calc()` handles that are a fraction of the basis plus a length (interned,
+  8-aligned), resolved by `TaffyTree::resolve_calc_value` (it returned 0).

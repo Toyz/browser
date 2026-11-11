@@ -1,5 +1,41 @@
 //! A typed representation of [CSS style properties](https://css-tricks.com/snippets/css/a-guide-to-flexbox/) in Rust. Used as input to layout computation.
 mod alignment;
+/// (Feather) `calc(<percentage> + <length>)` values, for `calc()` handles.
+pub mod percent_plus_length {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// `fraction` of the basis plus `length`. Aligned to 8: the low 3 bits
+    /// of a calc handle are taffy's tag.
+    #[repr(C, align(8))]
+    pub struct PercentPlusLength {
+        /// Of the basis, 0 to 1.
+        pub fraction: f32,
+        pub length: f32,
+    }
+
+    static INTERNED: Mutex<Option<HashMap<(u32, u32), usize>>> = Mutex::new(None);
+
+    /// The handle for `fraction` + `length`: one allocation per distinct
+    /// value, kept for the process (there are few).
+    pub fn handle(fraction: f32, length: f32) -> *const () {
+        let mut map = INTERNED.lock().unwrap_or_else(|e| e.into_inner());
+        let addr = *map
+            .get_or_insert_with(HashMap::new)
+            .entry((fraction.to_bits(), length.to_bits()))
+            .or_insert_with(|| Box::leak(Box::new(PercentPlusLength { fraction, length })) as *const PercentPlusLength as usize);
+        addr as *const ()
+    }
+
+    /// What a handle made by [`handle`] comes to against `basis`.
+    pub fn resolve(handle: *const (), basis: f32) -> f32 {
+        #[allow(unsafe_code)]
+        // SAFETY: calc handles here are only ever made by `handle`, which
+        // leaks its values: valid and aligned for the life of the process.
+        let value = unsafe { &*(handle as *const PercentPlusLength) };
+        basis * value.fraction + value.length
+    }
+}
 mod available_space;
 mod compact_length;
 mod dimension;

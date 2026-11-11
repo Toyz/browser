@@ -3480,6 +3480,14 @@ pub enum DefiniteLength {
     Absolute(AbsoluteLength),
     /// A relative length specified as a fraction of the parent's size, between 0 and 1.
     Fraction(f32),
+    /// (Feather) a fraction of the parent's size plus pixels: CSS
+    /// `calc(100% - 34rem)`, resolved by the layout against the real base.
+    Calc {
+        /// Of the parent's size, 0 to 1.
+        fraction: f32,
+        /// Added (negative to subtract).
+        pixels: Pixels,
+    },
 }
 
 impl DefiniteLength {
@@ -3518,6 +3526,9 @@ impl DefiniteLength {
                 AbsoluteLength::Pixels(px) => px * fraction,
                 AbsoluteLength::Rems(rems) => rems * rem_size * fraction,
             },
+            DefiniteLength::Calc { fraction, pixels } => {
+                DefiniteLength::Fraction(fraction).to_pixels(base_size, rem_size) + pixels
+            }
         }
     }
 }
@@ -3533,6 +3544,7 @@ impl Display for DefiniteLength {
         match self {
             DefiniteLength::Absolute(length) => write!(f, "{length}"),
             DefiniteLength::Fraction(fraction) => write!(f, "{}%", (fraction * 100.0) as i32),
+            DefiniteLength::Calc { fraction, pixels } => write!(f, "calc({}% + {pixels})", fraction * 100.0),
         }
     }
 }
@@ -3940,6 +3952,7 @@ impl IsZero for DefiniteLength {
         match self {
             DefiniteLength::Absolute(length) => length.is_zero(),
             DefiniteLength::Fraction(fraction) => *fraction == 0.,
+            DefiniteLength::Calc { fraction, pixels } => *fraction == 0. && pixels.is_zero(),
         }
     }
 }

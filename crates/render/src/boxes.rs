@@ -2021,21 +2021,39 @@ impl Builder<'_> {
         // `calc(100% - 32px)` widths, against our guess at the containing
         // block (the layout only takes one or the other: alone, the
         // percentage made BBC's page as wide as the window, margins and all).
+        // (An absolute box too, its containing block taken as its parent's
+        // width: Twitch's player, `calc(100% - 34rem)` beside its chat,
+        // covered the chat at 100%. A fixed one's is the viewport.)
         if let Some(mixed) = style.mixed_widths.clone()
-            && !matches!(style.position, style::Position::Absolute | style::Position::Fixed)
             && self.avail > 0.0
         {
-            let avail = self.avail;
+            let avail = if style.position == style::Position::Fixed { self.styler.env().width } else { self.avail };
             let at = |(px, pct): (f32, f32)| Length::Px((avail * pct / 100.0 + px).max(0.0));
             let st = Arc::make_mut(&mut style);
-            if let Some(m) = mixed.width {
-                st.width = at(m);
+            let positioned = matches!(st.position, style::Position::Absolute | style::Position::Fixed);
+            match mixed.width {
+                // Positioned, `calc(100% - X)` from a left offset: exactly
+                // `right: X - left`, whatever the containing block's width.
+                Some((x, pct)) if positioned && pct == 100.0 && st.inset.right.is_auto() && !st.inset.left.is_auto() && matches!(st.inset.left, Length::Px(_)) => {
+                    st.inset.right = Length::Px(-x - st.inset.left.px_or_zero());
+                    st.width = Length::Auto;
+                }
+                Some((x, pct)) if positioned && pct == 100.0 && st.inset.left.is_auto() && matches!(st.inset.right, Length::Px(_)) => {
+                    st.inset.left = Length::Px(-x - st.inset.right.px_or_zero());
+                    st.width = Length::Auto;
+                }
+                // (Other positioned ones: `calc()` in the layout, see the view.)
+                Some(_) if positioned => {}
+                Some(m) => st.width = at(m),
+                None => {}
             }
-            if let Some(m) = mixed.min_width {
-                st.min_width = at(m);
-            }
-            if let Some(m) = mixed.max_width {
-                st.max_width = at(m);
+            if !positioned {
+                if let Some(m) = mixed.min_width {
+                    st.min_width = at(m);
+                }
+                if let Some(m) = mixed.max_width {
+                    st.max_width = at(m);
+                }
             }
         }
         let through = std::mem::take(&mut self.viewport_sized);

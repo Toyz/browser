@@ -402,8 +402,9 @@ where
     }
 
     #[inline(always)]
-    fn resolve_calc_value(&self, _val: *const (), _basis: f32) -> f32 {
-        0.0
+    fn resolve_calc_value(&self, val: *const (), basis: f32) -> f32 {
+        // (Feather) `calc(% + length)` (see `style::percent_plus_length`).
+        crate::style::percent_plus_length::resolve(val, basis)
     }
 
     #[inline(always)]

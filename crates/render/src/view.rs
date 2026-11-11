@@ -415,6 +415,21 @@ fn apply_box(el: Div, s: &ComputedStyle, margin: Edges<CssLength>, cx: &RenderCx
         .when(!s.min_height.is_auto(), |d| d.min_h(len(box_height(s, s.min_height))))
         .when(!s.max_width.is_auto(), |d| d.max_w(len(box_width(s, s.max_width))))
         .when(!s.max_height.is_auto(), |d| d.max_h(len(box_height(s, s.max_height))))
+        // A positioned box's `calc(100% - 34rem)`: resolved by the layout
+        // against its containing block (which the builder doesn't know).
+        .when_some(s.mixed_widths.as_ref().filter(|_| matches!(s.position, style::Position::Absolute | style::Position::Fixed)), |mut d, m| {
+            let calc = |(px_, pct): (f32, f32)| gpui_kit::Length::Definite(gpui_kit::DefiniteLength::Calc { fraction: pct / 100.0, pixels: px(px_) });
+            if let Some(w) = m.width {
+                d.style().size.width = Some(calc(w));
+            }
+            if let Some(w) = m.min_width {
+                d.style().min_size.width = Some(calc(w));
+            }
+            if let Some(w) = m.max_width {
+                d.style().max_size.width = Some(calc(w));
+            }
+            d
+        })
         .when(s.overflow != Overflow::Visible, |d| d.overflow_hidden())
         .when(s.opacity < 1.0, |d| d.opacity(s.opacity))
         // `aspect-ratio`: the missing side follows the given one.
