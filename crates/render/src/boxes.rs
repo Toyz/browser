@@ -642,6 +642,10 @@ pub struct WrapperEdge {
 pub enum Pin {
     /// `position: fixed`: over the viewport, always.
     Fixed,
+    /// `position: absolute` with no positioned ancestor (or only `html` /
+    /// `body`): placed in the initial containing block, the viewport's size
+    /// at the top of the page, so it scrolls with the page.
+    Page,
     /// `position: sticky`: drawn in its place (`node`), and pinned `top`
     /// px from the top of the view while the page is scrolled past that
     /// place, until the end of `container` (its parent) comes up.
@@ -658,6 +662,10 @@ pub struct Pinned {
 impl Pinned {
     pub fn is_fixed(&self) -> bool {
         self.pin == Pin::Fixed
+    }
+
+    pub fn is_page(&self) -> bool {
+        self.pin == Pin::Page
     }
 }
 
@@ -745,6 +753,7 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
         positioned: 0,
         opacity: 1.0,
         fixed: Vec::new(),
+        page_absolutes: Vec::new(),
         in_fixed: 0,
         hoisted: Vec::new(),
         avail: styler.env().width,
@@ -760,12 +769,18 @@ pub fn build_keeping(doc: &Document, styler: &Styler, keep: &HashSet<NodeId>) ->
     let root = builder.build_block(doc.root(), root_style, BlockKind::Normal, None, Generated::default());
     let canvas = builder.canvas;
     let fixed = std::mem::take(&mut builder.fixed);
+    let page_absolutes = std::mem::take(&mut builder.page_absolutes);
     let mut tree = flatten(root, keep);
     tree.canvas = canvas;
-    for b in &fixed {
+    for b in fixed.iter().chain(&page_absolutes) {
         collect_images(b, &mut tree.fixed_images);
     }
-    tree.pinned = fixed.into_iter().map(|content| Pinned { pin: Pin::Fixed, content }).chain(std::mem::take(&mut builder.sticky)).collect();
+    tree.pinned = fixed
+        .into_iter()
+        .map(|content| Pinned { pin: Pin::Fixed, content })
+        .chain(page_absolutes.into_iter().map(|content| Pinned { pin: Pin::Page, content }))
+        .chain(std::mem::take(&mut builder.sticky))
+        .collect();
     tree
 }
 
@@ -812,6 +827,8 @@ struct Builder<'a> {
     positioned: usize,
     /// `position: fixed` boxes, rendered over the viewport.
     fixed: Vec<LayoutBox>,
+    /// Absolute boxes anchored to the page (see `Pin::Page`).
+    page_absolutes: Vec<LayoutBox>,
     /// How many fixed boxes that are stacking contexts the box being built
     /// is inside.
     in_fixed: u32,
@@ -2535,9 +2552,19 @@ impl Builder<'_> {
                     continue;
                 }
                 style::Position::Absolute => {
-                    // Anchored to the page itself: mostly off-screen tricks and
-                    // overlays; not supported yet.
+                    // Anchored to the page itself (no positioned ancestor, or
+                    // `html`/`body`): drawn over the page by the tab, placed
+                    // in the initial containing block. (Visually hidden text,
+                    // 1px and clipped, isn't drawn at all.)
                     if self.positioned == 0 {
+                        let tiny = |l: Length| matches!(l, Length::Px(v) if v <= 1.0);
+                        if (tiny(style.width) || tiny(style.height)) && style.overflow != style::Overflow::Visible {
+                            continue;
+                        }
+                        let kind = block_kind_for(style.display);
+                        let generated = self.generated(child, &style);
+                        let block = self.build_block(child, style, kind, link, generated);
+                        self.page_absolutes.push(LayoutBox::Block(block));
                         continue;
                     }
                     let kind = block_kind_for(style.display);
@@ -4317,7 +4344,7 @@ mod tests {
             .iter()
             .filter_map(|p| match p.pin {
                 Pin::Sticky { node, container, top } => Some((node, container, top)),
-                Pin::Fixed => None,
+                Pin::Fixed | Pin::Page => None,
             })
             .collect();
         assert_eq!(sticky.len(), 1);

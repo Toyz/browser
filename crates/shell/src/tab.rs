@@ -1728,6 +1728,19 @@ impl Tab {
             let record_frames = async |cx: &mut AsyncWindowContext| {
                 for frame in 0..job.frames {
                     let path = job.frame_path(frame);
+                    // With --mouse: the pointer moves along the points over
+                    // the frames (hover effects, as a window gets them).
+                    if job.mouse.len() >= 2 {
+                        let t = frame as f32 / (job.frames.max(2) - 1) as f32 * (job.mouse.len() - 1) as f32;
+                        let i = (t.floor() as usize).min(job.mouse.len() - 2);
+                        let f = t - i as f32;
+                        let (a, b) = (job.mouse[i], job.mouse[i + 1]);
+                        let position = point(px(a.0 + (b.0 - a.0) * f), px(a.1 + (b.1 - a.1) * f));
+                        cx.update(|window, cx| {
+                            window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position, pressed_button: None, modifiers: Modifiers::default() }), cx);
+                        })
+                        .ok();
+                    }
                     if job.frame_scroll != 0.0 {
                         this.update(cx, |this, cx| {
                             this.list_state.scroll_by(px(job.frame_scroll));
@@ -1747,7 +1760,7 @@ impl Tab {
                 println!("saved {} frames", job.frames);
                 cx.update(|_, cx| cx.quit()).ok();
             };
-            if job.frames > 0 && job.click.is_none() {
+            if job.frames > 0 && job.click.is_none() && job.mouse.len() < 2 {
                 record_frames(cx).await;
                 return;
             }
@@ -1790,6 +1803,10 @@ impl Tab {
                 .ok();
             }
             cx.background_executor().timer(settle).await;
+            if job.frames > 0 && job.mouse.len() >= 2 && job.click.is_none() {
+                record_frames(cx).await;
+                return;
+            }
             for &(x, y) in &job.mouse {
                 // Draw so hitboxes exist, then hover the point; time until
                 // the frame that shows it is drawn.
@@ -2208,6 +2225,8 @@ impl Tab {
 
         // Mid-animation, the frame's in-between styles.
         let layout = self.animations.display.clone().unwrap_or_else(|| page.layout.clone());
+        // (Pinned boxes animate too: their frames are in it.)
+        let shown = layout.clone();
         let rcx = self.render_cx(cx);
         let rcx_fixed = rcx.clone();
         let rcx_sticky = rcx.clone();
@@ -2231,16 +2250,31 @@ impl Tab {
                 .size_full(),
             )
             .vertical_scrollbar(&self.list_state)
+            // Absolute boxes anchored to the page: in the initial containing
+            // block (the viewport's size, at the top of the page), so they
+            // scroll with it.
+            .when(shown.pinned.iter().any(|p| p.is_page()), |d| {
+                let list_top = f32::from(self.list_state.viewport_bounds().origin.y) - crate::CHROME_HEIGHT;
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(list_top - self.scroll_y()))
+                        .left_0()
+                        .w_full()
+                        .h(self.list_state.viewport_bounds().size.height)
+                        .children(shown.pinned.iter().filter(|p| p.is_page()).map(|p| render::render_fixed(&p.content, &rcx_fixed))),
+                )
+            })
             // `position: fixed` boxes, pinned over the viewport.
             .children(self.pinned_sticky(&rcx_sticky))
-            .when(page.layout.pinned.iter().any(|p| p.is_fixed()), |d| {
+            .when(shown.pinned.iter().any(|p| p.is_fixed()), |d| {
                 d.child(
                     div()
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full()
-                        .children(page.layout.pinned.iter().filter(|p| p.is_fixed()).map(|p| render::render_fixed(&p.content, &rcx_fixed))),
+                        .children(shown.pinned.iter().filter(|p| p.is_fixed()).map(|p| render::render_fixed(&p.content, &rcx_fixed))),
                 )
             })
             .into_any_element()
