@@ -1431,7 +1431,7 @@ impl Builder<'_> {
             .collect();
         let (mut r, mut c) = (0, 0);
         for child in auto {
-            let span = match &child {
+            let mut span = match &child {
                 LayoutBox::Block(b) => match b.style.grid_column {
                     Some(GridSpan::Span(n)) => (n as usize).min(ncols),
                     Some(GridSpan::Full) => ncols,
@@ -1439,9 +1439,33 @@ impl Builder<'_> {
                 },
                 _ => 1,
             };
+            // `grid-column-start: 2` (Reddit's feed, beside its fixed left
+            // nav): that column, on this row if it's still ahead, else the next.
+            let start = match &child {
+                LayoutBox::Block(b) => match &b.style.grid_column_lines {
+                    (style::GridLine::Line(n), end) if *n > 0 => {
+                        let from = (*n as usize - 1).min(ncols - 1);
+                        span = match end {
+                            style::GridLine::Line(m) if *m > *n => (*m - *n) as usize,
+                            style::GridLine::Span(k) => *k as usize,
+                            _ => span,
+                        }
+                        .clamp(1, ncols - from);
+                        Some(from)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(from) = start {
+                if c > from {
+                    r += 1;
+                }
+                c = from;
+            }
             loop {
                 if c + span > ncols {
-                    (r, c) = (r + 1, 0);
+                    (r, c) = (r + 1, start.unwrap_or(0));
                 }
                 if (c..c + span).all(|cc| !taken.contains(&(r, cc))) {
                     break;
@@ -1537,8 +1561,14 @@ impl Builder<'_> {
                         }).fold(0.0, f32::max).min(320.0)
                     }
                 };
-                let mut left = 0.0;
-                let mut right = 0.0;
+                // Empty fixed tracks keep their room (Reddit's 315px column
+                // for its left nav, which is `position: fixed`, so not in it).
+                let used = |cc: usize| groups.iter().any(|((c, n), _)| (*c..*c + *n).contains(&cc));
+                let empty = |cols: std::ops::Range<usize>| -> f32 {
+                    cols.filter(|&cc| !used(cc)).map(|cc| match tracks[cc] { Track::Px(v) => v + gap, _ => 0.0 }).sum()
+                };
+                let mut left = empty(0..mc);
+                let mut right = empty(mc + mn..ncols);
                 let mut sides = Vec::new();
                 let mut main_items = Vec::new();
                 for (i, ((c, n), items)) in groups.into_iter().enumerate() {
@@ -2312,6 +2342,20 @@ impl Builder<'_> {
         // its auto column took the content's max-content width, pictures
         // sized in percentages at their natural size and all: BBC's
         // `justify-items: center` wrapper made its front page 1296px wide.)
+        if kind == BlockKind::Grid
+            && let Ok(want) = std::env::var("FEATHER_DEBUG_GRID")
+            && self.doc.element(id).and_then(|e| e.attr("class")).is_some_and(|c| c.contains(want.as_str()))
+        {
+            eprintln!(
+                "grid {id:?}: template {:?} tracks {:?} cols {:?} single {} real {} children {:?}",
+                style.grid_template_columns,
+                style.grid_tracks,
+                style.grid_columns,
+                single_column_grid(&style, &children),
+                needs_real_grid(&children),
+                children.iter().map(|c| match c { LayoutBox::Block(b) => format!("{:?}/{:?} {:?}", b.style.grid_column_lines.0, b.style.grid_column_lines.1, b.style.position), _ => "inline".into() }).collect::<Vec<_>>()
+            );
+        }
         let kind = if kind == BlockKind::Grid && single_column_grid(&style, &children) {
             let st = Arc::make_mut(&mut style);
             st.flex_direction = style::FlexDirection::Column;
