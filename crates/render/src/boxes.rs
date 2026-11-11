@@ -2361,6 +2361,25 @@ impl Builder<'_> {
                 }
             }
         }
+        // A flex column's items not stretched across it (`align-items:
+        // center`) are as wide as their content, but no wider than the
+        // column: fit-content. Capped here (taffy gave them their whole
+        // max-content width: Google News's page, centered at 2421px in a
+        // 940px column, started off the left edge).
+        if kind == BlockKind::Flex && matches!(style.flex_direction, FlexDirection::Column | FlexDirection::ColumnReverse) {
+            for child in &mut children {
+                if let LayoutBox::Block(b) = child {
+                    let align = b.style.align_self.or(style.align_items);
+                    if matches!(align, Some(Align::Center | Align::Start | Align::End | Align::Baseline))
+                        && b.style.width.is_auto()
+                        && b.style.max_width.is_auto()
+                        && !matches!(b.style.position, style::Position::Absolute | style::Position::Fixed)
+                    {
+                        Arc::make_mut(&mut b.style).max_width = Length::Percent(100.0);
+                    }
+                }
+            }
+        }
         if kind == BlockKind::Table {
             layout_table(&mut children);
         }
