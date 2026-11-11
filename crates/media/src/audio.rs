@@ -20,6 +20,15 @@ struct Shared {
     /// `f32` bits.
     volume: AtomicU32,
     paused: AtomicBool,
+    /// When the device last asked for sound (ms since `EPOCH`; 0: never).
+    asked_at: AtomicU64,
+}
+
+/// What `asked_at` counts from.
+static EPOCH: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+fn now_ms() -> u64 {
+    EPOCH.elapsed().as_millis() as u64 + 1
 }
 
 pub(crate) struct Output {
@@ -30,6 +39,7 @@ pub(crate) struct Output {
     pub rate: u32,
     pub channels: u16,
     resampler: Resampler,
+    opened: u64,
 }
 
 impl Output {
@@ -52,7 +62,8 @@ impl Output {
             other => return Err(anyhow!("audio format {other:?}")),
         };
         stream.play()?;
-        Ok(Output { shared, _stream: stream, rate: config.sample_rate, channels, resampler: Resampler::default() })
+        let opened = now_ms();
+        Ok(Output { shared, _stream: stream, rate: config.sample_rate, channels, resampler: Resampler::default(), opened })
     }
 
     /// Queue a decoded chunk (converted to the device's rate and channels).
@@ -79,6 +90,13 @@ impl Output {
         self.resampler = Resampler::default();
     }
 
+    /// How long the device hasn't asked for sound (since it opened, if
+    /// it never has): one that stopped (asleep, gone) keeps no time.
+    pub fn silent_for(&self) -> std::time::Duration {
+        let asked = self.shared.asked_at.load(Ordering::Relaxed).max(self.opened);
+        std::time::Duration::from_millis(now_ms().saturating_sub(asked))
+    }
+
     pub fn set_paused(&self, paused: bool) {
         self.shared.paused.store(paused, Ordering::Relaxed);
     }
@@ -92,6 +110,14 @@ impl Output {
 /// ran dry: the clock then stands still until more comes).
 fn fill<T: Copy>(s: &Shared, channels: u16, out: &mut [T], convert: impl Fn(f32) -> T) {
     let silence = convert(0.0);
+    s.asked_at.store(now_ms(), Ordering::Relaxed);
+    if std::env::var_os("MEDIA_DEBUG").is_some() {
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        let n = CALLS.fetch_add(1, Ordering::Relaxed);
+        if n.is_power_of_two() {
+            eprintln!("media: audio callback #{n} ({} samples, paused {}, queued {})", out.len(), s.paused.load(Ordering::Relaxed), s.queue.lock().map(|q| q.len()).unwrap_or(0));
+        }
+    }
     if s.paused.load(Ordering::Relaxed) {
         out.fill(silence);
         return;

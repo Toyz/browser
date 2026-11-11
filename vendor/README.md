@@ -5,7 +5,12 @@ workspace `Cargo.toml`. Changes are marked `Feather:` in the source.
 
 ## boa_ast 0.22.0
 
-Three changes.
+Four changes.
+
+**Classes know their source span** (`src/function/class.rs`):
+`ClassDeclaration` and `ClassExpression` carry the span of their source text
+(`with_linear_span`, set by the parser), so `toString()` of a class gives its
+source as the spec says, not `function X() { [native code] }`.
 
 **Large node variants are boxed** (`src/expression/mod.rs`,
 `src/statement/mod.rs`, `src/declaration/mod.rs`). Every `Expression` was as
@@ -40,10 +45,25 @@ which broke GitHub's React app). The fix marks every enclosing function scope.
 
 ## boa_parser 0.22.0
 
-Vendored only to follow the boxed `boa_ast` variants above: the places that
-build them directly wrap the node in `Box::new` (or go through `From`).
+Vendored to follow the boxed `boa_ast` variants above: the places that
+build them directly wrap the node in `Box::new` (or go through `From`). And
+`ClassTail` returns where the class's closing `}` ends, for the class
+declaration and expression parsers to record their source span.
 
 ## boa_engine 0.22.0
+
+- `src/bytecompiler/class.rs`: a class constructor's code keeps the class's
+  source text (see `boa_ast`), so `Function.prototype.toString` returns it.
+- `src/builtins/function/mod.rs` (`Function.prototype.toString`): functions
+  compiled from a `feather:` source path (the browser's own prelude) are
+  built-in functions to the page: `function name() { [native code] }`, as
+  Web IDL operations and accessors print in browsers.
+- `src/vm/mod.rs`, `src/vm/opcode/call/mod.rs`,
+  `src/vm/opcode/get/property.rs` (`JS_TRACE_ERRORS`): every error the engine
+  raises, caught or not, logged once with its script position; calling a
+  non-function says what was called, on what, and the last property read.
+- `src/builtins/eval/mod.rs` (`JS_DUMP_EVAL=DIR`, `JS_DUMP_EVAL_MIN`): saves
+  `eval()`'d sources for debugging.
 
 - `src/builtins/array_buffer/mod.rs`, `src/object/builtins/jsarraybuffer.rs`:
   an `ArrayBuffer` can view bytes it doesn't own (`ExternalBytes`,

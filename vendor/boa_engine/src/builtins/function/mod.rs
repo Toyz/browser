@@ -881,6 +881,18 @@ impl BuiltInFunctionObject {
             .ok_or_else(|| JsNativeError::typ().with_message("not a function"))?;
 
         let code = function.codeblock();
+        // (Feather) The browser's own functions (its JavaScript, at a
+        // `feather:` path) are built-in functions to the page: native.
+        if let crate::vm::source_info::SourcePath::Path(path) = code.path()
+            && path.to_str().is_some_and(|p| p.starts_with("feather:"))
+        {
+            drop(function);
+            let name = match object.get(js_string!("name"), &mut *context)? {
+                v if v.is_string() => v.to_string(context)?,
+                _ => js_string!(),
+            };
+            return Ok(js_string!(js_str!("function "), &name, js_str!("() { [native code] }")).into());
+        }
         if let Some(code_points) = code.source_info().text_spanned().to_code_points() {
             return Ok(JsString::from(code_points).into());
         }

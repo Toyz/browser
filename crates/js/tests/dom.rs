@@ -1951,3 +1951,27 @@ fn form_elements_is_a_controls_collection() {
     </script></body>"##);
     assert_eq!(text_of(&doc, "o"), "4 solution SELECT t outside  42");
 }
+
+#[test]
+fn platform_functions_and_objects_read_as_built_ins() {
+    let doc = run(r##"<body><p id="out"></p>
+        <script>
+          const s = (f) => Function.prototype.toString.call(f);
+          let calls = 0;
+          class Mine { constructor() { calls++; } }
+          const title = Object.getOwnPropertyDescriptor(Document.prototype, "title").get;
+          const tag = (o) => Object.prototype.toString.call(o);
+          document.getElementById("out").textContent = [
+            s(document.createElement), s(title), s(Function.prototype.toString),
+            s(Mine), String(calls),
+            tag(document), tag(navigator), tag(location), tag(localStorage), tag(window),
+            navigator instanceof Navigator, String(navigator.plugins.length),
+          ].join("|");
+        </script></body>"##);
+    assert_eq!(
+        text_of(&doc, "out"),
+        "function createElement() { [native code] }|function get title() { [native code] }|function toString() { [native code] }|\
+         class Mine { constructor() { calls++; } }|0|\
+         [object HTMLDocument]|[object Navigator]|[object Location]|[object Storage]|[object Window]|true|0"
+    );
+}

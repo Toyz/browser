@@ -393,7 +393,7 @@ impl Runtime {
         if let Some(native) = cx.global_object().get(js_string!("__native"), &mut cx).ok().and_then(|n| n.as_object()) {
             crate::encoding::register(&mut cx, &native);
         }
-        if let Err(e) = cx.eval(Source::from_bytes(PRELUDE)) {
+        if let Err(e) = cx.eval(Source::from_bytes(PRELUDE).with_path(std::path::Path::new("feather:prelude"))) {
             eprintln!("js prelude failed: {e}");
         }
         crate::abort::link(&mut cx);
@@ -401,6 +401,7 @@ impl Runtime {
         crate::media_source::link(&mut cx);
         crate::forms::link(&mut cx);
         crate::media_element::link(canvas_out.clone(), updates.clone(), &mut cx);
+        crate::interfaces::tag(&mut cx);
         let mut rt = Runtime { canvas_out, hover: None, cx, dom, rx, backlog: Default::default(), updates, opts, modules, hooks, flush_at: None, started: Instant::now() };
         rt.dom.borrow_mut().dirty = false;
         if let Some(v) = rt.opts.viewport {

@@ -103,6 +103,16 @@ impl Eval {
         let Some(x) = x.as_string() else {
             return Ok(x.clone());
         };
+        // (Feather) JS_DUMP_EVAL=DIR: keep each sizeable evaluated source.
+        if let Some(dir) = std::env::var_os("JS_DUMP_EVAL")
+            && x.len() > std::env::var("JS_DUMP_EVAL_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+        {
+            use std::hash::{Hash, Hasher};
+            let text = x.to_std_string_escaped();
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut h);
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("eval-{:016x}.js", h.finish())), text);
+        }
 
         // Because of implementation details the following code differs from the spec.
 

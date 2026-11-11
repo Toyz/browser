@@ -53,6 +53,13 @@ pub(crate) mod opcode;
 pub(crate) mod shadow_stack;
 pub(crate) mod source_info;
 
+/// (Feather) JS_TRACE_ERRORS: log errors the engine raises, with context.
+pub(crate) static TRACE_ERRORS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("JS_TRACE_ERRORS").is_some());
+thread_local! {
+    /// (Feather, JS_TRACE_ERRORS) The last property key read.
+    pub(crate) static LAST_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
 
@@ -836,6 +843,22 @@ impl Context {
             return ControlFlow::Break(CompletionRecord::Throw(err));
         }
 
+        // (Feather) JS_TRACE_ERRORS: every error the engine raises, caught
+        // or not, once per message and function: what a page's script
+        // tripped over even when it catches it.
+        if let Some(native) = err.as_native() {
+            static TRACE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("JS_TRACE_ERRORS").is_some());
+            if *TRACE {
+                thread_local!(static SEEN: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::default());
+                let frame = self.vm.frame();
+                let code = frame.code_block();
+                let at = code.source_info().map().find(frame.pc.saturating_sub(1)).map(|p| format!(":{}:{}", p.line_number(), p.column_number())).unwrap_or_default();
+                let line = format!("{} [in {} {}{at}]", native, code.name().to_std_string_escaped(), code.path());
+                if SEEN.with(|s| s.borrow_mut().insert(line.clone())) {
+                    eprintln!("js error: {line}");
+                }
+            }
+        }
         if let Some(native) = err.as_native_mut()
             && let ErrorStack::Position(position) = &mut native.stack.0
         {

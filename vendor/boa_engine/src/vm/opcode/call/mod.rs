@@ -190,6 +190,9 @@ impl Call {
             .calling_convention_get_function(argument_count.into());
 
         let Some(object) = func.as_object() else {
+            if std::env::var_os("JS_TRACE_ERRORS").is_some() {
+                return Err(Self::describe_not_callable(argument_count.into(), context));
+            }
             return Err(Self::handle_not_callable());
         };
 
@@ -203,6 +206,45 @@ impl Call {
     fn handle_not_callable() -> JsError {
         JsNativeError::typ()
             .with_message("not a callable function")
+            .into()
+    }
+
+    /// (Feather, JS_TRACE_ERRORS) What was called, on what: the receiver's
+    /// constructor and the arguments' types.
+    #[cold]
+    #[inline(never)]
+    fn describe_not_callable(argument_count: usize, context: &mut Context) -> JsError {
+        let stack = &context.vm.stack;
+        let func = stack.calling_convention_get_function(argument_count).clone();
+        let this = stack.stack[stack.stack.len() - 2 - argument_count].clone();
+        let args: Vec<JsValue> = stack.stack[stack.stack.len() - argument_count..].to_vec();
+        let describe = |v: &JsValue, context: &mut Context| -> String {
+            match v.as_object() {
+                Some(o) => {
+                    let ctor = o
+                        .get(crate::js_string!("constructor"), context)
+                        .ok()
+                        .and_then(|c| c.as_object())
+                        .and_then(|c| c.get(crate::js_string!("name"), context).ok())
+                        .map(|n| n.display().to_string())
+                        .unwrap_or_default();
+                    format!("[object {ctor}]")
+                }
+                None => {
+                    let s = v.display().to_string();
+                    s.chars().take(40).collect()
+                }
+            }
+        };
+        let this = describe(&this, context);
+        let args: Vec<String> = args.iter().map(|a| describe(a, context)).collect();
+        JsNativeError::typ()
+            .with_message(format!(
+                "not a callable function ({}, last key read {:?}) on {this} with ({})",
+                func.display(),
+                crate::vm::LAST_KEY.with(|k| k.borrow().clone()),
+                args.join(", ")
+            ))
             .into()
     }
 }

@@ -222,29 +222,6 @@
     // Dates' constructor is the Date pages see (`d.constructor === Date`).
     Object.defineProperty(NativeDate.prototype, "constructor", { value: global.Date, writable: true, configurable: true });
   }
-  // Boa prints classes as `function X() { [native code] }`; frameworks tell
-  // classes from factories by the source starting with `class`. Calling a
-  // class without `new` throws before running anything, so that tells.
-  {
-    const toString = Function.prototype.toString;
-    const classes = new WeakMap();
-    const isClass = (f) => {
-      let known = classes.get(f);
-      if (known === undefined) {
-        try { Reflect.apply(f, undefined, []); known = false; } catch (e) { known = e instanceof TypeError && /class constructor/.test(e.message); }
-        classes.set(f, known);
-      }
-      return known;
-    };
-    Object.defineProperty(Function.prototype, "toString", {
-      configurable: true, writable: true,
-      value: function () {
-        const text = toString.call(this);
-        if (typeof this === "function" && this.prototype && text.endsWith("{ [native code] }") && isClass(this)) return "class " + (this.name || "") + " { [native code] }";
-        return text;
-      },
-    });
-  }
   legacy(Object.prototype, "__defineGetter__", function (k, fn) { Object.defineProperty(this, k, { get: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__defineSetter__", function (k, fn) { Object.defineProperty(this, k, { set: fn, configurable: true, enumerable: true }); });
   legacy(Object.prototype, "__lookupGetter__", function (k) { const d = Object.getOwnPropertyDescriptor(this, k); return d && d.get; });

@@ -306,6 +306,22 @@ fn present(
             }
         }
 
+        // A sound device that stopped asking for sound (asleep, unplugged,
+        // stuck) keeps no time: go on by the wall clock, without sound, as
+        // with no device at all.
+        if playing
+            && let Some(s) = &sound
+            && s.buffered() > 0.0
+            && s.silent_for() > Duration::from_millis(600)
+        {
+            let t = now(&clock, &sound);
+            eprintln!("media: the sound device stopped asking for sound; keeping time by the clock");
+            sound = None;
+            clock.base = t;
+            clock.since = Some(Instant::now());
+            heard_until = t;
+        }
+
         // Take decoded outputs while short of them.
         loop {
             let audio_short = match &sound {

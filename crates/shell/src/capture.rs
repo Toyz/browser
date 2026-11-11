@@ -56,6 +56,9 @@ Environment:
   FEATHER_DEBUG_Z        Log stacking (z-index) priorities
   BROWSER_DEBUG          Log navigation, clicks and script timing
   MEDIA_MUTE             Play media silently
+  JS_TRACE_ERRORS        Log every error the script engine raises (caught
+                         or not), once each, with where
+  JS_DUMP_EVAL=DIR       Save each large eval()'d source to DIR
   FEATHER_NO_CULL        Build every box each frame, off screen or not
   FEATHER_DEBUG_CULL     Log how many boxes were far off screen each frame
 ";

@@ -31,6 +31,8 @@ pub struct ClassDeclaration {
 
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) name_scope: Scope,
+    /// (Feather) The source text's span (empty when unknown).
+    linear_span: LinearSpanIgnoreEq,
 }
 
 impl ClassDeclaration {
@@ -49,7 +51,24 @@ impl ClassDeclaration {
             constructor,
             elements,
             name_scope: Scope::default(),
+            linear_span: LinearSpan::new(LinearPosition::new(0), LinearPosition::new(0)).into(),
         }
+    }
+
+    /// (Feather) With the span of its source text (`toString()` gives it).
+    #[inline]
+    #[must_use]
+    pub const fn with_linear_span(mut self, span: LinearSpan) -> Self {
+        self.linear_span = LinearSpanIgnoreEq(span);
+        self
+    }
+
+    /// (Feather) The span of its source text, if known.
+    #[inline]
+    #[must_use]
+    pub fn linear_span(&self) -> Option<LinearSpan> {
+        let span = self.linear_span.0;
+        (span.start().pos() < span.end().pos()).then_some(span)
     }
 
     /// Returns the name of the class declaration.
@@ -179,6 +198,8 @@ pub struct ClassExpression {
 
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) name_scope: Option<Scope>,
+    /// (Feather) The source text's span (empty when unknown).
+    linear_span: LinearSpanIgnoreEq,
 }
 
 impl ClassExpression {
@@ -205,7 +226,24 @@ impl ClassExpression {
             elements,
             span,
             name_scope,
+            linear_span: LinearSpan::new(LinearPosition::new(0), LinearPosition::new(0)).into(),
         }
+    }
+
+    /// (Feather) With the span of its source text (`toString()` gives it).
+    #[inline]
+    #[must_use]
+    pub const fn with_linear_span(mut self, span: LinearSpan) -> Self {
+        self.linear_span = LinearSpanIgnoreEq(span);
+        self
+    }
+
+    /// (Feather) The span of its source text, if known.
+    #[inline]
+    #[must_use]
+    pub fn linear_span(&self) -> Option<LinearSpan> {
+        let span = self.linear_span.0;
+        (span.start().pos() < span.end().pos()).then_some(span)
     }
 
     /// Returns the name of the class expression.

@@ -11,6 +11,10 @@ fn get_by_name<const LENGTH: bool>(
     (dst, object, receiver, index): (RegisterOperand, &JsValue, &JsValue, IndexOperand),
     context: &mut Context,
 ) -> JsResult<()> {
+    if *crate::vm::TRACE_ERRORS {
+        let name = context.vm.frame().code_block.ic[usize::from(index)].name.to_std_string_escaped();
+        crate::vm::LAST_KEY.with(|k| *k.borrow_mut() = name);
+    }
     if LENGTH {
         if let Some(object) = object.as_object()
             && object.is_array()
@@ -93,6 +97,9 @@ fn get_by_value<const PUSH_KEY: bool>(
     let base = context.vm.get_register(object.into()).clone();
     let object = base.base_class(context)?;
     let key_value = key_value.to_property_key(context)?;
+    if *crate::vm::TRACE_ERRORS {
+        crate::vm::LAST_KEY.with(|k| *k.borrow_mut() = key_value.to_string());
+    }
 
     // Fast Path
     //

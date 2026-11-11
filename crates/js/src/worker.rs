@@ -474,6 +474,7 @@ fn install_scope(cx: &mut Context, natives: &JsObject, setup: &Setup, clock: Rc<
     }
     let fire_timer = natives.get(js_string!("fireTimer"), cx).ok().and_then(|f| f.as_object()).expect("timers installed");
     global.set(js_string!("self"), global.clone(), false, cx).ok();
+    crate::message_channel::install(cx);
     for name in ["onmessage", "onerror", "onmessageerror"] {
         global.set(JsString::from(name), JsValue::null(), false, cx).ok();
     }

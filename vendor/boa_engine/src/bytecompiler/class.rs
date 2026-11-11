@@ -45,6 +45,8 @@ pub(crate) struct ClassSpec<'a> {
     elements: &'a [ClassElement],
     has_binding_identifier: bool,
     name_scope: Option<&'a Scope>,
+    /// (Feather) The class's source text span (`toString()` gives it).
+    linear_span: Option<boa_ast::LinearSpan>,
 }
 
 impl<'a> From<&'a ClassDeclaration> for ClassSpec<'a> {
@@ -56,6 +58,7 @@ impl<'a> From<&'a ClassDeclaration> for ClassSpec<'a> {
             elements: class.elements(),
             has_binding_identifier: true,
             name_scope: Some(class.name_scope()),
+            linear_span: class.linear_span(),
         }
     }
 }
@@ -69,6 +72,7 @@ impl<'a> From<&'a ClassExpression> for ClassSpec<'a> {
             elements: class.elements(),
             has_binding_identifier: class.name().is_some(),
             name_scope: class.name_scope(),
+            linear_span: class.linear_span(),
         }
     }
 }
@@ -92,8 +96,12 @@ impl ByteCompiler<'_> {
 
         let outer_scope = self.push_declarative_scope(class.name_scope);
 
-        // The new span is not the same as the parent `ByteCompiler` have.
-        let spanned_source_text = self.spanned_source_text.clone_only_source();
+        // The new span is not the same as the parent `ByteCompiler` have:
+        // (Feather) the class's own, so `toString()` gives its source.
+        let spanned_source_text = match class.linear_span {
+            Some(span) => crate::SpannedSourceText::new(self.source_text(), Some(span)),
+            None => self.spanned_source_text.clone_only_source(),
+        };
         let mut compiler = ByteCompiler::new(
             class_name.clone(),
             true,

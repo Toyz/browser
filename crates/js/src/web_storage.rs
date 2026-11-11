@@ -115,6 +115,8 @@ fn storage(area: Area, cx: &mut Context) -> JsResult<JsValue> {
         .function(key, js_string!("key"), 1)
         .accessor(js_string!("length"), Some(length), None, Attribute::CONFIGURABLE)
         .build();
+    // (A proxy's prototype is its target's: `localStorage instanceof Storage`.)
+    target.set_prototype(Some(crate::interfaces::interface(cx, "Storage")));
     let proxy = JsProxyBuilder::new(target)
         .get(trap_get)
         .set(trap_set)
