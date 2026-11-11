@@ -318,27 +318,49 @@ fn start(node: NodeId, generation: u32, url: url::Url, hint: Option<String>, cx:
         feeder.finish();
     } else {
         let feed = feeder.clone();
+        // Without `crossorigin`, a media element's fetch is no-cors: the
+        // response is opaque to scripts, but the element plays it (through
+        // the script-facing path it came with no body: GitHub's hero
+        // video, cross-origin, "failed to load"). With it, CORS applies.
+        let cors = has_attr(node, "crossorigin", cx);
         let req = crate::cors::ScriptRequest {
             method: "GET".into(),
             url: url.clone(),
             headers: Vec::new(),
             body: None,
-            mode: "no-cors".into(),
+            mode: if cors { "cors" } else { "no-cors" }.into(),
             credentials: "include".into(),
         };
         std::thread::Builder::new()
             .name("feather-media-fetch".into())
             .spawn(move || {
                 let ok = std::cell::Cell::new(true);
-                let result = crate::cors::fetch_streaming(
-                    &page,
-                    req,
-                    |head| ok.set((200..300).contains(&head.status)),
-                    |chunk| {
-                        feed.push(chunk);
-                        ok.get() && !feed.abandoned()
-                    },
-                );
+                let result = if cors || (url.scheme() == "file" && page.scheme() != "file") {
+                    crate::cors::fetch_streaming(
+                        &page,
+                        req,
+                        |head| ok.set((200..300).contains(&head.status)),
+                        |chunk| {
+                            feed.push(chunk);
+                            ok.get() && !feed.abandoned()
+                        },
+                    )
+                } else {
+                    let http = net::HttpRequest { method: "GET".into(), url: url.clone(), headers: Vec::new(), body: None, cookies: true };
+                    net::request_streaming(
+                        &http,
+                        |head| {
+                            ok.set((200..300).contains(&head.status));
+                            ok.get()
+                        },
+                        |chunk| {
+                            feed.push(chunk);
+                            !feed.abandoned()
+                        },
+                    )
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:#}"))
+                };
                 let ok = ok.get();
                 if debug {
                     eprintln!("js: media {url}: {:?} ({} bytes)", result.as_ref().map(|_| ok), feed.progress().0);
