@@ -161,36 +161,64 @@ pub fn patch(
     let mut styles = Styles::new(doc, styler);
     let mut changes: Changes = HashMap::new();
     let mut changed: Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)> = Vec::new();
-    // Blocks gaining or losing a background: fine for a box, but a container
-    // that was split into rows is drawn differently with one (as a wrapper).
     let mut appearing: Vec<NodeId> = Vec::new();
     for (&id, old_style) in affected.iter().zip(&before) {
         let new_style = styles.get(id);
-        if *new_style == **old_style {
-            continue;
+        if let Err(why) = paint_only(doc, id, old_style, &new_style, &mut changes, &mut changed, &mut appearing) {
+            return Patch::NeedsRestyle(why);
         }
-        let mut probe = (*new_style).clone();
-        copy_paint(&mut probe, old_style);
-        if probe != **old_style {
-            if std::env::var_os("BROWSER_DEBUG").is_some() {
-                eprintln!("hover: layout change on {:?}: {}", doc.element(id).map(|e| e.name.local.to_string()), style_diff(old_style, &probe));
-            }
-            return Patch::NeedsRestyle("layout property changed");
-        }
-        // Inline boxes' backgrounds and borders are baked into their
-        // paragraph's decorations (which don't know their element).
-        if new_style.display == Display::Inline
-            && (new_style.painted_background() != old_style.painted_background()
-                || (new_style.has_border() && new_style.border_color != old_style.border_color))
-        {
-            return Patch::NeedsRestyle("inline box background");
-        }
-        if new_style.painted_background().is_some() != old_style.painted_background().is_some() {
-            appearing.push(id);
-        }
-        changed.push((id, old_style.clone(), new_style.clone()));
-        changes.insert((id, 0), new_style);
     }
+    // `a:hover::after { content: "→" }` and friends.
+    if pseudos(&roots, &mut styles) != before_pseudo {
+        return Patch::NeedsRestyle("::before/::after changed");
+    }
+    finish(layout, changes, changed, &appearing)
+}
+
+/// One element restyled from `old_style` to `new_style`: noted in `changes`
+/// if only how it's painted changed, else why it can't be patched.
+fn paint_only(
+    doc: &Document,
+    id: NodeId,
+    old_style: &Arc<ComputedStyle>,
+    new_style: &Arc<ComputedStyle>,
+    changes: &mut Changes,
+    changed: &mut Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)>,
+    appearing: &mut Vec<NodeId>,
+) -> Result<(), &'static str> {
+    if **new_style == **old_style {
+        return Ok(());
+    }
+    let mut probe = (**new_style).clone();
+    copy_paint(&mut probe, old_style);
+    if moves_only(old_style, new_style) {
+        probe.inset = old_style.inset;
+    }
+    if probe != **old_style {
+        if std::env::var_os("BROWSER_DEBUG").is_some() {
+            eprintln!("patch: layout change on {:?}: {}", doc.element(id).map(|e| e.name.local.to_string()), style_diff(old_style, &probe));
+        }
+        return Err("layout property changed");
+    }
+    // Inline boxes' backgrounds and borders are baked into their
+    // paragraph's decorations (which don't know their element).
+    if new_style.display == Display::Inline
+        && (new_style.painted_background() != old_style.painted_background() || (new_style.has_border() && new_style.border_color != old_style.border_color))
+    {
+        return Err("inline box background");
+    }
+    if new_style.painted_background().is_some() != old_style.painted_background().is_some() {
+        appearing.push(id);
+    }
+    changed.push((id, old_style.clone(), new_style.clone()));
+    changes.insert((id, 0), new_style.clone());
+    Ok(())
+}
+
+/// The patch for these changes, once each was found paint-only.
+fn finish(layout: &LayoutTree, changes: Changes, changed: Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)>, appearing: &[NodeId]) -> Patch {
+    // Blocks gaining or losing a background: fine for a box, but a container
+    // that was split into rows is drawn differently with one (as a wrapper).
     if !appearing.is_empty() {
         let mut boxes = HashSet::new();
         for row in &layout.rows {
@@ -202,18 +230,46 @@ pub fn patch(
             return Patch::NeedsRestyle("background on a split container");
         }
     }
-    // `a:hover::after { content: "→" }` and friends.
-    if pseudos(&roots, &mut styles) != before_pseudo {
-        return Patch::NeedsRestyle("::before/::after changed");
-    }
     if changes.is_empty() {
         return Patch::Unchanged;
     }
-
     match apply(layout, &changes) {
         Some(tree) => Patch::Painted(tree, changed),
         None => Patch::Unchanged,
     }
+}
+
+/// The new styles of a DOM patch's elements, each with its parent's (what
+/// the style cache keeps).
+pub type Restyled = Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)>;
+
+/// Patch `layout`, built from `old`, for `new`: the same document but for
+/// some elements' attributes (`StyleCache::attribute_restyle`), with
+/// `elements` the ones to restyle. Each is styled in both; if only paint
+/// changed, that's copied into the layout (as for `:hover`), with no box
+/// building and nothing to re-measure. Also the elements' new styles.
+pub fn patch_dom(layout: &LayoutTree, old: &Document, new: &Document, styler: &Styler, elements: &[NodeId]) -> (Patch, Restyled) {
+    let mut before = Styles::new(old, styler);
+    let mut after = Styles::new(new, styler);
+    let mut changes: Changes = HashMap::new();
+    let mut changed = Vec::new();
+    let mut appearing = Vec::new();
+    let mut restyled = Vec::with_capacity(elements.len());
+    for &id in elements {
+        let (old_style, new_style) = (before.get(id), after.get(id));
+        if let Err(why) = paint_only(new, id, &old_style, &new_style, &mut changes, &mut changed, &mut appearing) {
+            return (Patch::NeedsRestyle(why), Vec::new());
+        }
+        let parent = match new.parent(id) {
+            Some(p) if new.element(p).is_some() => after.get(p),
+            _ => after.root_parent.clone(),
+        };
+        restyled.push((id, parent, new_style));
+    }
+    if pseudos(elements, &mut before) != pseudos(elements, &mut after) {
+        return (Patch::NeedsRestyle("::before/::after changed"), Vec::new());
+    }
+    (finish(layout, changes, changed, &appearing), restyled)
 }
 
 /// Copy these elements' paint properties into the layout (`None`: none of
@@ -408,7 +464,18 @@ fn para_nodes(p: &Paragraph, out: &mut HashSet<NodeId>) {
 fn patched(style: &Arc<ComputedStyle>, new: &ComputedStyle) -> Arc<ComputedStyle> {
     let mut s = (**style).clone();
     copy_paint(&mut s, new);
+    if moves_only(style, new) {
+        s.inset = new.inset;
+    }
     Arc::new(s)
+}
+
+/// Whether `top`/`left`/... changing between these just moves the box: a
+/// relatively positioned one is only shifted, an absolutely positioned one
+/// is out of the flow (and laid out from its style each frame), so nothing
+/// else moves. (A slider's knob at `left: 93px`, many times a second.)
+fn moves_only(old: &ComputedStyle, new: &ComputedStyle) -> bool {
+    old.position == new.position && matches!(new.position, style::Position::Absolute | style::Position::Relative)
 }
 
 fn row_mentions(row: &Row, ch: &Changes) -> bool {
@@ -536,6 +603,69 @@ mod tests {
             n = doc.parent(i);
         }
         Arc::new(state)
+    }
+
+    /// `doc` with `id`'s `style` attribute set to `value`.
+    fn restyled(doc: &Document, id: &str, value: &str) -> Document {
+        let mut new = doc.clone();
+        let n = find(&new, id);
+        let e = new.element_mut(n).unwrap();
+        e.attrs.iter_mut().find(|a| &*a.name.local == "style").expect("a style attribute").value = value.into();
+        new
+    }
+
+    #[test]
+    fn script_style_changes_patch_in_place() {
+        let (doc, styles) = setup(
+            r#"<div style="position: relative; height: 40px"><div id="bar" style="transform: scaleX(0.1); height: 4px; background: red"></div>
+               <div id="knob" style="position: absolute; left: 10px; top: 0; width: 8px; height: 8px; background: white"></div></div><p>after</p>"#,
+        );
+        let env = style::MediaEnv::default();
+        let state = Arc::new(ElementState::default());
+        let styler = styles.styler_with_state(env, state.clone());
+        let layout = crate::build(&doc, &styler);
+
+        // A progress bar's transform and a knob's `left`: patched, as built afresh.
+        let new = restyled(&restyled(&doc, "bar", "transform: scaleX(0.6); height: 4px; background: red"), "knob", "position: absolute; left: 90px; top: 0; width: 8px; height: 8px; background: white");
+        let elements = vec![find(&new, "bar"), find(&new, "knob")];
+        let (Patch::Painted(patched, changed), restyled_styles) = patch_dom(&layout, &doc, &new, &styler, &elements) else {
+            panic!("expected a paint-only patch");
+        };
+        assert_eq!(changed.len(), 2);
+        assert_eq!(restyled_styles.len(), 2);
+        assert_eq!(patched.rows, crate::build(&new, &styler).rows);
+
+        // A size: needs building.
+        let taller = restyled(&doc, "bar", "transform: scaleX(0.1); height: 40px; background: red");
+        assert!(matches!(patch_dom(&layout, &doc, &taller, &styler, &[find(&taller, "bar")]).0, Patch::NeedsRestyle(_)));
+    }
+
+    #[test]
+    fn only_restyling_attribute_changes_are_patch_candidates() {
+        let (doc, styles) = setup(r#"<div id="a" class="x">text</div><img id="i" src="/a.png"><p id="p">para</p>"#);
+        let env = style::MediaEnv::default();
+        let state = Arc::new(ElementState::default());
+        let doc = Arc::new(doc);
+        let mut cache = style::StyleCache::default();
+        let session = cache.begin(&styles, &env, doc.clone(), state.clone());
+        let (_, session) = crate::build_cached(&doc, &styles.styler_with_state(env, state.clone()), &Default::default(), Some(session));
+        cache.finish(session.unwrap());
+
+        let mut classed = (*doc).clone();
+        let a = find(&classed, "a");
+        classed.element_mut(a).unwrap().attrs.iter_mut().find(|at| &*at.name.local == "class").unwrap().value = "y".into();
+        let found = cache.attribute_restyle(&styles, &env, &doc, &Arc::new(classed), &state, 100);
+        assert!(found.is_some_and(|e| e.contains(&a)));
+
+        // What an image shows, and new children: built.
+        let mut src = (*doc).clone();
+        let i = find(&src, "i");
+        src.element_mut(i).unwrap().attrs.iter_mut().find(|at| &*at.name.local == "src").unwrap().value = "/b.png".into();
+        assert!(cache.attribute_restyle(&styles, &env, &doc, &Arc::new(src), &state, 100).is_none());
+        let mut grown = (*doc).clone();
+        let p = find(&grown, "p");
+        grown.append_text(p, " more");
+        assert!(cache.attribute_restyle(&styles, &env, &doc, &Arc::new(grown), &state, 100).is_none());
     }
 
     #[test]

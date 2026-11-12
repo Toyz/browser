@@ -320,6 +320,116 @@ impl StyleCache {
     pub fn finish(&mut self, session: StyleSession) {
         self.last = Some(Built { key: session.key, doc: session.doc, state: session.state, styles: session.styles });
     }
+
+    /// The elements to restyle going from `installed` (the document the
+    /// shown layout was built from, and the last build's) to `doc`, when
+    /// all that changed is a few elements' attributes of the kind that only
+    /// restyle (`style`, `class`, `aria-*`, ...): same tree, same text, same
+    /// interaction state, viewport and stylesheets. In document order;
+    /// `None` if there's more to it (or more than `limit` elements).
+    /// Scripts that animate by setting styles (a video's progress bar, many
+    /// times a second) are restyled this way, not as a whole page.
+    pub fn attribute_restyle(&self, data: &StyleData, env: &MediaEnv, installed: &Arc<Document>, doc: &Arc<Document>, state: &Arc<ElementState>, limit: usize) -> Option<Vec<NodeId>> {
+        let debug = std::env::var_os("FEATHER_STYLE_DEBUG").is_some();
+        let last = self.last.as_ref()?;
+        if !Arc::ptr_eq(&last.doc, installed) || !last.key.same(&Key::of(data, env, doc)) || *last.state != **state || last.doc.root() != doc.root() {
+            if debug {
+                eprintln!("attribute restyle: not the last build's document, styles or state ({} {} {})", Arc::ptr_eq(&last.doc, installed), last.key.same(&Key::of(data, env, doc)), *last.state == **state);
+            }
+            return None;
+        }
+        if let Err(why) = same_but_restyling_attributes(&last.doc, doc) {
+            if debug {
+                eprintln!("attribute restyle: {why}");
+            }
+            return None;
+        }
+        let dirty = invalidated(&last.doc, doc, &last.state, state, data).ok()?;
+        if dirty.len() > limit * 2 {
+            return None;
+        }
+        let elements: Vec<NodeId> = doc.descendants(doc.root()).filter(|n| dirty.contains(n) && doc.element(*n).is_some()).collect();
+        (elements.len() <= limit).then_some(elements)
+    }
+
+    /// After [`StyleCache::attribute_restyle`]'s elements were restyled
+    /// (and the layout patched): `doc` is the last build's document, with
+    /// these elements' styles (each with its parent's).
+    pub fn advance(&mut self, doc: Arc<Document>, styles: Vec<(NodeId, Arc<ComputedStyle>, Arc<ComputedStyle>)>) {
+        if let Some(last) = &mut self.last {
+            last.doc = doc;
+            for (id, parent, style) in styles {
+                last.styles.insert(id, Entry { parent, style });
+            }
+        }
+    }
+}
+
+/// Attributes whose changes act on the page only through styles (selectors
+/// and the `style` attribute), never through what boxes are built.
+fn restyles_only(name: &str) -> bool {
+    matches!(name, "style" | "class" | "role" | "tabindex" | "hidden" | "title" | "jsaction" | "jslog" | "jscontroller" | "jsname" | "jsmodel" | "jsdata")
+        || name.starts_with("aria-")
+        || name.starts_with("data-")
+}
+
+/// Whether `new` is `old` with only [`restyles_only`] attributes changed,
+/// and none on elements whose attributes say what they show (images,
+/// media, frames, form controls, SVG).
+fn same_but_restyling_attributes(old: &Document, new: &Document) -> Result<(), String> {
+    let tree_of = |doc: &Document, n: NodeId| doc.shadow.as_ref().and_then(|s| s.tree.get(&n).copied());
+    // A `<style>` or `<script>` given the same text again (new text nodes,
+    // same contents): nothing changed. (Different CSS changes the style
+    // key, so it never gets here.)
+    let text_of = |doc: &Document, n: NodeId| -> String { doc.children(n).iter().filter_map(|&c| doc.get(c).and_then(|c| c.text())).collect() };
+    let opaque = |doc: &Document, n: NodeId| doc.element(n).is_some_and(|e| e.is_html() && matches!(&*e.name.local, "style" | "script"));
+    let mut stack = vec![new.root()];
+    while let Some(n) = stack.pop() {
+        let (Some(a), Some(b)) = (old.get(n), new.get(n)) else { return Err("a node added".into()) };
+        if old.parent(n) != new.parent(n) || tree_of(old, n) != tree_of(new, n) {
+            return Err("a node moved".into());
+        }
+        if opaque(new, n) && old.children(n) != new.children(n) {
+            if text_of(old, n) != text_of(new, n) {
+                return Err(format!("<{}> text changed", new.element(n).map(|e| e.name.local.to_string()).unwrap_or_default()));
+            }
+        } else {
+            if old.children(n) != new.children(n) {
+                return Err(format!("children changed in <{}>", new.element(n).map(|e| e.name.local.to_string()).unwrap_or_default()));
+            }
+            stack.extend(new.children(n).iter().copied());
+        }
+        match (old.element(n), new.element(n)) {
+            (Some(x), Some(y)) => {
+                if x.name != y.name {
+                    return Err("an element renamed".into());
+                }
+                if x.attrs != y.attrs {
+                    let local = &*y.name.local;
+                    let shows = matches!(local, "img" | "picture" | "source" | "video" | "audio" | "iframe" | "frame" | "object" | "embed" | "canvas" | "input" | "textarea" | "select" | "option" | "button" | "progress" | "meter" | "slot" | "template")
+                        || !y.is_html();
+                    if shows {
+                        return Err(format!("attributes of <{}>", y.name.local));
+                    }
+                    let differ = |p: &[page::Attribute], q: &[page::Attribute]| {
+                        p.iter().filter(|at| !q.iter().any(|bt| bt.name == at.name && bt.value == at.value)).find(|at| !restyles_only(&at.name.local)).map(|at| at.name.local.to_string())
+                    };
+                    if let Some(name) = differ(&x.attrs, &y.attrs).or_else(|| differ(&y.attrs, &x.attrs)) {
+                        return Err(format!("{name}= on <{}>", y.name.local));
+                    }
+                }
+            }
+            (None, None) => {
+                if a.text() != b.text() {
+                    return Err(format!("text changed in <{}>", new.parent(n).and_then(|p| new.element(p)).map(|e| e.name.local.to_string()).unwrap_or_default()));
+                }
+            }
+            _ => return Err("a node replaced".into()),
+        }
+    }
+    // (Every node's children are the same lists, from the root down: no
+    // node was removed either, but in a `<style>` or `<script>`.)
+    Ok(())
 }
 
 impl StyleSession {

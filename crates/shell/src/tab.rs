@@ -151,6 +151,9 @@ pub struct Tab {
     doc_gen: u64,
     installed_gen: u64,
     installed_frame: u64,
+    /// The document the shown layout was built from (by a restyle), for
+    /// patching it when scripts change only styles.
+    installed_doc: Option<Arc<page::Document>>,
     /// Scripts waiting for a document to be laid out and painted (a
     /// forced layout): the reply, and the document it waits for.
     after_layout: Vec<(std::sync::mpsc::Sender<()>, u64)>,
@@ -332,6 +335,7 @@ impl Tab {
             doc_gen: 0,
             installed_gen: 0,
             installed_frame: 0,
+            installed_doc: None,
             after_layout: Vec::new(),
             bounds_seen: Rc::default(),
             layout_sent: HashMap::new(),
@@ -665,6 +669,7 @@ impl Tab {
         self.atlas_drops.extend(self.canvas_frames.drain().map(|(_, f)| f));
         self.page = Some(page);
         self.page_gen += 1;
+        self.installed_doc = None;
         // Work for the previous page must not land on this one.
         self._restyle = None;
         self.restyle_busy = false;
@@ -1737,10 +1742,42 @@ impl Tab {
             let kept = keep.clone();
             if let Ok(Some(())) = this.update(cx, |this, _| this.perf.as_mut().map(|p| p.restyles += 1)) {}
             let Ok(cache) = this.update(cx, |this, _| this.style_cache.clone()) else { return };
-            let (layout, changed, ends) = loader::deep({
+            let Ok(installed) = this.update(cx, |this, _| this.installed_doc.clone()) else { return };
+            let built_from = doc.clone();
+            let (layout, changed, ends, painted) = loader::deep({
                 let state = state.clone();
                 move || {
                     let t = std::time::Instant::now();
+                    // Only some elements' styles changed (a progress bar's
+                    // `transform`, a class toggled): restyle just those, and
+                    // if only paint changed, patch the layout: no boxes
+                    // built, nothing re-measured.
+                    if let (Some(installed), Some(old)) = (&installed, &old)
+                        && std::env::var_os("FEATHER_NO_STYLE_PATCH").is_none()
+                    {
+                        let elements = cache.lock().unwrap_or_else(|e| e.into_inner()).attribute_restyle(&styles, &env, installed, &doc, &state, 2000);
+                        if let Some(elements) = elements {
+                            let styler = styles.styler_with_state(env.clone(), state.clone());
+                            let (patch, restyled) = render::hover::patch_dom(old, installed, &doc, &styler, &elements);
+                            let result = match patch {
+                                render::hover::Patch::Painted(layout, changed) => Some((layout, changed)),
+                                render::hover::Patch::Unchanged => Some(((**old).clone(), Vec::new())),
+                                render::hover::Patch::NeedsRestyle(why) => {
+                                    if std::env::var_os("BROWSER_DEBUG").is_some() {
+                                        eprintln!("perf: style patch of {} elements not possible: {why}", elements.len());
+                                    }
+                                    None
+                                }
+                            };
+                            if let Some((layout, changed)) = result {
+                                cache.lock().unwrap_or_else(|e| e.into_inner()).advance(doc.clone(), restyled);
+                                if std::env::var_os("BROWSER_DEBUG").is_some() {
+                                    eprintln!("perf: style patch of {} elements ({} changed) in {:?}", elements.len(), changed.len(), t.elapsed());
+                                }
+                                return (layout, Vec::new(), None, Some(changed));
+                            }
+                        }
+                    }
                     let session = cache.lock().unwrap_or_else(|e| e.into_inner()).begin(&styles, &env, doc.clone(), state.clone());
                     let (mut layout, session) = render::build_cached(&doc, &styles.styler_with_state(env, state), &keep, Some(session));
                     let built = t.elapsed();
@@ -1759,7 +1796,7 @@ impl Tab {
                         eprintln!("forced: built doc {doc_gen} at {:?}", crate::started().elapsed());
                         eprintln!("perf: restyle+build {} rows in {:?} (style {:?}, {reused} reused, {computed} computed {why}; +{:?} diffing, ends {ends:?})", layout.rows.len(), built, Duration::from_nanos(render::boxes::STYLE_NS.with(|c| c.get())), t.elapsed() - built);
                     }
-                    (layout, changed, ends)
+                    (layout, changed, ends, None)
                 }
             })
             .await;
@@ -1802,6 +1839,7 @@ impl Tab {
                 page.layout = Arc::new(layout);
                 page.signature = signature;
                 this.installed_gen = doc_gen;
+                this.installed_doc = Some(built_from);
                 this.installed_frame = this.bounds_frame.get();
                 this.layout_keep = kept;
                 this.element_state = state;
@@ -1838,6 +1876,10 @@ impl Tab {
                         offset_in_item: if top.item_ix == 0 { top.offset_in_item } else { px(0.) },
                     });
                     this.list_state.scroll_to(to);
+                }
+                // Patched styles transition as a hover's do.
+                if let Some(changed) = painted {
+                    this.start_transitions(changed);
                 }
                 this.load_images(cx);
                 this.sync_keyframes(window);
