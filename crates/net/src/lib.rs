@@ -10,7 +10,17 @@ use std::sync::Arc;
 /// Largest document body we'll read, to keep a hostile page from eating memory.
 const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 
-const USER_AGENT: &str = concat!("Feather/", env!("CARGO_PKG_VERSION"));
+/// The `User-Agent` sent with every request, and what scripts read as
+/// `navigator.userAgent` (one string, as in every browser: sites compare
+/// the two). The usual shape (`Mozilla/5.0 (platform) AppleWebKit/…
+/// (KHTML, like Gecko) Chrome/… Safari/…`), which sites' browser checks
+/// expect, with Feather's own token at the end, as Edge (`Edg/`) and Opera
+/// (`OPR/`) add theirs: a bare `Feather/0.1.0` had Google Flights and
+/// Finance turn the browser away as unsupported.
+pub const USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Feather/",
+    env!("CARGO_PKG_VERSION")
+);
 
 /// A fetched document.
 #[derive(Debug, Clone)]
